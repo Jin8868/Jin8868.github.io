@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<search>
+  <entry>
+    <title>第一篇博客</title>
+    <url>/posts/ff05b5bf.html</url>
+    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
+]]></content>
+  </entry>
+  <entry>
+    <title></title>
+    <url>/css/style.css</url>
+    <content><![CDATA[#footer
+{
+    background: transparent;
+}
+
+.footer-other
+{
+    color: black !important;
+}]]></content>
+  </entry>
+</search>
