@@ -7,6 +7,26 @@
 ]]></content>
   </entry>
   <entry>
+    <title>Unity颜色空间:sRGB和Linear</title>
+    <url>/posts/b73f5a7a.html</url>
+    <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
+sRGB和Linear在物理世界中，如果光增加一倍，那么亮度也增加一倍，这是线性关系。但是在最早的显示器中，显示图像的时候，电压增加一倍，亮度并不是跟着增加一倍，而是呈亮度增加量等于电压增加量的2.2次幂的非线性关系:&nbsp;&nbsp;l_亮度&#x3D;u2.2&nbsp;&nbsp;&nbsp;&nbsp;(l ∈[0,1],u∈[0,1])2.2也叫做显示器的Gamma值。因为亮度0是黑，1是白，这种关系意味着当电压线性变化的时候，相对于真实的世界来说，亮度的变化在暗处黑的地方变换比较慢，暗占据数据范围更广，颜色整体偏暗。如图，直线代表物理世界的线性空间（Linear Space），下曲线是显示器输出的Gamma2.2空间（Gamma Space）。
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;横坐标表示电压，纵坐标表示亮度
+常情况下，人眼看物理世界感知到了正常的亮度。而如果显示器输出一个颜色后再被你看到，即相当于走了一次Gamma2.2曲线的调整，这下子颜色就变暗了。如果我们在显示器输出之前，做一个操作把显示器的Gamma2.2影响平衡掉，那就和人眼直接观察物理世界一样了！这个平衡的操作就叫做伽马校正。在数学上，伽马校正是一个约0.45的幂运算（和上面的2.2次幂互为逆运算）:&nbsp;&nbsp;Co &#x3D; Ci\1&#x2F;2.2
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;左(Gamma0.45) 中(Gamma2.2) 右(线性物理空间)
+Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的纹理如果是sRGB（Gamma0.45），那我们要进行一个操作转换到线性空间。这个操作叫做Remove Gamma Correction，在数学上是一个2.2的幂运算 。如果输入不是sRGB，而是已经在线性空间的纹理了呢？那就可以跳过Remove Gamma Correction了。注：美术输出资源时都是在sRGB空间的，但Normal Map等其他电脑计算出来的纹理则一般在线性空间，即Linear Texture。
+第二步，现在输入已经在线性空间了，那么进行Shader中光照、插值等计算后就是比较真实的结果了，如果不对sRGB进行Remove Gamma Correction直接就进入Shader计算，那算出来的就会不自然。
+第三步，Shader计算完成后，需要进行Gamma Correction，从线性空间变换到Gamma0.45空间，在数学上是一个约为0.45的幂运算。如果不进行Gamma Correction输出会怎么样？那显示器就会将颜色从线性空间转换到Gamma2.2空间，接着再被你看到，结果会更暗。我遇到问题的原因！
+第四步，经过了前面的Gamma Correction，显示器输出在了线性空间，这就和人眼看物理世界的过程是一样的了！
+问题解决知道了sRGB和Linear的底层原理和变暗的原因，那么解决方案也就清晰明了：因为相机是Linear空间，会对输入进行一次Gamma2.2的操作。如果我们这里想要看到正常的图片，就有两种解决方案：
+如果在运行时截图显示：对显示的Texuture2D，进行一次Gamma0.45去和Remove Gamma Correction的Gamma2.2抵消(因为我也是运行时改图，这也是我采用的方案)。最终效果
+如果是读取编辑器的图片：直接在Inspector面板取消sRGB选项，这样Unity就会把纹理资源用于Linear空间下，不在进行Remove Gamma Correction操作。
+Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
+
+参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
+]]></content>
+  </entry>
+  <entry>
     <title></title>
     <url>/css/style.css</url>
     <content><![CDATA[#footer
