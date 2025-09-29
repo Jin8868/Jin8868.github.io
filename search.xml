@@ -1,6 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
+    <title>Unity节点编辑器 -- 需求分析</title>
+    <url>/posts/4cce52e3.html</url>
+    <content><![CDATA[最近需求的思考最近工作上在处理项目内的引导系统，我之前的做法是根据策划的需求，通过继承引导基类实现具体子类的做法，来实现不同的引导。但是这样有一个缺点：所有的引导实现都基于我的硬编码，当引导的流程变更的时候，我代码的流程也需要跟着修改，非常麻烦。而且这些变更也仅仅是步骤改变，1-&gt;2-&gt;3变成了1-&gt;3-&gt;2，修改就是纯粹的体力活，非常的琐碎。然后最近在各种机缘巧合之下，接触到了节点编辑器，突然激发了我的灵感，要是我把引导的逻辑封装在一个Node里面，由策划自己去建立Node流程，就是完全由策划编辑，我提供具体的引导Node实现，完美解决。
+关于节点编辑器其实这个东西在已经应用非常广泛了，Unity的ShareGraph和UE的蓝图，都是节点编辑器的应用。而且在Unity上开源的节点编辑器框架也不少，比较出名的就有：xNode，NodeGraphProcessor。本来是打算直接使用这些框架，省下自己造轮子的时间，但是深入了解之后，发现这些框架为了通用性，代码都比较多且太重度了(我目前的需求根本用不上)。所以就想着自己造一个只提供流程的简单节点编辑器。
+编辑器需求首先，因为颜值问题节点编辑器我选择了基于Unity的GraphView实现。要实现的需求：1、GraphView的创建与资源的打开。2、Node的创建、连接。3、GraphView的保存、序列化&#x2F;反序列化。4、需要具有拓展性，为之后功能提供底层复用。
+代码结构因为编辑器窗口仅做显示和把数据保存，就只有model-view两层。model层为保存的Unity的so数据，view层则是解析so数据创建出对应的节点和连接。
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity节点编辑器 -- GraphView窗口</title>
+    <url>/posts/9891abd3.html</url>
+    <content><![CDATA[GraphView窗口创建GraphView有人叫视图，也有人叫黑板，后面统称为黑板。我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
+GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
+
+GraphView黑板黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面列出继承和实现。
+1.创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(           itemName,           action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),           action =&gt; DropdownMenuAction.Status.Normal       );    &#125;&#125;//通过反射获取菜单项数据 private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                     (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                     !t.IsAbstract &amp;&amp;                     !t.IsGenericType)                 .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                   &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;
+2.拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
+
+实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
+]]></content>
+  </entry>
+  <entry>
     <title>Unity颜色空间:sRGB和Linear</title>
     <url>/posts/b73f5a7a.html</url>
     <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
