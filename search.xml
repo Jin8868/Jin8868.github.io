@@ -36,21 +36,21 @@ shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#12
     <title>Unity的动态图集实现</title>
     <url>/posts/71da87fc.html</url>
     <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
-实现后的效果未使用动态图集使用动态图集
+性能优化测试效果未使用动态图集，2张图4个Draw Call。使用动态图集，2张图3个Drwa Call，图越多解决越多。
 动态图集原理动态图集的核心原理为：在运行时维护一张较大的纹理区域，在运行时动态地往纹理区域内添加或移除，现实上直接把纹理区域指定给RawIamge的texture然后设置其UV Rect即可。由于同时渲染的icon数量往往远远小于实际icon的资源数量，因此通常一张1024或者2048大小的动态图集即可以满足大多数的游戏需求。该方法的好处在于，内存在可控范围，并且icon可以共享纹理从而省draw call。下面详细介绍动态图集实现的技术细节。
 二维装箱算法因为放入的每张图片大小不一，所以高效的寻找图片在纹理区域中的位置，从而打到最大空间利用，是动态图集实现最为核心的问题。对于区域的增删查改，可以抽象成一个二维空间装箱操作，算法上有比较多的实现，有兴趣的可以了解这篇文章概述二维空间uv装箱算法：Shelf、Guillotine、MAXRECTS、Skyline。目前的几个算法都是在不重叠的前提下，尽可能大地利用空间，这是一个NP-hard问题，因此没有有效的算法可以解决所有情况。我这里选用的就是Max-Rect的BSSF最短边匹配优先。
 public IntRect Insert(int w, int h)&#123;    // 1. 找最佳空闲区域（最短边匹配优先 BSSF）    int bestIdx = -1;    int bestShort = int.MaxValue;    for (int i = 0; i &lt; m_freeRects.Count; i++)    &#123;        var free = m_freeRects[i];        if (w &lt;= free.width &amp;&amp; h &lt;= free.height)        &#123;            int leftover = Mathf.Min(free.width - w, free.height - h);            if (leftover &lt; bestShort)            &#123;                bestShort = leftover;                bestIdx = i;            &#125;        &#125;    &#125;    if (bestIdx &lt; 0) return null;    // 2. 放置    var best = m_freeRects[bestIdx];    var placed = new IntRect(best.x, best.y, w, h);    // 3. 裁剪所有重叠的空闲矩形    for (int i = m_freeRects.Count - 1; i &gt;= 0; i--)    &#123;        if (Overlaps(placed, m_freeRects[i]))        &#123;            SplitFreeRect(m_freeRects[i], placed);            m_freeRects.RemoveAt(i);        &#125;    &#125;    // 4. 去除冗余    RemoveRedundant();    return placed;&#125;/// &lt;summary&gt;/// 回收（释放）一个已放置的矩形区域，使其重新可用/// &lt;/summary&gt;/// &lt;param name=&quot;rect&quot;&gt;之前 Insert 返回的矩形&lt;/param&gt;public void Recycle(IntRect rect)&#123;    if (rect == null) return;    // 1. 边界校验    if (rect.x &lt; 0 || rect.y &lt; 0 || rect.right &gt; m_width || rect.top &gt; m_height)        return;    if (rect.width &lt;= 0 || rect.height &lt;= 0)        return;    // 2. 将释放区域加入空闲列表    m_freeRects.Add(new IntRect(rect.x, rect.y, rect.width, rect.height));    // 3. 合并空闲矩形    MergeFreeRects();    // 4. 去除冗余    RemoveRedundant();&#125;
 
 图片拷贝的API选择通过装箱算法知道了图片的位置和区域，第二个问题就是如何高效地把图片拷贝到对于的纹理中。在Unity中纹理的拷贝有两种方式：Graphics.CopyTexture和Texture.Get&#x2F;SetPixels
 Graphics.CopyTexture优点：1.首先第一个就是它是从GPU的显存到显存的直接拷贝，效率非常高。2.不需要勾选texture的read&#x2F;write enabled。由于是直接的显存拷贝，因此并不需要在系统内存里再存储一份texture数据。缺点：1.底层调用OpenGL接口glCopyImageSubData。该接口要求OpenGL4.3以上或者GL ES3.2以上才能支持。
-Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如上图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
+Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如下图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
 因为Texture.Get&#x2F;SetPixels有诸多的性能问题，Graphics.CopyTexture仅有一个支持API版本问题，并且对应的OpenGL4.3和GL ES3.2，为别IOS8（Iphone 5S）和Android 7.0(2016年发布)。已经是10年前的机型了，所以这里我直接选择了Graphics.CopyTexture。
 动态图集初始大小和区域满后的处理图集的初始大小可能纠结的只有初始太大，导致利用率低，这个根据项目实际使用情况分配就行了，建议初始大小设置成1024*1024。但是一张图如果放满了就有两种处理办法：纹理扩容和多张纹理。下面分类讨论这两种实现。
 纹理扩容图片扩容需要做3件事：1、开辟一张更大的纹理，把原纹理拷贝到大纹理中。2、更新所有图片的UV区域信息。3、更新场景中存在的所有RawIamge组件的UV Rect信息。这个方案的第二、第三步都是O(n)级别的复杂度，并且随着纹理的扩大n也越大，越扩容性能消耗越大。
 多张纹理多张纹理则是新建一张大小一致的纹理，这种做法不需要更新图片UV区域。在代码层面就要维护一个图片数组，每次有新图要加入时从数组中遍历得到一个空闲的纹理加入。同时因为提供的纹理不同，所以会多一些Draw Call的开销。
 综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
 代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
-项目完整代码链接：
+项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
 ]]></content>
   </entry>
   <entry>
