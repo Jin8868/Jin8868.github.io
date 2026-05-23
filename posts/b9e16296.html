@@ -1,0 +1,419 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover"><title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask | 穿越时空的思念</title><meta name="author" content="穿越时空的思念"><meta name="copyright" content="穿越时空的思念"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#ffffff"><meta name="description" content="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask 在 Unity 项目里，”等一段时间再做某件事”、”等加载完再回调”、”等动画播完再切场景” 这类需求几乎天天遇到。选型不当，轻则代码难读，重则 GC 卡顿、生命周期错乱、回调地狱。本文把目前主流的三种方案放在一起做一次彻底的对比。   引子：我们到底在解决什么问题Unity 的核心循环是单线程帧驱动的：所有游戏逻辑都">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask">
+<meta property="og:url" content="https://cyskdsn.top/posts/b9e16296.html">
+<meta property="og:site_name" content="穿越时空的思念">
+<meta property="og:description" content="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask 在 Unity 项目里，”等一段时间再做某件事”、”等加载完再回调”、”等动画播完再切场景” 这类需求几乎天天遇到。选型不当，轻则代码难读，重则 GC 卡顿、生命周期错乱、回调地狱。本文把目前主流的三种方案放在一起做一次彻底的对比。   引子：我们到底在解决什么问题Unity 的核心循环是单线程帧驱动的：所有游戏逻辑都">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://cyskdsn.top/img/Title/waitChoose.jpeg">
+<meta property="article:published_time" content="2026-05-23T04:20:00.000Z">
+<meta property="article:modified_time" content="2026-05-23T07:10:00.522Z">
+<meta property="article:author" content="穿越时空的思念">
+<meta property="article:tag" content="Unity">
+<meta property="article:tag" content="异步编程">
+<meta property="article:tag" content="协程">
+<meta property="article:tag" content="UniTask">
+<meta property="article:tag" content="性能优化">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://cyskdsn.top/img/Title/waitChoose.jpeg"><script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask",
+  "url": "https://cyskdsn.top/posts/b9e16296.html",
+  "image": "https://cyskdsn.top/img/Title/waitChoose.jpeg",
+  "datePublished": "2026-05-23T04:20:00.000Z",
+  "dateModified": "2026-05-23T07:10:00.522Z",
+  "author": [
+    {
+      "@type": "Person",
+      "name": "穿越时空的思念",
+      "url": "https://cyskdsn.top"
+    }
+  ]
+}</script><link rel="shortcut icon" href="/img/favicon.png"><link rel="canonical" href="https://cyskdsn.top/posts/b9e16296.html"><link rel="preconnect" href="//cdn.jsdelivr.net"/><link rel="manifest" href="/null"/><link rel="apple-touch-icon" sizes="180x180" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="32x32" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="16x16" href="/img/heaIcon16.ico"/><link rel="mask-icon" href="/img/heaIcon16.ico" color="#5bbad5"/><link rel="stylesheet" href="/css/index.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css"><script>
+    (() => {
+      
+    const saveToLocal = {
+      set: (key, value, ttl) => {
+        if (!ttl) return
+        const expiry = Date.now() + ttl * 86400000
+        localStorage.setItem(key, JSON.stringify({ value, expiry }))
+      },
+      get: key => {
+        const itemStr = localStorage.getItem(key)
+        if (!itemStr) return undefined
+        const { value, expiry } = JSON.parse(itemStr)
+        if (Date.now() > expiry) {
+          localStorage.removeItem(key)
+          return undefined
+        }
+        return value
+      }
+    }
+
+    window.btf = {
+      saveToLocal,
+      getScript: (url, attr = {}) => new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = url
+        script.async = true
+        Object.entries(attr).forEach(([key, val]) => script.setAttribute(key, val))
+        script.onload = script.onreadystatechange = () => {
+          if (!script.readyState || /loaded|complete/.test(script.readyState)) resolve()
+        }
+        script.onerror = reject
+        document.head.appendChild(script)
+      }),
+      getCSS: (url, id) => new Promise((resolve, reject) => {
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = url
+        if (id) link.id = id
+        link.onload = link.onreadystatechange = () => {
+          if (!link.readyState || /loaded|complete/.test(link.readyState)) resolve()
+        }
+        link.onerror = reject
+        document.head.appendChild(link)
+      }),
+      addGlobalFn: (key, fn, name = false, parent = window) => {
+        if (!false && key.startsWith('pjax')) return
+        const globalFn = parent.globalFn || {}
+        globalFn[key] = globalFn[key] || {}
+        globalFn[key][name || Object.keys(globalFn[key]).length] = fn
+        parent.globalFn = globalFn
+      }
+    }
+  
+      
+      const activateDarkMode = () => {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#0d0d0d')
+        }
+      }
+      const activateLightMode = () => {
+        document.documentElement.setAttribute('data-theme', 'light')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#ffffff')
+        }
+      }
+
+      btf.activateDarkMode = activateDarkMode
+      btf.activateLightMode = activateLightMode
+
+      const theme = saveToLocal.get('theme')
+    
+          theme === 'dark' ? activateDarkMode() : theme === 'light' ? activateLightMode() : null
+        
+      
+      const asideStatus = saveToLocal.get('aside-status')
+      if (asideStatus !== undefined) {
+        document.documentElement.classList.toggle('hide-aside', asideStatus === 'hide')
+      }
+    
+      
+    const detectApple = () => {
+      if (/iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('apple')
+      }
+    }
+    detectApple()
+  
+    })()
+  </script><script>const GLOBAL_CONFIG = {
+  root: '/',
+  algolia: undefined,
+  localSearch: {"path":"/search.xml","preload":false,"top_n_per_article":1,"unescape":false,"languages":{"hits_empty":"未找到符合您查询的内容：${query}","hits_stats":"共找到 ${hits} 篇文章"}},
+  translate: undefined,
+  highlight: {"plugin":"highlight.js","highlightCopy":true,"highlightLang":true,"highlightHeightLimit":false,"highlightFullpage":false,"highlightMacStyle":false},
+  copy: {
+    success: '复制成功',
+    error: '复制失败',
+    noSupport: '浏览器不支持'
+  },
+  relativeDate: {
+    homepage: false,
+    post: false
+  },
+  runtime: '',
+  dateSuffix: {
+    just: '刚刚',
+    min: '分钟前',
+    hour: '小时前',
+    day: '天前',
+    month: '个月前'
+  },
+  copyright: undefined,
+  lightbox: 'null',
+  Snackbar: undefined,
+  infinitegrid: {
+    js: 'https://cdn.jsdelivr.net/npm/@egjs/infinitegrid/dist/infinitegrid.min.js',
+    buttonText: '加载更多'
+  },
+  isPhotoFigcaption: false,
+  islazyloadPlugin: false,
+  isAnchor: false,
+  percent: {
+    toc: true,
+    rightside: false,
+  },
+  autoDarkmode: false
+}</script><script id="config-diff">var GLOBAL_CONFIG_SITE = {
+  title: 'Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask',
+  isHighlightShrink: false,
+  isToc: true,
+  pageType: 'post'
+}</script><link rel="stylesheet" href="/css/style.css"><meta name="generator" content="Hexo 7.3.0"></head><body><div id="sidebar"><div id="menu-mask"></div><div id="sidebar-menus"><div class="avatar-img text-center"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="site-data text-center"><a href="/archives/"><div class="headline">文章</div><div class="length-num">20</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">5</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div></div></div><div class="post" id="body-wrap"><header class="post-bg" id="page-header" style="background-image: url(/img/Title/waitChoose.jpeg);"><nav id="nav"><span id="blog-info"><a class="nav-site-title" href="/"><span class="site-name">穿越时空的思念</span></a><a class="nav-page-title" href="/"><span class="site-name">Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</span><span class="site-name"><i class="fa-solid fa-circle-arrow-left"></i><span>  返回首页</span></span></a></span><div id="menus"><div id="search-button"><span class="site-page social-icon search"><i class="fas fa-search fa-fw"></i><span> 搜索</span></span></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div><div id="toggle-menu"><span class="site-page"><i class="fas fa-bars fa-fw"></i></span></div></div></nav><div id="post-info"><h1 class="post-title">Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</h1><div id="post-meta"><div class="meta-firstline"><span class="post-meta-date"><i class="far fa-calendar-alt fa-fw post-meta-icon"></i><span class="post-meta-label">发表于</span><time class="post-meta-date-created" datetime="2026-05-23T04:20:00.000Z" title="发表于 2026-05-23 12:20:00">2026-05-23</time><span class="post-meta-separator">|</span><i class="fas fa-history fa-fw post-meta-icon"></i><span class="post-meta-label">更新于</span><time class="post-meta-date-updated" datetime="2026-05-23T07:10:00.522Z" title="更新于 2026-05-23 15:10:00">2026-05-23</time></span></div><div class="meta-secondline"><span class="post-meta-separator">|</span><span class="post-meta-wordcount"><i class="far fa-file-word fa-fw post-meta-icon"></i><span class="post-meta-label">总字数:</span><span class="word-count">3.7k</span><span class="post-meta-separator">|</span><i class="far fa-clock fa-fw post-meta-icon"></i><span class="post-meta-label">阅读时长:</span><span>12分钟</span></span></div></div></div></header><main class="layout" id="content-inner"><div id="post"><article class="container post-content" id="article-container"><h1 id="Unity-异步等待方案选型：Mono-轮询-vs-协程-vs-UniTask"><a href="#Unity-异步等待方案选型：Mono-轮询-vs-协程-vs-UniTask" class="headerlink" title="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask"></a>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</h1><blockquote>
+<p>在 Unity 项目里，”等一段时间再做某件事”、”等加载完再回调”、”等动画播完再切场景” 这类需求几乎天天遇到。<br>选型不当，轻则代码难读，重则 GC 卡顿、生命周期错乱、回调地狱。本文把目前主流的三种方案放在一起做一次彻底的对比。</p>
+</blockquote>
+<hr>
+<h2 id="引子：我们到底在解决什么问题"><a href="#引子：我们到底在解决什么问题" class="headerlink" title="引子：我们到底在解决什么问题"></a>引子：我们到底在解决什么问题</h2><p>Unity 的核心循环是<strong>单线程帧驱动</strong>的：所有游戏逻辑都跑在主线程，按 PlayerLoop 的节拍一帧一帧推进。这就意味着 “异步等待” 在 Unity 里本质上是一个<strong>时间&#x2F;事件维度的问题</strong>，而不是一个 “线程切换” 的问题。</p>
+<p>我们需要解决的典型场景有：</p>
+<ul>
+<li>等待 N 秒后执行某件事（技能 CD、UI 提示自动消失）</li>
+<li>等待某个资源加载完成（<code>AssetBundle</code>、<code>Addressables</code>、网络请求）</li>
+<li>等待某个条件成立（敌人进入视野、玩家按下按键、动画播放到某一帧）</li>
+<li>串行&#x2F;并行编排多个上述等待（连招、剧情演出、新手引导）</li>
+</ul>
+<p>围绕这些需求，社区演化出了三种主流方案，下面逐一拆解。</p>
+<hr>
+<h2 id="方案一：自己编写基于-Mono-的管理器，在-Update-中轮询"><a href="#方案一：自己编写基于-Mono-的管理器，在-Update-中轮询" class="headerlink" title="方案一：自己编写基于 Mono 的管理器，在 Update 中轮询"></a>方案一：自己编写基于 Mono 的管理器，在 Update 中轮询</h2><h3 id="思路"><a href="#思路" class="headerlink" title="思路"></a>思路</h3><p>写一个常驻的 <code>MonoBehaviour</code> 单例（通常叫 <code>TimerManager</code>、<code>UpdateManager</code> 之类），把所有”等一会儿&#x2F;等条件”的任务塞进一个 List，每帧 <code>Update</code> 里遍历检查，到点了就触发回调。</p>
+<h3 id="最小示例"><a href="#最小示例" class="headerlink" title="最小示例"></a>最小示例</h3><figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="keyword">class</span> <span class="title">TimerManager</span> : <span class="title">MonoBehaviour</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="keyword">public</span> <span class="keyword">static</span> TimerManager Instance &#123; <span class="keyword">get</span>; <span class="keyword">private</span> <span class="keyword">set</span>; &#125;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">class</span> <span class="title">TimerTask</span></span><br><span class="line">    &#123;</span><br><span class="line">        <span class="keyword">public</span> <span class="built_in">float</span> remaining;</span><br><span class="line">        <span class="keyword">public</span> Action onComplete;</span><br><span class="line">        <span class="keyword">public</span> <span class="built_in">bool</span> useUnscaled;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">readonly</span> List&lt;TimerTask&gt; _tasks = <span class="keyword">new</span>(<span class="number">64</span>);</span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">readonly</span> List&lt;TimerTask&gt; _toRemove = <span class="keyword">new</span>(<span class="number">16</span>);</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">Awake</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        <span class="keyword">if</span> (Instance != <span class="literal">null</span>) &#123; Destroy(gameObject); <span class="keyword">return</span>; &#125;</span><br><span class="line">        Instance = <span class="keyword">this</span>;</span><br><span class="line">        DontDestroyOnLoad(gameObject);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">void</span> <span class="title">Delay</span>(<span class="params"><span class="built_in">float</span> seconds, Action callback, <span class="built_in">bool</span> useUnscaled = <span class="literal">false</span></span>)</span></span><br><span class="line">    &#123;</span><br><span class="line">        _tasks.Add(<span class="keyword">new</span> TimerTask</span><br><span class="line">        &#123;</span><br><span class="line">            remaining = seconds,</span><br><span class="line">            onComplete = callback,</span><br><span class="line">            useUnscaled = useUnscaled</span><br><span class="line">        &#125;);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">Update</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        <span class="built_in">float</span> dt = Time.deltaTime;</span><br><span class="line">        <span class="built_in">float</span> unscaledDt = Time.unscaledDeltaTime;</span><br><span class="line"></span><br><span class="line">        <span class="keyword">for</span> (<span class="built_in">int</span> i = <span class="number">0</span>; i &lt; _tasks.Count; i++)</span><br><span class="line">        &#123;</span><br><span class="line">            <span class="keyword">var</span> t = _tasks[i];</span><br><span class="line">            t.remaining -= t.useUnscaled ? unscaledDt : dt;</span><br><span class="line">            <span class="keyword">if</span> (t.remaining &lt;= <span class="number">0f</span>)</span><br><span class="line">            &#123;</span><br><span class="line">                <span class="keyword">try</span> &#123; t.onComplete?.Invoke(); &#125;</span><br><span class="line">                <span class="keyword">catch</span> (Exception e) &#123; Debug.LogException(e); &#125;</span><br><span class="line">                _toRemove.Add(t);</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="keyword">if</span> (_toRemove.Count &gt; <span class="number">0</span>)</span><br><span class="line">        &#123;</span><br><span class="line">            <span class="keyword">for</span> (<span class="built_in">int</span> i = <span class="number">0</span>; i &lt; _toRemove.Count; i++) _tasks.Remove(_toRemove[i]);</span><br><span class="line">            _toRemove.Clear();</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 使用</span></span><br><span class="line">TimerManager.Instance.Delay(<span class="number">1.5f</span>, () =&gt; Debug.Log(<span class="string">&quot;到点了&quot;</span>));</span><br></pre></td></tr></table></figure>
+
+<h3 id="优势"><a href="#优势" class="headerlink" title="优势"></a>优势</h3><ul>
+<li><strong>完全可控</strong>：调度逻辑是你自己写的，想加优先级、想分组暂停、想统一加锁、想统一序列化保存——全在掌心。</li>
+<li><strong>无第三方依赖</strong>：项目不引入任何外部库，体积可控，审包也方便。</li>
+<li><strong>行为可预测</strong>：所有任务统一在一个 Update 节点跑，时序非常确定，没有”在 LateUpdate 还是 FixedUpdate 触发”之类的隐性陷阱。</li>
+<li><strong>天然适合数据驱动</strong>：任务是普通 C# 对象，序列化、热重载、回放都好接。</li>
+<li><strong>性能基线清晰</strong>：知道 <code>Update</code> 里就一个 for 循环，开销心里有数；优化也容易做（比如改最小堆、按到期时间排序）。</li>
+</ul>
+<h3 id="劣势"><a href="#劣势" class="headerlink" title="劣势"></a>劣势</h3><ul>
+<li><p><strong>写法是回调式的，连续等待会变成回调地狱</strong></p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">TimerManager.Instance.Delay(<span class="number">1f</span>, () =&gt; &#123;</span><br><span class="line">    Load(<span class="string">&quot;a&quot;</span>, () =&gt; &#123;</span><br><span class="line">        TimerManager.Instance.Delay(<span class="number">0.5f</span>, () =&gt; &#123;</span><br><span class="line">            Load(<span class="string">&quot;b&quot;</span>, () =&gt; &#123;</span><br><span class="line">                <span class="comment">// ……</span></span><br><span class="line">            &#125;);</span><br><span class="line">        &#125;);</span><br><span class="line">    &#125;);</span><br><span class="line">&#125;);</span><br></pre></td></tr></table></figure>
+
+<p>代码缩进越来越深，业务流程被割裂在多个 lambda 里，调试栈也基本看不出原始顺序。</p>
+</li>
+<li><p><strong>生命周期管理全靠自觉</strong>：发起方对象被销毁了，回调里访问 <code>this.transform</code> 直接 <code>MissingReferenceException</code>。你得自己在管理器里加 owner 检查，或者每个回调里手写 <code>if (this == null) return;</code>。</p>
+</li>
+<li><p><strong>错误处理分散</strong>：每个 callback 内部都得自己 try&#x2F;catch，否则一个异常就吞掉，难定位。</p>
+</li>
+<li><p><strong>每种”等待类型”都要手写一遍</strong>：等时间、等条件、等帧数、等资源——管理器要么膨胀成大杂烩，要么拆成一堆 Manager。</p>
+</li>
+<li><p><strong>没有”取消”的统一语义</strong>：要支持取消，就得自己设计 handle、token 之类的机制，相当于把 .NET 的 <code>CancellationToken</code> 又造了一遍。</p>
+</li>
+</ul>
+<h3 id="推荐使用场景"><a href="#推荐使用场景" class="headerlink" title="推荐使用场景"></a>推荐使用场景</h3><ul>
+<li><strong>项目是底层框架&#x2F;SDK</strong>，不希望引入 UniTask 这种较大的依赖。</li>
+<li><strong>需要极强的调度可控性</strong>：比如帧同步联机游戏，要求所有定时任务在固定的 PlayerLoop 节点执行，且要能被回放系统记录。</li>
+<li><strong>运行环境受限</strong>：某些老版本 Unity（5.x、2017 早期）、IL2CPP 兼容性敏感的平台。</li>
+<li><strong>场景非常简单</strong>：整个项目就十几个定时回调，犯不上引入异步框架。</li>
+</ul>
+<hr>
+<h2 id="方案二：使用-Unity-协程（Coroutine）"><a href="#方案二：使用-Unity-协程（Coroutine）" class="headerlink" title="方案二：使用 Unity 协程（Coroutine）"></a>方案二：使用 Unity 协程（Coroutine）</h2><h3 id="思路-1"><a href="#思路-1" class="headerlink" title="思路"></a>思路</h3><p>利用 C# 的迭代器 (<code>IEnumerator</code> + <code>yield return</code>) 配合 Unity 的 <code>StartCoroutine</code> API，让”等待”在语法层面顺序化。底层其实就是 Unity 自己维护了一个状态机调度器，每帧遍历活跃的协程、检查 <code>YieldInstruction</code> 是否完成、不完成就跳过、完成就 <code>MoveNext</code> 一次。</p>
+<h3 id="最小示例-1"><a href="#最小示例-1" class="headerlink" title="最小示例"></a>最小示例</h3><figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="keyword">class</span> <span class="title">Demo</span> : <span class="title">MonoBehaviour</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">Start</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        StartCoroutine(Sequence());</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">private</span> IEnumerator <span class="title">Sequence</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        Debug.Log(<span class="string">&quot;开始&quot;</span>);</span><br><span class="line">        <span class="function"><span class="keyword">yield</span> <span class="keyword">return</span> <span class="keyword">new</span> <span class="title">WaitForSeconds</span>(<span class="params"><span class="number">1f</span></span>)</span>;</span><br><span class="line"></span><br><span class="line">        Debug.Log(<span class="string">&quot;加载资源&quot;</span>);</span><br><span class="line">        <span class="keyword">var</span> req = Resources.LoadAsync&lt;Texture&gt;(<span class="string">&quot;icon&quot;</span>);</span><br><span class="line">        <span class="keyword">yield</span> <span class="keyword">return</span> req;</span><br><span class="line"></span><br><span class="line">        <span class="keyword">var</span> tex = req.asset <span class="keyword">as</span> Texture;</span><br><span class="line">        Debug.Log(<span class="string">$&quot;加载完成: <span class="subst">&#123;tex.name&#125;</span>&quot;</span>);</span><br><span class="line"></span><br><span class="line">        <span class="function"><span class="keyword">yield</span> <span class="keyword">return</span> <span class="keyword">new</span> <span class="title">WaitUntil</span>(<span class="params">(</span>)</span> =&gt; Input.GetKeyDown(KeyCode.Space));</span><br><span class="line">        Debug.Log(<span class="string">&quot;玩家按了空格&quot;</span>);</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h3 id="优势-1"><a href="#优势-1" class="headerlink" title="优势"></a>优势</h3><ul>
+<li><strong>官方原生支持</strong>：无依赖，所有 Unity 版本都可用，文档与社区资料丰富。</li>
+<li><strong>顺序化写法</strong>：相比方案一的回调嵌套，协程是直线代码，读起来接近同步代码的体验。</li>
+<li><strong>与 MonoBehaviour 生命周期联动</strong>：对象被 <code>SetActive(false)</code> 时协程自动暂停，被 <code>Destroy</code> 时协程自动停止——很多生命周期问题被官方兜底了。</li>
+<li><strong>学习成本低</strong>：只要懂 <code>yield</code>，半天就能上手。</li>
+<li><strong>与 Unity 自有异步 API 天然兼容</strong>：<code>AsyncOperation</code>、<code>UnityWebRequest</code>、<code>Resources.LoadAsync</code> 这些都可以直接 <code>yield return</code>。</li>
+</ul>
+<h3 id="劣势-1"><a href="#劣势-1" class="headerlink" title="劣势"></a>劣势</h3><ul>
+<li><p><strong>不能返回值</strong>：<code>IEnumerator</code> 没有泛型版本，想从协程拿结果只能塞 <code>out</code> 参数包装、塞回调、或者塞到成员变量里——非常别扭。</p>
+</li>
+<li><p><strong>不能 try&#x2F;catch 跨 yield 的异常</strong>：<code>yield return</code> 之后的代码不在原调用栈，异常一旦发生，要么被吞，要么打到 Console 里，外层的 try&#x2F;catch 抓不到。</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line"><span class="function">IEnumerator <span class="title">Bad</span>()</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="function"><span class="keyword">yield</span> <span class="keyword">return</span> <span class="keyword">new</span> <span class="title">WaitForSeconds</span>(<span class="params"><span class="number">1f</span></span>)</span>;</span><br><span class="line">    <span class="keyword">throw</span> <span class="keyword">new</span> Exception(<span class="string">&quot;boom&quot;</span>);  <span class="comment">// 外层无法 catch</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>GC 压力</strong>：<code>new WaitForSeconds(1f)</code> 每次都堆分配；<code>yield return null</code> 触发的状态机本身也是引用类型。高频协程（比如每个子弹一个）很容易刷出 GC 曲线。</p>
+<blockquote>
+<p>缓解办法是缓存 <code>WaitForSeconds</code> 实例、或用 <code>WaitForSecondsRealtime</code>，但只是缓解，不是根治。</p>
+</blockquote>
+</li>
+<li><p><strong>取消只能 StopCoroutine</strong>：取消粒度粗糙，而且 <code>StopCoroutine</code> 是直接终止状态机，不会执行 <code>finally</code>（在某些 Unity 版本里 finally 会执行，但行为历来不太一致），资源清理需要靠 <code>OnDisable</code> &#x2F; <code>OnDestroy</code> 兜底。</p>
+</li>
+<li><p><strong>必须挂在 MonoBehaviour 上</strong>：纯 C# 类（比如你的 Service、Model 层）不能直接开协程，要么持有一个 MB 引用，要么做一个”协程宿主”单例，相当于回退到方案一的思路。</p>
+</li>
+<li><p><strong>组合困难</strong>：想要”并行等 A 和 B 然后继续”、”等 A 或 B 任一完成就继续”——协程没有原生的 <code>WhenAll</code> &#x2F; <code>WhenAny</code>，得自己用计数器或者嵌套协程实现，很笨拙。</p>
+</li>
+<li><p><strong>不支持线程切换</strong>：完全跑在主线程，想做 CPU 密集型计算后回主线程，还是得自己用 <code>Task</code> + <code>SynchronizationContext</code> 手搓。</p>
+</li>
+<li><p><strong>PlayerLoop 时序固定</strong>：协程只在固定几个时机推进（<code>Update</code>、<code>LateUpdate</code>、<code>FixedUpdate</code> 后等），想精确控制”我希望这个回调在 PreLateUpdate 触发”做不到。</p>
+</li>
+</ul>
+<h3 id="推荐使用场景-1"><a href="#推荐使用场景-1" class="headerlink" title="推荐使用场景"></a>推荐使用场景</h3><ul>
+<li><strong>简单的 UI&#x2F;演出&#x2F;教程流程</strong>：步骤短、不需要返回值、不需要复杂错误处理。</li>
+<li><strong>遗留项目</strong>：项目已经大量使用协程，团队熟悉这种风格，没有迁移收益。</li>
+<li><strong>学习&#x2F;原型阶段</strong>：快速验证想法，不在乎 GC 与扩展性。</li>
+<li><strong>被某些第三方 API 强制要求</strong>：比如某些插件的回调只支持 <code>IEnumerator</code> 形式。</li>
+</ul>
+<hr>
+<h2 id="方案三：使用-UniTask"><a href="#方案三：使用-UniTask" class="headerlink" title="方案三：使用 UniTask"></a>方案三：使用 UniTask</h2><h3 id="思路-2"><a href="#思路-2" class="headerlink" title="思路"></a>思路</h3><p>UniTask 是 Cysharp 开源的、专为 Unity 设计的高性能异步库。它用 <code>struct</code> 实现的 <code>UniTask</code> 类型替代 <code>Task</code>，把异步续体直接挂到 Unity 的 PlayerLoop 上跑，配合 C# 的 <code>async/await</code> 语法，让 Unity 的异步代码既顺序化、又零分配。</p>
+<h3 id="最小示例-2"><a href="#最小示例-2" class="headerlink" title="最小示例"></a>最小示例</h3><figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">using</span> Cysharp.Threading.Tasks;</span><br><span class="line"></span><br><span class="line"><span class="keyword">public</span> <span class="keyword">class</span> <span class="title">Demo</span> : <span class="title">MonoBehaviour</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">async</span> UniTaskVoid <span class="title">Start</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        Debug.Log(<span class="string">&quot;开始&quot;</span>);</span><br><span class="line">        <span class="keyword">await</span> UniTask.Delay(<span class="number">1000</span>);</span><br><span class="line"></span><br><span class="line">        Debug.Log(<span class="string">&quot;加载资源&quot;</span>);</span><br><span class="line">        <span class="keyword">var</span> tex = <span class="keyword">await</span> Resources.LoadAsync&lt;Texture&gt;(<span class="string">&quot;icon&quot;</span>);</span><br><span class="line">        Debug.Log(<span class="string">$&quot;加载完成&quot;</span>);</span><br><span class="line"></span><br><span class="line">        <span class="keyword">await</span> UniTask.WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));</span><br><span class="line">        Debug.Log(<span class="string">&quot;玩家按了空格&quot;</span>);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">async</span> UniTask&lt;<span class="built_in">int</span>&gt; <span class="title">LoadScoreAsync</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        <span class="keyword">await</span> UniTask.Delay(<span class="number">500</span>);</span><br><span class="line">        <span class="keyword">return</span> <span class="number">100</span>;  <span class="comment">// 协程做不到的&quot;带返回值&quot;</span></span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h3 id="优势-2"><a href="#优势-2" class="headerlink" title="优势"></a>优势</h3><ul>
+<li><p><strong><code>async/await</code> 顺序化语法</strong>：和协程一样直线易读，但比协程更接近”普通同步代码”，try&#x2F;catch、return、using 都正常工作。</p>
+</li>
+<li><p><strong>可返回值</strong>：<code>UniTask&lt;T&gt;</code> 直接拿结果，告别”用成员变量传值”的丑陋写法。</p>
+</li>
+<li><p><strong>真正的异常传播</strong>：异常会顺着 await 链一路传到能 catch 的地方，<strong>全链路 try&#x2F;catch 都能抓</strong>。</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">try</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="keyword">await</span> LoadAsync();</span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">catch</span> (Exception ex)</span><br><span class="line">&#123;</span><br><span class="line">    Debug.LogError(ex);  <span class="comment">// 真的会进来</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>零&#x2F;极低 GC</strong>：基于 struct + 自定义 AsyncMethodBuilder + 对象池，同步完成路径完全零分配，异步路径上也远低于 <code>Task</code> 和协程。在高频调用场景（每帧、每个子弹、每个 AI 决策）差距非常显著。</p>
+</li>
+<li><p><strong>强大的取消机制</strong>：标准 <code>CancellationToken</code> 一路透传，配合 <code>this.GetCancellationTokenOnDestroy()</code> 可以让对象销毁时所有相关异步自动取消，杜绝”对象死了回调还在跑”的事故。</p>
+</li>
+<li><p><strong>PlayerLoop 时序可精确控制</strong>：<code>UniTask.Yield(PlayerLoopTiming.PreLateUpdate)</code> 这种精度，协程做不到。</p>
+</li>
+<li><p><strong>组合算子丰富</strong>：<code>WhenAll</code> &#x2F; <code>WhenAny</code> &#x2F; <code>Timeout</code> &#x2F; <code>Retry</code> 一应俱全。</p>
+</li>
+<li><p><strong>不依赖 MonoBehaviour</strong>：纯 C# 层（服务、网络层、数据层）也能畅快写异步，不再需要”协程宿主”。</p>
+</li>
+<li><p><strong>原生支持 Unity 异步 API</strong>：<code>AsyncOperation</code>、<code>UnityWebRequest</code>、<code>Addressables</code>、<code>SceneManager.LoadSceneAsync</code> 全部可以直接 await。</p>
+</li>
+<li><p><strong>调试工具完善</strong>：自带 UniTask Tracker，可以在 Editor 里看到当前所有活跃的 UniTask、它们卡在哪一行、由哪个对象持有。</p>
+</li>
+<li><p><strong>支持线程切换</strong>：<code>UniTask.SwitchToThreadPool()</code> &#x2F; <code>UniTask.SwitchToMainThread()</code> 让 CPU 密集计算→主线程回调一行代码搞定。</p>
+</li>
+</ul>
+<h3 id="劣势-2"><a href="#劣势-2" class="headerlink" title="劣势"></a>劣势</h3><ul>
+<li><strong>学习曲线</strong>：team 里如果有人不熟 <code>async/await</code>，需要培训。<code>UniTask</code> vs <code>UniTaskVoid</code> vs <code>Forget()</code> vs <code>WhenAll</code> 等概念都要消化。</li>
+<li><strong>第三方依赖</strong>：要引入一个外部库（虽然作者活跃、稳定性极好，但仍是依赖）。</li>
+<li><strong>滥用风险</strong>：<code>async/await</code> 太顺手了，容易”事事 async”，造成不必要的状态机开销、隐藏控制流复杂度。</li>
+<li><strong>错误用法的坑</strong>：忘记 <code>.Forget()</code> 会有警告；<code>async void</code> 写在 Unity 里依旧危险（应该用 <code>UniTaskVoid</code>）；不传 <code>CancellationToken</code> 会导致协程式的生命周期问题重现。</li>
+<li><strong>平台兼容性</strong>：极个别老版本 Unity (2018 之前) 或某些定制 IL2CPP 平台需要确认是否完美支持，但 2019.3+ 基本无忧。</li>
+</ul>
+<h3 id="推荐使用场景-2"><a href="#推荐使用场景-2" class="headerlink" title="推荐使用场景"></a>推荐使用场景</h3><ul>
+<li><strong>绝大多数中大型 Unity 项目的默认选择</strong>。</li>
+<li>异步流程<strong>复杂、需要组合、需要返回值、需要错误处理</strong>的场景：登录流程、资源管线、网络请求、剧情演出、AI 决策。</li>
+<li>对<strong>性能&#x2F;GC 敏感</strong>：移动端、VR、大型 MMO、需要稳定 60&#x2F;120 帧的项目。</li>
+<li>团队<strong>已经熟悉 <code>async/await</code></strong>：从后端、客户端 (WPF&#x2F;Xamarin) 转来的同学几乎零成本上手。</li>
+</ul>
+<hr>
+<h2 id="横向对比表"><a href="#横向对比表" class="headerlink" title="横向对比表"></a>横向对比表</h2><table>
+<thead>
+<tr>
+<th>维度</th>
+<th>Mono 轮询管理器</th>
+<th>Unity 协程</th>
+<th>UniTask</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>语法直观度</td>
+<td>回调嵌套，差</td>
+<td>顺序化，好</td>
+<td>顺序化 + 同步语义，最好</td>
+</tr>
+<tr>
+<td>返回值</td>
+<td>靠回调传</td>
+<td>不支持</td>
+<td>原生 <code>UniTask&lt;T&gt;</code></td>
+</tr>
+<tr>
+<td>异常处理</td>
+<td>手动 try&#x2F;catch 每个回调</td>
+<td>跨 yield 抓不到</td>
+<td>全链路 try&#x2F;catch</td>
+</tr>
+<tr>
+<td>取消机制</td>
+<td>自己造 handle</td>
+<td>StopCoroutine (粗糙)</td>
+<td><code>CancellationToken</code> (标准)</td>
+</tr>
+<tr>
+<td>GC 压力</td>
+<td>取决于实现，通常较低</td>
+<td>较高（<code>WaitForSeconds</code> 等）</td>
+<td>极低（零分配路径）</td>
+</tr>
+<tr>
+<td>生命周期联动</td>
+<td>手动检查</td>
+<td>跟随 MonoBehaviour</td>
+<td>跟随 <code>CancellationToken</code></td>
+</tr>
+<tr>
+<td>线程切换</td>
+<td>自己实现</td>
+<td>不支持</td>
+<td>一行 <code>SwitchToXxx</code></td>
+</tr>
+<tr>
+<td>组合 (All&#x2F;Any)</td>
+<td>自己实现</td>
+<td>难写</td>
+<td>原生支持</td>
+</tr>
+<tr>
+<td>时序精度</td>
+<td>自己控制</td>
+<td>固定几个时机</td>
+<td>全 PlayerLoop 节点可选</td>
+</tr>
+<tr>
+<td>调试工具</td>
+<td>无</td>
+<td>Profiler 一般观察</td>
+<td>专属 Tracker</td>
+</tr>
+<tr>
+<td>学习成本</td>
+<td>低（自己写的）</td>
+<td>低</td>
+<td>中（要懂 async&#x2F;await）</td>
+</tr>
+<tr>
+<td>依赖</td>
+<td>无</td>
+<td>无</td>
+<td>引入 UniTask 包</td>
+</tr>
+<tr>
+<td>适合 MB 之外的纯 C# 类</td>
+<td>是</td>
+<td>否</td>
+<td>是</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="选型决策建议"><a href="#选型决策建议" class="headerlink" title="选型决策建议"></a>选型决策建议</h2><p>按”项目规模 × 性能要求 × 团队背景”三轴拆开，可以给出比较明确的建议：</p>
+<p><strong>项目体量很小、就几个定时回调</strong><br>→ 直接写一个简单的 Mono 管理器。引入框架反而是负担。</p>
+<p><strong>遗留项目大量协程、团队习惯协程、没有性能问题</strong><br>→ 维持协程，但新模块可以尝试 UniTask，逐步替换。</p>
+<p><strong>新项目、中大型、对 GC 敏感</strong><br>→ <strong>直接上 UniTask</strong>，没有悬念。三套方案里它是综合最优解，唯一的代价就是团队学一下 <code>async/await</code>。</p>
+<p><strong>底层 SDK &#x2F; 框架 &#x2F; 编辑器扩展</strong><br>→ 视情况而定。如果你写的是给别人用的库，且不希望强加 UniTask 依赖，可以用 Mono 管理器 + 暴露回调 API；如果你的 SDK 用户群已经在用 UniTask，那直接用更好。</p>
+<p><strong>帧同步联机游戏 &#x2F; 录像回放系统</strong><br>→ 优先考虑自己写管理器，因为你需要对所有定时任务有<strong>完全确定的执行时序</strong>，UniTask 虽然时序可控，但要做到 bit-perfect 复现还是自己写更稳。</p>
+<hr>
+<h2 id="一些反模式提醒"><a href="#一些反模式提醒" class="headerlink" title="一些反模式提醒"></a>一些反模式提醒</h2><p>无论选哪种方案，下面几条都值得记一下：</p>
+<ol>
+<li><strong>不要 <code>async void</code> 写 Unity 业务方法</strong>。要么 <code>UniTask</code> 让人 await，要么 <code>UniTaskVoid</code> + <code>.Forget()</code> 明确即发即弃。</li>
+<li><strong>不要在协程&#x2F;UniTask 里裸引用 <code>this.transform</code> 而不检查存活</strong>。给所有跨帧异步都传 <code>CancellationToken</code>，或者首行加 <code>if (this == null) return;</code>。</li>
+<li><strong>不要每帧 <code>new WaitForSeconds(0.1f)</code></strong>。要么缓存实例，要么改用 UniTask。</li>
+<li><strong>不要混用多套方案而不做边界</strong>。一个项目里既写协程又写 UniTask 不是不行，但建议按模块划清楚，避免一个流程里两种写法穿插。</li>
+<li><strong>不要把 UniTask 当万金油</strong>。简单的 <code>Invoke(&quot;Foo&quot;, 1f)</code> 能解决的事，不必非要 <code>await UniTask.Delay</code>。</li>
+</ol>
+<hr>
+<h2 id="结语"><a href="#结语" class="headerlink" title="结语"></a>结语</h2><p>三种方案并不是互斥关系，而是覆盖了不同的复杂度区间：</p>
+<ul>
+<li><strong>Mono 轮询管理器</strong>：最底层、最可控，适合简单或极特殊需求。</li>
+<li><strong>协程</strong>：Unity 内置的默认选择，简单顺手，但天花板低。</li>
+<li><strong>UniTask</strong>：现代 Unity 项目的事实标准，几乎在所有维度上都是协程的超集。</li>
+</ul>
+<p>如果让我用一句话总结：<strong>新项目无脑选 UniTask，老项目按模块渐进式迁移，特殊底层场景留给 Mono 管理器。</strong></p>
+</article><div class="post-copyright"><div class="post-copyright__author"><span class="post-copyright-meta"><i class="fas fa-circle-user fa-fw"></i>文章作者: </span><span class="post-copyright-info"><a href="https://cyskdsn.top">穿越时空的思念</a></span></div><div class="post-copyright__type"><span class="post-copyright-meta"><i class="fas fa-square-arrow-up-right fa-fw"></i>文章链接: </span><span class="post-copyright-info"><a href="https://cyskdsn.top/posts/b9e16296.html">https://cyskdsn.top/posts/b9e16296.html</a></span></div><div class="post-copyright__notice"><span class="post-copyright-meta"><i class="fas fa-circle-exclamation fa-fw"></i>版权声明: </span><span class="post-copyright-info">本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a> 许可协议。转载请注明来源 <a href="https://cyskdsn.top" target="_blank">穿越时空的思念</a>！</span></div></div><div class="tag_share"><div class="post-meta__tag-list"><a class="post-meta__tags" href="/tags/Unity/">Unity</a><a class="post-meta__tags" href="/tags/%E5%BC%82%E6%AD%A5%E7%BC%96%E7%A8%8B/">异步编程</a><a class="post-meta__tags" href="/tags/%E5%8D%8F%E7%A8%8B/">协程</a><a class="post-meta__tags" href="/tags/UniTask/">UniTask</a><a class="post-meta__tags" href="/tags/%E6%80%A7%E8%83%BD%E4%BC%98%E5%8C%96/">性能优化</a></div><div class="post-share"><div class="social-share" data-image="/img/Title/waitChoose.jpeg" data-sites="facebook,twitter,wechat,weibo,qq"></div><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/css/share.min.css" media="print" onload="this.media='all'"><script src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/js/social-share.min.js" defer></script></div></div><nav class="pagination-post" id="pagination"><a class="pagination-related" href="/posts/4483a5b.html" title="UniTask学习与使用"><img class="cover" src="/img/Title/Unitask.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of previous post"><div class="info"><div class="info-1"><div class="info-item-1">上一篇</div><div class="info-item-2">UniTask学习与使用</div></div><div class="info-2"><div class="info-item-1">UniTask 学习文档 基于UniTask 源码整理，版本适配 Unity 2019.3+   目录 什么是 UniTask 核心类型与基本用法 时间与帧等待 PlayerLoopTiming — Unity 生命周期时序 取消机制 (CancellationToken) Unity 对象操作 Unity 生命周期异步触发器 (AsyncTrigger) 条件等待 并发控制 WhenAll &#x2F; WhenAny 线程切换 UniTaskCompletionSource 手动控制任务 错误处理与 Forget UniTaskVoid — 即发即弃 TimeoutController 超时控制 AsyncLazy 懒加载异步 UniTask Tracker 调试工具 最佳实践与常见陷阱   1. 什么是 UniTaskUniTask 是由 Cysharp 开源的、专为 Unity 设计的高性能异步库，命名空间为 Cysharp.Threading.Tasks。 要理解 UniTask 为什么有存在的必要，得先看清楚为什么 .NET 原生的 Task 在 Unity 里不够好...</div></div></div></a><a class="pagination-related" href="/posts/604d34e4.html" title="ZString-Unity的0GC字符串操作"><img class="cover" src="/img/Title/ZString.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of next post"><div class="info text-right"><div class="info-1"><div class="info-item-1">下一篇</div><div class="info-item-2">ZString-Unity的0GC字符串操作</div></div><div class="info-2"><div class="info-item-1">Unity 性能优化：用 ZString 实现真正的 0GC 字符串操作 你是否在 Unity Profiler 里看到过一帧里几百个 GC.Alloc，追查下去全是字符串拼接？本文从 Unity 的字符串内存模型出发，深入讲解 ZString 的零分配原理，并与传统 StringBuilder 做全面对比。   一、Unity 的字符串是什么在深入 ZString 之前，必须先搞清楚 Unity（以及 C#）里字符串的本质。 string 是引用类型，活在托管堆上C# 的 string 是引用类型，这意味着每一个字符串实例都分配在 托管堆(Managed Heap)。堆上的对象由 GC（Garbage Collector）负责管理和回收。 123string a = &quot;Hello&quot;;          // 堆上的对象string b = &quot;World&quot;;          // 又一个堆上的对象string c = a + &quot;, &quot; + b;     // 又一个堆上的对象，a 和 b 变成垃圾  每一次拼接都会产生...</div></div></div></a></nav></div><div class="aside-content" id="aside-content"><div class="card-widget card-info text-center"><div class="avatar-img"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="author-info-name">穿越时空的思念</div><div class="author-info-description">每天进步一点，做更好的自己!</div><div class="site-data"><a href="/archives/"><div class="headline">文章</div><div class="length-num">20</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">5</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><a id="card-info-btn" target="_blank" rel="noopener" href="https://github.com/Jin8868"><i class="fab fa-github"></i><span>Follow Me</span></a></div><div class="card-widget card-announcement"><div class="item-headline"><i class="fas fa-bullhorn fa-shake"></i><span>公告</span></div><div class="announcement_content"></div></div><div class="sticky_layout"><div class="card-widget" id="card-toc"><div class="item-headline"><i class="fas fa-stream"></i><span>目录</span><span class="toc-percentage"></span></div><div class="toc-content"><ol class="toc"><li class="toc-item toc-level-1"><a class="toc-link" href="#Unity-%E5%BC%82%E6%AD%A5%E7%AD%89%E5%BE%85%E6%96%B9%E6%A1%88%E9%80%89%E5%9E%8B%EF%BC%9AMono-%E8%BD%AE%E8%AF%A2-vs-%E5%8D%8F%E7%A8%8B-vs-UniTask"><span class="toc-number">1.</span> <span class="toc-text">Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</span></a><ol class="toc-child"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%BC%95%E5%AD%90%EF%BC%9A%E6%88%91%E4%BB%AC%E5%88%B0%E5%BA%95%E5%9C%A8%E8%A7%A3%E5%86%B3%E4%BB%80%E4%B9%88%E9%97%AE%E9%A2%98"><span class="toc-number">1.1.</span> <span class="toc-text">引子：我们到底在解决什么问题</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%96%B9%E6%A1%88%E4%B8%80%EF%BC%9A%E8%87%AA%E5%B7%B1%E7%BC%96%E5%86%99%E5%9F%BA%E4%BA%8E-Mono-%E7%9A%84%E7%AE%A1%E7%90%86%E5%99%A8%EF%BC%8C%E5%9C%A8-Update-%E4%B8%AD%E8%BD%AE%E8%AF%A2"><span class="toc-number">1.2.</span> <span class="toc-text">方案一：自己编写基于 Mono 的管理器，在 Update 中轮询</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%80%9D%E8%B7%AF"><span class="toc-number">1.2.1.</span> <span class="toc-text">思路</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%9C%80%E5%B0%8F%E7%A4%BA%E4%BE%8B"><span class="toc-number">1.2.2.</span> <span class="toc-text">最小示例</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E4%BC%98%E5%8A%BF"><span class="toc-number">1.2.3.</span> <span class="toc-text">优势</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%8A%A3%E5%8A%BF"><span class="toc-number">1.2.4.</span> <span class="toc-text">劣势</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%8E%A8%E8%8D%90%E4%BD%BF%E7%94%A8%E5%9C%BA%E6%99%AF"><span class="toc-number">1.2.5.</span> <span class="toc-text">推荐使用场景</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%96%B9%E6%A1%88%E4%BA%8C%EF%BC%9A%E4%BD%BF%E7%94%A8-Unity-%E5%8D%8F%E7%A8%8B%EF%BC%88Coroutine%EF%BC%89"><span class="toc-number">1.3.</span> <span class="toc-text">方案二：使用 Unity 协程（Coroutine）</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%80%9D%E8%B7%AF-1"><span class="toc-number">1.3.1.</span> <span class="toc-text">思路</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%9C%80%E5%B0%8F%E7%A4%BA%E4%BE%8B-1"><span class="toc-number">1.3.2.</span> <span class="toc-text">最小示例</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E4%BC%98%E5%8A%BF-1"><span class="toc-number">1.3.3.</span> <span class="toc-text">优势</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%8A%A3%E5%8A%BF-1"><span class="toc-number">1.3.4.</span> <span class="toc-text">劣势</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%8E%A8%E8%8D%90%E4%BD%BF%E7%94%A8%E5%9C%BA%E6%99%AF-1"><span class="toc-number">1.3.5.</span> <span class="toc-text">推荐使用场景</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%96%B9%E6%A1%88%E4%B8%89%EF%BC%9A%E4%BD%BF%E7%94%A8-UniTask"><span class="toc-number">1.4.</span> <span class="toc-text">方案三：使用 UniTask</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%80%9D%E8%B7%AF-2"><span class="toc-number">1.4.1.</span> <span class="toc-text">思路</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%9C%80%E5%B0%8F%E7%A4%BA%E4%BE%8B-2"><span class="toc-number">1.4.2.</span> <span class="toc-text">最小示例</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E4%BC%98%E5%8A%BF-2"><span class="toc-number">1.4.3.</span> <span class="toc-text">优势</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%8A%A3%E5%8A%BF-2"><span class="toc-number">1.4.4.</span> <span class="toc-text">劣势</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%8E%A8%E8%8D%90%E4%BD%BF%E7%94%A8%E5%9C%BA%E6%99%AF-2"><span class="toc-number">1.4.5.</span> <span class="toc-text">推荐使用场景</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%A8%AA%E5%90%91%E5%AF%B9%E6%AF%94%E8%A1%A8"><span class="toc-number">1.5.</span> <span class="toc-text">横向对比表</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E9%80%89%E5%9E%8B%E5%86%B3%E7%AD%96%E5%BB%BA%E8%AE%AE"><span class="toc-number">1.6.</span> <span class="toc-text">选型决策建议</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%80%E4%BA%9B%E5%8F%8D%E6%A8%A1%E5%BC%8F%E6%8F%90%E9%86%92"><span class="toc-number">1.7.</span> <span class="toc-text">一些反模式提醒</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E7%BB%93%E8%AF%AD"><span class="toc-number">1.8.</span> <span class="toc-text">结语</span></a></li></ol></li></ol></div></div><div class="card-widget card-recent-post"><div class="item-headline"><i class="fas fa-history"></i><span>最新文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/4483a5b.html" title="UniTask学习与使用"><img src="/img/Title/Unitask.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="UniTask学习与使用"/></a><div class="content"><a class="title" href="/posts/4483a5b.html" title="UniTask学习与使用">UniTask学习与使用</a><time datetime="2026-05-23T07:13:37.986Z" title="发表于 2026-05-23 15:13:37">2026-05-23</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/b9e16296.html" title="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask"><img src="/img/Title/waitChoose.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask"/></a><div class="content"><a class="title" href="/posts/b9e16296.html" title="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask">Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</a><time datetime="2026-05-23T04:20:00.000Z" title="发表于 2026-05-23 12:20:00">2026-05-23</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/604d34e4.html" title="ZString-Unity的0GC字符串操作"><img src="/img/Title/ZString.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="ZString-Unity的0GC字符串操作"/></a><div class="content"><a class="title" href="/posts/604d34e4.html" title="ZString-Unity的0GC字符串操作">ZString-Unity的0GC字符串操作</a><time datetime="2026-05-10T09:05:26.076Z" title="发表于 2026-05-10 17:05:26">2026-05-10</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/71da87fc.html" title="Unity的动态图集实现"><img src="/img/Title/DynamicAtlas.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity的动态图集实现"/></a><div class="content"><a class="title" href="/posts/71da87fc.html" title="Unity的动态图集实现">Unity的动态图集实现</a><time datetime="2026-03-28T07:50:27.537Z" title="发表于 2026-03-28 15:50:27">2026-03-28</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/8434956c.html" title="UI背景模糊的两种实现方法"><img src="/img/Title/UI_Blur.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="UI背景模糊的两种实现方法"/></a><div class="content"><a class="title" href="/posts/8434956c.html" title="UI背景模糊的两种实现方法">UI背景模糊的两种实现方法</a><time datetime="2026-03-13T04:36:37.337Z" title="发表于 2026-03-13 12:36:37">2026-03-13</time></div></div></div></div></div></div></main><footer id="footer"><div class="footer-other"><div class="footer-copyright"><span class="copyright">&copy;2025 - 2026 By 穿越时空的思念</span></div><div class="footer_custom_text">每天进步一点，做更好的自己!</div></div></footer></div><div id="rightside"><div id="rightside-config-hide"><button id="readmode" type="button" title="阅读模式"><i class="fas fa-book-open"></i></button><button id="darkmode" type="button" title="日间和夜间模式切换"><i class="fas fa-adjust"></i></button><button id="hide-aside-btn" type="button" title="单栏和双栏切换"><i class="fas fa-arrows-alt-h"></i></button></div><div id="rightside-config-show"><button id="rightside-config" type="button" title="设置"><i class="fas fa-cog fa-spin"></i></button><button class="close" id="mobile-toc-button" type="button" title="目录"><i class="fas fa-list-ul"></i></button><button id="go-up" type="button" title="回到顶部"><span class="scroll-percent"></span><i class="fas fa-arrow-up"></i></button></div></div><div><script src="/js/utils.js"></script><script src="/js/main.js"></script><div class="js-pjax"><script>(async () => {
+  const showKatex = () => {
+    document.querySelectorAll('#article-container .katex').forEach(el => el.classList.add('katex-show'))
+  }
+
+  if (!window.katex_js_css) {
+    window.katex_js_css = true
+    await btf.getCSS('https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css')
+    if (true) {
+      await btf.getScript('https://cdn.jsdelivr.net/npm/katex/dist/contrib/copy-tex.min.js')
+    }
+  }
+
+  showKatex()
+})()</script></div><script defer="defer" id="ribbon" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-ribbon.min.js" size="150" alpha="0.6" zIndex="-1" mobile="true" data-click="true"></script><script defer="defer" id="fluttering_ribbon" mobile="true" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-fluttering-ribbon.min.js"></script><div id="local-search"><div class="search-dialog"><nav class="search-nav"><span class="search-dialog-title">搜索</span><span id="loading-status"></span><button class="search-close-button"><i class="fas fa-times"></i></button></nav><div class="text-center" id="loading-database"><i class="fas fa-spinner fa-pulse"></i><span>  数据加载中</span></div><div class="search-wrap"><div id="local-search-input"><div class="local-search-box"><input class="local-search-box--input" placeholder="搜索文章" type="text"/></div></div><hr/><div id="local-search-results"></div><div id="local-search-stats-wrap"></div></div></div><div id="search-mask"></div><script src="/js/search/local-search.js"></script></div></div></body></html>
