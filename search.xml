@@ -273,6 +273,257 @@ shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#12
 ]]></content>
   </entry>
   <entry>
+    <title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</title>
+    <url>/posts/b9e16296.html</url>
+    <content><![CDATA[Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask
+在 Unity 项目里，”等一段时间再做某件事”、”等加载完再回调”、”等动画播完再切场景” 这类需求几乎天天遇到。选型不当，轻则代码难读，重则 GC 卡顿、生命周期错乱、回调地狱。本文把目前主流的三种方案放在一起做一次彻底的对比。
+
+
+引子：我们到底在解决什么问题Unity 的核心循环是单线程帧驱动的：所有游戏逻辑都跑在主线程，按 PlayerLoop 的节拍一帧一帧推进。这就意味着 “异步等待” 在 Unity 里本质上是一个时间&#x2F;事件维度的问题，而不是一个 “线程切换” 的问题。
+我们需要解决的典型场景有：
+
+等待 N 秒后执行某件事（技能 CD、UI 提示自动消失）
+等待某个资源加载完成（AssetBundle、Addressables、网络请求）
+等待某个条件成立（敌人进入视野、玩家按下按键、动画播放到某一帧）
+串行&#x2F;并行编排多个上述等待（连招、剧情演出、新手引导）
+
+围绕这些需求，社区演化出了三种主流方案，下面逐一拆解。
+
+方案一：自己编写基于 Mono 的管理器，在 Update 中轮询思路写一个常驻的 MonoBehaviour 单例（通常叫 TimerManager、UpdateManager 之类），把所有”等一会儿&#x2F;等条件”的任务塞进一个 List，每帧 Update 里遍历检查，到点了就触发回调。
+最小示例public class TimerManager : MonoBehaviour&#123;    public static TimerManager Instance &#123; get; private set; &#125;    private class TimerTask    &#123;        public float remaining;        public Action onComplete;        public bool useUnscaled;    &#125;    private readonly List&lt;TimerTask&gt; _tasks = new(64);    private readonly List&lt;TimerTask&gt; _toRemove = new(16);    private void Awake()    &#123;        if (Instance != null) &#123; Destroy(gameObject); return; &#125;        Instance = this;        DontDestroyOnLoad(gameObject);    &#125;    public void Delay(float seconds, Action callback, bool useUnscaled = false)    &#123;        _tasks.Add(new TimerTask        &#123;            remaining = seconds,            onComplete = callback,            useUnscaled = useUnscaled        &#125;);    &#125;    private void Update()    &#123;        float dt = Time.deltaTime;        float unscaledDt = Time.unscaledDeltaTime;        for (int i = 0; i &lt; _tasks.Count; i++)        &#123;            var t = _tasks[i];            t.remaining -= t.useUnscaled ? unscaledDt : dt;            if (t.remaining &lt;= 0f)            &#123;                try &#123; t.onComplete?.Invoke(); &#125;                catch (Exception e) &#123; Debug.LogException(e); &#125;                _toRemove.Add(t);            &#125;        &#125;        if (_toRemove.Count &gt; 0)        &#123;            for (int i = 0; i &lt; _toRemove.Count; i++) _tasks.Remove(_toRemove[i]);            _toRemove.Clear();        &#125;    &#125;&#125;// 使用TimerManager.Instance.Delay(1.5f, () =&gt; Debug.Log(&quot;到点了&quot;));
+
+优势
+完全可控：调度逻辑是你自己写的，想加优先级、想分组暂停、想统一加锁、想统一序列化保存——全在掌心。
+无第三方依赖：项目不引入任何外部库，体积可控，审包也方便。
+行为可预测：所有任务统一在一个 Update 节点跑，时序非常确定，没有”在 LateUpdate 还是 FixedUpdate 触发”之类的隐性陷阱。
+天然适合数据驱动：任务是普通 C# 对象，序列化、热重载、回放都好接。
+性能基线清晰：知道 Update 里就一个 for 循环，开销心里有数；优化也容易做（比如改最小堆、按到期时间排序）。
+
+劣势
+写法是回调式的，连续等待会变成回调地狱
+TimerManager.Instance.Delay(1f, () =&gt; &#123;    Load(&quot;a&quot;, () =&gt; &#123;        TimerManager.Instance.Delay(0.5f, () =&gt; &#123;            Load(&quot;b&quot;, () =&gt; &#123;                // ……            &#125;);        &#125;);    &#125;);&#125;);
+
+代码缩进越来越深，业务流程被割裂在多个 lambda 里，调试栈也基本看不出原始顺序。
+
+生命周期管理全靠自觉：发起方对象被销毁了，回调里访问 this.transform 直接 MissingReferenceException。你得自己在管理器里加 owner 检查，或者每个回调里手写 if (this == null) return;。
+
+错误处理分散：每个 callback 内部都得自己 try&#x2F;catch，否则一个异常就吞掉，难定位。
+
+每种”等待类型”都要手写一遍：等时间、等条件、等帧数、等资源——管理器要么膨胀成大杂烩，要么拆成一堆 Manager。
+
+没有”取消”的统一语义：要支持取消，就得自己设计 handle、token 之类的机制，相当于把 .NET 的 CancellationToken 又造了一遍。
+
+
+推荐使用场景
+项目是底层框架&#x2F;SDK，不希望引入 UniTask 这种较大的依赖。
+需要极强的调度可控性：比如帧同步联机游戏，要求所有定时任务在固定的 PlayerLoop 节点执行，且要能被回放系统记录。
+运行环境受限：某些老版本 Unity（5.x、2017 早期）、IL2CPP 兼容性敏感的平台。
+场景非常简单：整个项目就十几个定时回调，犯不上引入异步框架。
+
+
+方案二：使用 Unity 协程（Coroutine）思路利用 C# 的迭代器 (IEnumerator + yield return) 配合 Unity 的 StartCoroutine API，让”等待”在语法层面顺序化。底层其实就是 Unity 自己维护了一个状态机调度器，每帧遍历活跃的协程、检查 YieldInstruction 是否完成、不完成就跳过、完成就 MoveNext 一次。
+最小示例public class Demo : MonoBehaviour&#123;    private void Start()    &#123;        StartCoroutine(Sequence());    &#125;    private IEnumerator Sequence()    &#123;        Debug.Log(&quot;开始&quot;);        yield return new WaitForSeconds(1f);        Debug.Log(&quot;加载资源&quot;);        var req = Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        yield return req;        var tex = req.asset as Texture;        Debug.Log($&quot;加载完成: &#123;tex.name&#125;&quot;);        yield return new WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;&#125;
+
+优势
+官方原生支持：无依赖，所有 Unity 版本都可用，文档与社区资料丰富。
+顺序化写法：相比方案一的回调嵌套，协程是直线代码，读起来接近同步代码的体验。
+与 MonoBehaviour 生命周期联动：对象被 SetActive(false) 时协程自动暂停，被 Destroy 时协程自动停止——很多生命周期问题被官方兜底了。
+学习成本低：只要懂 yield，半天就能上手。
+与 Unity 自有异步 API 天然兼容：AsyncOperation、UnityWebRequest、Resources.LoadAsync 这些都可以直接 yield return。
+
+劣势
+不能返回值：IEnumerator 没有泛型版本，想从协程拿结果只能塞 out 参数包装、塞回调、或者塞到成员变量里——非常别扭。
+
+不能 try&#x2F;catch 跨 yield 的异常：yield return 之后的代码不在原调用栈，异常一旦发生，要么被吞，要么打到 Console 里，外层的 try&#x2F;catch 抓不到。
+IEnumerator Bad()&#123;    yield return new WaitForSeconds(1f);    throw new Exception(&quot;boom&quot;);  // 外层无法 catch&#125;
+
+GC 压力：new WaitForSeconds(1f) 每次都堆分配；yield return null 触发的状态机本身也是引用类型。高频协程（比如每个子弹一个）很容易刷出 GC 曲线。
+
+缓解办法是缓存 WaitForSeconds 实例、或用 WaitForSecondsRealtime，但只是缓解，不是根治。
+
+
+取消只能 StopCoroutine：取消粒度粗糙，而且 StopCoroutine 是直接终止状态机，不会执行 finally（在某些 Unity 版本里 finally 会执行，但行为历来不太一致），资源清理需要靠 OnDisable &#x2F; OnDestroy 兜底。
+
+必须挂在 MonoBehaviour 上：纯 C# 类（比如你的 Service、Model 层）不能直接开协程，要么持有一个 MB 引用，要么做一个”协程宿主”单例，相当于回退到方案一的思路。
+
+组合困难：想要”并行等 A 和 B 然后继续”、”等 A 或 B 任一完成就继续”——协程没有原生的 WhenAll &#x2F; WhenAny，得自己用计数器或者嵌套协程实现，很笨拙。
+
+不支持线程切换：完全跑在主线程，想做 CPU 密集型计算后回主线程，还是得自己用 Task + SynchronizationContext 手搓。
+
+PlayerLoop 时序固定：协程只在固定几个时机推进（Update、LateUpdate、FixedUpdate 后等），想精确控制”我希望这个回调在 PreLateUpdate 触发”做不到。
+
+
+推荐使用场景
+简单的 UI&#x2F;演出&#x2F;教程流程：步骤短、不需要返回值、不需要复杂错误处理。
+遗留项目：项目已经大量使用协程，团队熟悉这种风格，没有迁移收益。
+学习&#x2F;原型阶段：快速验证想法，不在乎 GC 与扩展性。
+被某些第三方 API 强制要求：比如某些插件的回调只支持 IEnumerator 形式。
+
+
+方案三：使用 UniTask思路UniTask 是 Cysharp 开源的、专为 Unity 设计的高性能异步库。它用 struct 实现的 UniTask 类型替代 Task，把异步续体直接挂到 Unity 的 PlayerLoop 上跑，配合 C# 的 async/await 语法，让 Unity 的异步代码既顺序化、又零分配。
+最小示例using Cysharp.Threading.Tasks;public class Demo : MonoBehaviour&#123;    private async UniTaskVoid Start()    &#123;        Debug.Log(&quot;开始&quot;);        await UniTask.Delay(1000);        Debug.Log(&quot;加载资源&quot;);        var tex = await Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        Debug.Log($&quot;加载完成&quot;);        await UniTask.WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;    private async UniTask&lt;int&gt; LoadScoreAsync()    &#123;        await UniTask.Delay(500);        return 100;  // 协程做不到的&quot;带返回值&quot;    &#125;&#125;
+
+优势
+async/await 顺序化语法：和协程一样直线易读，但比协程更接近”普通同步代码”，try&#x2F;catch、return、using 都正常工作。
+
+可返回值：UniTask&lt;T&gt; 直接拿结果，告别”用成员变量传值”的丑陋写法。
+
+真正的异常传播：异常会顺着 await 链一路传到能 catch 的地方，全链路 try&#x2F;catch 都能抓。
+try&#123;    await LoadAsync();&#125;catch (Exception ex)&#123;    Debug.LogError(ex);  // 真的会进来&#125;
+
+零&#x2F;极低 GC：基于 struct + 自定义 AsyncMethodBuilder + 对象池，同步完成路径完全零分配，异步路径上也远低于 Task 和协程。在高频调用场景（每帧、每个子弹、每个 AI 决策）差距非常显著。
+
+强大的取消机制：标准 CancellationToken 一路透传，配合 this.GetCancellationTokenOnDestroy() 可以让对象销毁时所有相关异步自动取消，杜绝”对象死了回调还在跑”的事故。
+
+PlayerLoop 时序可精确控制：UniTask.Yield(PlayerLoopTiming.PreLateUpdate) 这种精度，协程做不到。
+
+组合算子丰富：WhenAll &#x2F; WhenAny &#x2F; Timeout &#x2F; Retry 一应俱全。
+
+不依赖 MonoBehaviour：纯 C# 层（服务、网络层、数据层）也能畅快写异步，不再需要”协程宿主”。
+
+原生支持 Unity 异步 API：AsyncOperation、UnityWebRequest、Addressables、SceneManager.LoadSceneAsync 全部可以直接 await。
+
+调试工具完善：自带 UniTask Tracker，可以在 Editor 里看到当前所有活跃的 UniTask、它们卡在哪一行、由哪个对象持有。
+
+支持线程切换：UniTask.SwitchToThreadPool() &#x2F; UniTask.SwitchToMainThread() 让 CPU 密集计算→主线程回调一行代码搞定。
+
+
+劣势
+学习曲线：team 里如果有人不熟 async/await，需要培训。UniTask vs UniTaskVoid vs Forget() vs WhenAll 等概念都要消化。
+第三方依赖：要引入一个外部库（虽然作者活跃、稳定性极好，但仍是依赖）。
+滥用风险：async/await 太顺手了，容易”事事 async”，造成不必要的状态机开销、隐藏控制流复杂度。
+错误用法的坑：忘记 .Forget() 会有警告；async void 写在 Unity 里依旧危险（应该用 UniTaskVoid）；不传 CancellationToken 会导致协程式的生命周期问题重现。
+平台兼容性：极个别老版本 Unity (2018 之前) 或某些定制 IL2CPP 平台需要确认是否完美支持，但 2019.3+ 基本无忧。
+
+推荐使用场景
+绝大多数中大型 Unity 项目的默认选择。
+异步流程复杂、需要组合、需要返回值、需要错误处理的场景：登录流程、资源管线、网络请求、剧情演出、AI 决策。
+对性能&#x2F;GC 敏感：移动端、VR、大型 MMO、需要稳定 60&#x2F;120 帧的项目。
+团队已经熟悉 async/await：从后端、客户端 (WPF&#x2F;Xamarin) 转来的同学几乎零成本上手。
+
+
+横向对比表
+
+
+维度
+Mono 轮询管理器
+Unity 协程
+UniTask
+
+
+
+语法直观度
+回调嵌套，差
+顺序化，好
+顺序化 + 同步语义，最好
+
+
+返回值
+靠回调传
+不支持
+原生 UniTask&lt;T&gt;
+
+
+异常处理
+手动 try&#x2F;catch 每个回调
+跨 yield 抓不到
+全链路 try&#x2F;catch
+
+
+取消机制
+自己造 handle
+StopCoroutine (粗糙)
+CancellationToken (标准)
+
+
+GC 压力
+取决于实现，通常较低
+较高（WaitForSeconds 等）
+极低（零分配路径）
+
+
+生命周期联动
+手动检查
+跟随 MonoBehaviour
+跟随 CancellationToken
+
+
+线程切换
+自己实现
+不支持
+一行 SwitchToXxx
+
+
+组合 (All&#x2F;Any)
+自己实现
+难写
+原生支持
+
+
+时序精度
+自己控制
+固定几个时机
+全 PlayerLoop 节点可选
+
+
+调试工具
+无
+Profiler 一般观察
+专属 Tracker
+
+
+学习成本
+低（自己写的）
+低
+中（要懂 async&#x2F;await）
+
+
+依赖
+无
+无
+引入 UniTask 包
+
+
+适合 MB 之外的纯 C# 类
+是
+否
+是
+
+
+
+选型决策建议按”项目规模 × 性能要求 × 团队背景”三轴拆开，可以给出比较明确的建议：
+项目体量很小、就几个定时回调→ 直接写一个简单的 Mono 管理器。引入框架反而是负担。
+遗留项目大量协程、团队习惯协程、没有性能问题→ 维持协程，但新模块可以尝试 UniTask，逐步替换。
+新项目、中大型、对 GC 敏感→ 直接上 UniTask，没有悬念。三套方案里它是综合最优解，唯一的代价就是团队学一下 async/await。
+底层 SDK &#x2F; 框架 &#x2F; 编辑器扩展→ 视情况而定。如果你写的是给别人用的库，且不希望强加 UniTask 依赖，可以用 Mono 管理器 + 暴露回调 API；如果你的 SDK 用户群已经在用 UniTask，那直接用更好。
+帧同步联机游戏 &#x2F; 录像回放系统→ 优先考虑自己写管理器，因为你需要对所有定时任务有完全确定的执行时序，UniTask 虽然时序可控，但要做到 bit-perfect 复现还是自己写更稳。
+
+一些反模式提醒无论选哪种方案，下面几条都值得记一下：
+
+不要 async void 写 Unity 业务方法。要么 UniTask 让人 await，要么 UniTaskVoid + .Forget() 明确即发即弃。
+不要在协程&#x2F;UniTask 里裸引用 this.transform 而不检查存活。给所有跨帧异步都传 CancellationToken，或者首行加 if (this == null) return;。
+不要每帧 new WaitForSeconds(0.1f)。要么缓存实例，要么改用 UniTask。
+不要混用多套方案而不做边界。一个项目里既写协程又写 UniTask 不是不行，但建议按模块划清楚，避免一个流程里两种写法穿插。
+不要把 UniTask 当万金油。简单的 Invoke(&quot;Foo&quot;, 1f) 能解决的事，不必非要 await UniTask.Delay。
+
+
+结语三种方案并不是互斥关系，而是覆盖了不同的复杂度区间：
+
+Mono 轮询管理器：最底层、最可控，适合简单或极特殊需求。
+协程：Unity 内置的默认选择，简单顺手，但天花板低。
+UniTask：现代 Unity 项目的事实标准，几乎在所有维度上都是协程的超集。
+
+如果让我用一句话总结：新项目无脑选 UniTask，老项目按模块渐进式迁移，特殊底层场景留给 Mono 管理器。
+]]></content>
+      <tags>
+        <tag>Unity</tag>
+        <tag>异步编程</tag>
+        <tag>协程</tag>
+        <tag>UniTask</tag>
+        <tag>性能优化</tag>
+      </tags>
+  </entry>
+  <entry>
     <title>UniTask学习与使用</title>
     <url>/posts/4483a5b.html</url>
     <content><![CDATA[UniTask 学习文档
@@ -816,6 +1067,17 @@ GetAsyncOnTriggerEnterTrigger()
 ]]></content>
   </entry>
   <entry>
+    <title>Unity的==与空并运算符(？.)</title>
+    <url>/posts/1bd27c8e.html</url>
+    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
+Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
+Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
+差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
+在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
+Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
+]]></content>
+  </entry>
+  <entry>
     <title>Unity的动态图集实现</title>
     <url>/posts/71da87fc.html</url>
     <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
@@ -834,268 +1096,6 @@ Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程�
 综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
 代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
 项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</title>
-    <url>/posts/b9e16296.html</url>
-    <content><![CDATA[Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask
-在 Unity 项目里，”等一段时间再做某件事”、”等加载完再回调”、”等动画播完再切场景” 这类需求几乎天天遇到。选型不当，轻则代码难读，重则 GC 卡顿、生命周期错乱、回调地狱。本文把目前主流的三种方案放在一起做一次彻底的对比。
-
-
-引子：我们到底在解决什么问题Unity 的核心循环是单线程帧驱动的：所有游戏逻辑都跑在主线程，按 PlayerLoop 的节拍一帧一帧推进。这就意味着 “异步等待” 在 Unity 里本质上是一个时间&#x2F;事件维度的问题，而不是一个 “线程切换” 的问题。
-我们需要解决的典型场景有：
-
-等待 N 秒后执行某件事（技能 CD、UI 提示自动消失）
-等待某个资源加载完成（AssetBundle、Addressables、网络请求）
-等待某个条件成立（敌人进入视野、玩家按下按键、动画播放到某一帧）
-串行&#x2F;并行编排多个上述等待（连招、剧情演出、新手引导）
-
-围绕这些需求，社区演化出了三种主流方案，下面逐一拆解。
-
-方案一：自己编写基于 Mono 的管理器，在 Update 中轮询思路写一个常驻的 MonoBehaviour 单例（通常叫 TimerManager、UpdateManager 之类），把所有”等一会儿&#x2F;等条件”的任务塞进一个 List，每帧 Update 里遍历检查，到点了就触发回调。
-最小示例public class TimerManager : MonoBehaviour&#123;    public static TimerManager Instance &#123; get; private set; &#125;    private class TimerTask    &#123;        public float remaining;        public Action onComplete;        public bool useUnscaled;    &#125;    private readonly List&lt;TimerTask&gt; _tasks = new(64);    private readonly List&lt;TimerTask&gt; _toRemove = new(16);    private void Awake()    &#123;        if (Instance != null) &#123; Destroy(gameObject); return; &#125;        Instance = this;        DontDestroyOnLoad(gameObject);    &#125;    public void Delay(float seconds, Action callback, bool useUnscaled = false)    &#123;        _tasks.Add(new TimerTask        &#123;            remaining = seconds,            onComplete = callback,            useUnscaled = useUnscaled        &#125;);    &#125;    private void Update()    &#123;        float dt = Time.deltaTime;        float unscaledDt = Time.unscaledDeltaTime;        for (int i = 0; i &lt; _tasks.Count; i++)        &#123;            var t = _tasks[i];            t.remaining -= t.useUnscaled ? unscaledDt : dt;            if (t.remaining &lt;= 0f)            &#123;                try &#123; t.onComplete?.Invoke(); &#125;                catch (Exception e) &#123; Debug.LogException(e); &#125;                _toRemove.Add(t);            &#125;        &#125;        if (_toRemove.Count &gt; 0)        &#123;            for (int i = 0; i &lt; _toRemove.Count; i++) _tasks.Remove(_toRemove[i]);            _toRemove.Clear();        &#125;    &#125;&#125;// 使用TimerManager.Instance.Delay(1.5f, () =&gt; Debug.Log(&quot;到点了&quot;));
-
-优势
-完全可控：调度逻辑是你自己写的，想加优先级、想分组暂停、想统一加锁、想统一序列化保存——全在掌心。
-无第三方依赖：项目不引入任何外部库，体积可控，审包也方便。
-行为可预测：所有任务统一在一个 Update 节点跑，时序非常确定，没有”在 LateUpdate 还是 FixedUpdate 触发”之类的隐性陷阱。
-天然适合数据驱动：任务是普通 C# 对象，序列化、热重载、回放都好接。
-性能基线清晰：知道 Update 里就一个 for 循环，开销心里有数；优化也容易做（比如改最小堆、按到期时间排序）。
-
-劣势
-写法是回调式的，连续等待会变成回调地狱
-TimerManager.Instance.Delay(1f, () =&gt; &#123;    Load(&quot;a&quot;, () =&gt; &#123;        TimerManager.Instance.Delay(0.5f, () =&gt; &#123;            Load(&quot;b&quot;, () =&gt; &#123;                // ……            &#125;);        &#125;);    &#125;);&#125;);
-
-代码缩进越来越深，业务流程被割裂在多个 lambda 里，调试栈也基本看不出原始顺序。
-
-生命周期管理全靠自觉：发起方对象被销毁了，回调里访问 this.transform 直接 MissingReferenceException。你得自己在管理器里加 owner 检查，或者每个回调里手写 if (this == null) return;。
-
-错误处理分散：每个 callback 内部都得自己 try&#x2F;catch，否则一个异常就吞掉，难定位。
-
-每种”等待类型”都要手写一遍：等时间、等条件、等帧数、等资源——管理器要么膨胀成大杂烩，要么拆成一堆 Manager。
-
-没有”取消”的统一语义：要支持取消，就得自己设计 handle、token 之类的机制，相当于把 .NET 的 CancellationToken 又造了一遍。
-
-
-推荐使用场景
-项目是底层框架&#x2F;SDK，不希望引入 UniTask 这种较大的依赖。
-需要极强的调度可控性：比如帧同步联机游戏，要求所有定时任务在固定的 PlayerLoop 节点执行，且要能被回放系统记录。
-运行环境受限：某些老版本 Unity（5.x、2017 早期）、IL2CPP 兼容性敏感的平台。
-场景非常简单：整个项目就十几个定时回调，犯不上引入异步框架。
-
-
-方案二：使用 Unity 协程（Coroutine）思路利用 C# 的迭代器 (IEnumerator + yield return) 配合 Unity 的 StartCoroutine API，让”等待”在语法层面顺序化。底层其实就是 Unity 自己维护了一个状态机调度器，每帧遍历活跃的协程、检查 YieldInstruction 是否完成、不完成就跳过、完成就 MoveNext 一次。
-最小示例public class Demo : MonoBehaviour&#123;    private void Start()    &#123;        StartCoroutine(Sequence());    &#125;    private IEnumerator Sequence()    &#123;        Debug.Log(&quot;开始&quot;);        yield return new WaitForSeconds(1f);        Debug.Log(&quot;加载资源&quot;);        var req = Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        yield return req;        var tex = req.asset as Texture;        Debug.Log($&quot;加载完成: &#123;tex.name&#125;&quot;);        yield return new WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;&#125;
-
-优势
-官方原生支持：无依赖，所有 Unity 版本都可用，文档与社区资料丰富。
-顺序化写法：相比方案一的回调嵌套，协程是直线代码，读起来接近同步代码的体验。
-与 MonoBehaviour 生命周期联动：对象被 SetActive(false) 时协程自动暂停，被 Destroy 时协程自动停止——很多生命周期问题被官方兜底了。
-学习成本低：只要懂 yield，半天就能上手。
-与 Unity 自有异步 API 天然兼容：AsyncOperation、UnityWebRequest、Resources.LoadAsync 这些都可以直接 yield return。
-
-劣势
-不能返回值：IEnumerator 没有泛型版本，想从协程拿结果只能塞 out 参数包装、塞回调、或者塞到成员变量里——非常别扭。
-
-不能 try&#x2F;catch 跨 yield 的异常：yield return 之后的代码不在原调用栈，异常一旦发生，要么被吞，要么打到 Console 里，外层的 try&#x2F;catch 抓不到。
-IEnumerator Bad()&#123;    yield return new WaitForSeconds(1f);    throw new Exception(&quot;boom&quot;);  // 外层无法 catch&#125;
-
-GC 压力：new WaitForSeconds(1f) 每次都堆分配；yield return null 触发的状态机本身也是引用类型。高频协程（比如每个子弹一个）很容易刷出 GC 曲线。
-
-缓解办法是缓存 WaitForSeconds 实例、或用 WaitForSecondsRealtime，但只是缓解，不是根治。
-
-
-取消只能 StopCoroutine：取消粒度粗糙，而且 StopCoroutine 是直接终止状态机，不会执行 finally（在某些 Unity 版本里 finally 会执行，但行为历来不太一致），资源清理需要靠 OnDisable &#x2F; OnDestroy 兜底。
-
-必须挂在 MonoBehaviour 上：纯 C# 类（比如你的 Service、Model 层）不能直接开协程，要么持有一个 MB 引用，要么做一个”协程宿主”单例，相当于回退到方案一的思路。
-
-组合困难：想要”并行等 A 和 B 然后继续”、”等 A 或 B 任一完成就继续”——协程没有原生的 WhenAll &#x2F; WhenAny，得自己用计数器或者嵌套协程实现，很笨拙。
-
-不支持线程切换：完全跑在主线程，想做 CPU 密集型计算后回主线程，还是得自己用 Task + SynchronizationContext 手搓。
-
-PlayerLoop 时序固定：协程只在固定几个时机推进（Update、LateUpdate、FixedUpdate 后等），想精确控制”我希望这个回调在 PreLateUpdate 触发”做不到。
-
-
-推荐使用场景
-简单的 UI&#x2F;演出&#x2F;教程流程：步骤短、不需要返回值、不需要复杂错误处理。
-遗留项目：项目已经大量使用协程，团队熟悉这种风格，没有迁移收益。
-学习&#x2F;原型阶段：快速验证想法，不在乎 GC 与扩展性。
-被某些第三方 API 强制要求：比如某些插件的回调只支持 IEnumerator 形式。
-
-
-方案三：使用 UniTask思路UniTask 是 Cysharp 开源的、专为 Unity 设计的高性能异步库。它用 struct 实现的 UniTask 类型替代 Task，把异步续体直接挂到 Unity 的 PlayerLoop 上跑，配合 C# 的 async/await 语法，让 Unity 的异步代码既顺序化、又零分配。
-最小示例using Cysharp.Threading.Tasks;public class Demo : MonoBehaviour&#123;    private async UniTaskVoid Start()    &#123;        Debug.Log(&quot;开始&quot;);        await UniTask.Delay(1000);        Debug.Log(&quot;加载资源&quot;);        var tex = await Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        Debug.Log($&quot;加载完成&quot;);        await UniTask.WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;    private async UniTask&lt;int&gt; LoadScoreAsync()    &#123;        await UniTask.Delay(500);        return 100;  // 协程做不到的&quot;带返回值&quot;    &#125;&#125;
-
-优势
-async/await 顺序化语法：和协程一样直线易读，但比协程更接近”普通同步代码”，try&#x2F;catch、return、using 都正常工作。
-
-可返回值：UniTask&lt;T&gt; 直接拿结果，告别”用成员变量传值”的丑陋写法。
-
-真正的异常传播：异常会顺着 await 链一路传到能 catch 的地方，全链路 try&#x2F;catch 都能抓。
-try&#123;    await LoadAsync();&#125;catch (Exception ex)&#123;    Debug.LogError(ex);  // 真的会进来&#125;
-
-零&#x2F;极低 GC：基于 struct + 自定义 AsyncMethodBuilder + 对象池，同步完成路径完全零分配，异步路径上也远低于 Task 和协程。在高频调用场景（每帧、每个子弹、每个 AI 决策）差距非常显著。
-
-强大的取消机制：标准 CancellationToken 一路透传，配合 this.GetCancellationTokenOnDestroy() 可以让对象销毁时所有相关异步自动取消，杜绝”对象死了回调还在跑”的事故。
-
-PlayerLoop 时序可精确控制：UniTask.Yield(PlayerLoopTiming.PreLateUpdate) 这种精度，协程做不到。
-
-组合算子丰富：WhenAll &#x2F; WhenAny &#x2F; Timeout &#x2F; Retry 一应俱全。
-
-不依赖 MonoBehaviour：纯 C# 层（服务、网络层、数据层）也能畅快写异步，不再需要”协程宿主”。
-
-原生支持 Unity 异步 API：AsyncOperation、UnityWebRequest、Addressables、SceneManager.LoadSceneAsync 全部可以直接 await。
-
-调试工具完善：自带 UniTask Tracker，可以在 Editor 里看到当前所有活跃的 UniTask、它们卡在哪一行、由哪个对象持有。
-
-支持线程切换：UniTask.SwitchToThreadPool() &#x2F; UniTask.SwitchToMainThread() 让 CPU 密集计算→主线程回调一行代码搞定。
-
-
-劣势
-学习曲线：team 里如果有人不熟 async/await，需要培训。UniTask vs UniTaskVoid vs Forget() vs WhenAll 等概念都要消化。
-第三方依赖：要引入一个外部库（虽然作者活跃、稳定性极好，但仍是依赖）。
-滥用风险：async/await 太顺手了，容易”事事 async”，造成不必要的状态机开销、隐藏控制流复杂度。
-错误用法的坑：忘记 .Forget() 会有警告；async void 写在 Unity 里依旧危险（应该用 UniTaskVoid）；不传 CancellationToken 会导致协程式的生命周期问题重现。
-平台兼容性：极个别老版本 Unity (2018 之前) 或某些定制 IL2CPP 平台需要确认是否完美支持，但 2019.3+ 基本无忧。
-
-推荐使用场景
-绝大多数中大型 Unity 项目的默认选择。
-异步流程复杂、需要组合、需要返回值、需要错误处理的场景：登录流程、资源管线、网络请求、剧情演出、AI 决策。
-对性能&#x2F;GC 敏感：移动端、VR、大型 MMO、需要稳定 60&#x2F;120 帧的项目。
-团队已经熟悉 async/await：从后端、客户端 (WPF&#x2F;Xamarin) 转来的同学几乎零成本上手。
-
-
-横向对比表
-
-
-维度
-Mono 轮询管理器
-Unity 协程
-UniTask
-
-
-
-语法直观度
-回调嵌套，差
-顺序化，好
-顺序化 + 同步语义，最好
-
-
-返回值
-靠回调传
-不支持
-原生 UniTask&lt;T&gt;
-
-
-异常处理
-手动 try&#x2F;catch 每个回调
-跨 yield 抓不到
-全链路 try&#x2F;catch
-
-
-取消机制
-自己造 handle
-StopCoroutine (粗糙)
-CancellationToken (标准)
-
-
-GC 压力
-取决于实现，通常较低
-较高（WaitForSeconds 等）
-极低（零分配路径）
-
-
-生命周期联动
-手动检查
-跟随 MonoBehaviour
-跟随 CancellationToken
-
-
-线程切换
-自己实现
-不支持
-一行 SwitchToXxx
-
-
-组合 (All&#x2F;Any)
-自己实现
-难写
-原生支持
-
-
-时序精度
-自己控制
-固定几个时机
-全 PlayerLoop 节点可选
-
-
-调试工具
-无
-Profiler 一般观察
-专属 Tracker
-
-
-学习成本
-低（自己写的）
-低
-中（要懂 async&#x2F;await）
-
-
-依赖
-无
-无
-引入 UniTask 包
-
-
-适合 MB 之外的纯 C# 类
-是
-否
-是
-
-
-
-选型决策建议按”项目规模 × 性能要求 × 团队背景”三轴拆开，可以给出比较明确的建议：
-项目体量很小、就几个定时回调→ 直接写一个简单的 Mono 管理器。引入框架反而是负担。
-遗留项目大量协程、团队习惯协程、没有性能问题→ 维持协程，但新模块可以尝试 UniTask，逐步替换。
-新项目、中大型、对 GC 敏感→ 直接上 UniTask，没有悬念。三套方案里它是综合最优解，唯一的代价就是团队学一下 async/await。
-底层 SDK &#x2F; 框架 &#x2F; 编辑器扩展→ 视情况而定。如果你写的是给别人用的库，且不希望强加 UniTask 依赖，可以用 Mono 管理器 + 暴露回调 API；如果你的 SDK 用户群已经在用 UniTask，那直接用更好。
-帧同步联机游戏 &#x2F; 录像回放系统→ 优先考虑自己写管理器，因为你需要对所有定时任务有完全确定的执行时序，UniTask 虽然时序可控，但要做到 bit-perfect 复现还是自己写更稳。
-
-一些反模式提醒无论选哪种方案，下面几条都值得记一下：
-
-不要 async void 写 Unity 业务方法。要么 UniTask 让人 await，要么 UniTaskVoid + .Forget() 明确即发即弃。
-不要在协程&#x2F;UniTask 里裸引用 this.transform 而不检查存活。给所有跨帧异步都传 CancellationToken，或者首行加 if (this == null) return;。
-不要每帧 new WaitForSeconds(0.1f)。要么缓存实例，要么改用 UniTask。
-不要混用多套方案而不做边界。一个项目里既写协程又写 UniTask 不是不行，但建议按模块划清楚，避免一个流程里两种写法穿插。
-不要把 UniTask 当万金油。简单的 Invoke(&quot;Foo&quot;, 1f) 能解决的事，不必非要 await UniTask.Delay。
-
-
-结语三种方案并不是互斥关系，而是覆盖了不同的复杂度区间：
-
-Mono 轮询管理器：最底层、最可控，适合简单或极特殊需求。
-协程：Unity 内置的默认选择，简单顺手，但天花板低。
-UniTask：现代 Unity 项目的事实标准，几乎在所有维度上都是协程的超集。
-
-如果让我用一句话总结：新项目无脑选 UniTask，老项目按模块渐进式迁移，特殊底层场景留给 Mono 管理器。
-]]></content>
-      <tags>
-        <tag>Unity</tag>
-        <tag>异步编程</tag>
-        <tag>协程</tag>
-        <tag>UniTask</tag>
-        <tag>性能优化</tag>
-      </tags>
-  </entry>
-  <entry>
-    <title>Unity的==与空并运算符(？.)</title>
-    <url>/posts/1bd27c8e.html</url>
-    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
-Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
-Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
-差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
-在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
-Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
 ]]></content>
   </entry>
   <entry>
@@ -1140,47 +1140,110 @@ state变量的使用从截图可以看到，MoveNext()中维护的switch充当�
 ]]></content>
   </entry>
   <entry>
+    <title>Unity的TMP顶点数据优化</title>
+    <url>/posts/7c9d3a21.html</url>
+    <content><![CDATA[上一篇写了 Unity的TMP的纹理优化，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。
+优化目标TMP 默认的 SDF Shader 已经支持描边、阴影、Glow 等效果，但这些参数大多来自 Material。只要某个文本的描边颜色、宽度不一样，就很容易产生新的材质实例。UI 里如果存在大量名字、伤害数字、状态文字，这部分材质数量和 Canvas 渲染批次都会变得不好控制。
+我的做法是让材质只负责通用渲染逻辑，把每个文本独有的数据写入 Mesh 顶点通道。Shader 渲染每个字时，从顶点里读取自己的描边或阴影参数。这样多个文字可以共用同一个材质，同时又能显示不同效果。
+
+为什么可以把数据放进顶点Unity 的 UI Mesh 顶点不只有 position、color、uv0。Canvas 还可以通过 additionalShaderChannels 额外传递 uv1、uv2、normal、tangent 等数据。对 TMP UGUI 来说，我们可以把自定义数据写入 Mesh 的 UV3，也就是代码里的 SetUVs(2, data)，在 Shader 里对应 TEXCOORD2。
+这里不把数据写进 color，是因为 TMP 原本就会使用顶点颜色做文字颜色和透明度。也不写进 uv0，因为 uv0 要采样字体 Atlas。选择 TEXCOORD2 的好处是与 TMP 原有采样逻辑解耦，结构也足够清晰：一个 Vector4 就有四个 float 可以使用。
+需要注意的是，UGUI 默认不会把所有额外通道都传给 Shader，所以必须打开 Canvas 的 TexCoord2：
+private void EnsureCanvasChannels()&#123;    Canvas canvas = GetComponentInParent&lt;Canvas&gt;();    if (canvas == null)    &#123;        return;    &#125;    canvas.additionalShaderChannels |= AdditionalCanvasShaderChannels.TexCoord2;&#125;
+
+写入顶点数据每次参数变化或文字内容变化时，先让 TMP 刷新 Mesh，然后遍历 textInfo.meshInfo。每个 sub mesh 都填入同一份效果数据，再写到 UV3：
+public void ApplyVertexEffect()&#123;    if (isApplying)    &#123;        return;    &#125;    CacheTextComponent();    if (textComponent == null)    &#123;        return;    &#125;    isApplying = true;    try    &#123;        textComponent.ForceMeshUpdate(false, false);        TMP_TextInfo textInfo = textComponent.textInfo;        Vector4 effectData = PackEffectData();        TMP_MeshInfo[] meshInfos = textInfo.meshInfo;        for (int i = 0; i &lt; meshInfos.Length; i++)        &#123;            Mesh mesh = meshInfos[i].mesh;            if (mesh == null || mesh.vertexCount == 0)            &#123;                continue;            &#125;            FillChannel(effectChannel, mesh.vertexCount, effectData);            mesh.SetUVs(2, effectChannel);            textComponent.UpdateGeometry(mesh, i);        &#125;        if (textComponent.mesh != null)        &#123;            textComponent.canvasRenderer.SetMesh(textComponent.mesh);        &#125;    &#125;    finally    &#123;        isApplying = false;    &#125;&#125;
+
+这段逻辑的关键是 mesh.SetUVs(2, effectChannel)。下标 2 对应 UV3，在 Shader 的输入结构里就是 texcoord2 : TEXCOORD2。只要顶点数一致，每个字的四个顶点都能拿到同一组效果参数。
+数据如何设计我把效果分成三种模式：
+public enum TMPVertexEffectMode&#123;    None = 0,    Outline = 1,    Shadow = 2&#125;
+
+Vector4 的四个分量被这样使用：
+
+
+
+模式
+x
+y
+z
+w
+
+
+
+描边
+R
+G
+B + width
+mode + direction
+
+
+阴影
+offsetX
+offsetY
+R + G
+mode + B + strength
+
+
+描边和阴影不会同时作为像素效果写入同一个 Vector4，这样可以用同一套通道表达两套数据。弯曲效果不进 Shader，而是在 C# 端直接修改顶点位置，所以可以和描边或阴影叠加。
+数据压缩原理一个 Vector4 看起来有四个 float，但要表达描边颜色 RGB、宽度、方向，或者阴影颜色 RGB、偏移、强度和模式，直接存会不够。解决办法是把两个 0 到 1 的值压进一个 float。
+压缩步骤是：
+
+把两个归一化值分别量化成 0 到 255 的整数，也就是 8 bit。
+第一个值左移 8 位放到高 8 位，第二个值放到低 8 位。
+合成一个 0 到 65535 的 16 bit 整数。
+再除以 65535，变回 0 到 1 的 float，方便走顶点通道传给 Shader。
+
+核心代码如下：
+private static float PackTwoBytes(float highValue, float lowValue)&#123;    int highByte = Mathf.RoundToInt(Mathf.Clamp01(highValue) * 255f);    int lowByte = Mathf.RoundToInt(Mathf.Clamp01(lowValue) * 255f);    return ((highByte &lt;&lt; 8) | lowByte) / 65535f;&#125;
+
+描边模式里，x/y 存颜色的 R&#x2F;G，z 存 B 和描边宽度，w 存模式和描边方向：
+private static Vector4 PackOutlineData(    Color color,    float width,    TMPVertexOutlineDirection direction)&#123;    int blue = Mathf.RoundToInt(Mathf.Clamp01(color.b) * 255f);    int widthByte = Mathf.RoundToInt(Mathf.Clamp01(width) * 255f);    float packedBlueAndWidth = ((blue &lt;&lt; 8) | widthByte) / 65535f;    float packedModeAndDirection =        (float)TMPVertexEffectMode.Outline +        (direction == TMPVertexOutlineDirection.Outer ? 0.1f : 0f);    return new Vector4(        color.r,        color.g,        packedBlueAndWidth,        packedModeAndDirection);&#125;
+
+阴影模式里，x/y 直接存偏移。颜色和强度被拆成两组压缩数据：z 存 R&#x2F;G，w 的小数部分存 B&#x2F;strength：
+private static Vector4 PackShadowData(    Color color,    Vector2 offset,    float strength)&#123;    float packedRedAndGreen = PackTwoBytes(color.r, color.g);    float packedBlueAndStrength = PackTwoBytes(color.b, strength);    return new Vector4(        offset.x,        offset.y,        packedRedAndGreen,        (float)TMPVertexEffectMode.Shadow + packedBlueAndStrength * 0.1f);&#125;
+
+这里把阴影的 packedBlueAndStrength 乘以 0.1 放进 w 的小数部分，是为了让 w 的整数部分仍然能表示模式 2。Shader 端用四舍五入取模式，用 (w - 2) * 10 取回被压缩的数据。
+这个方案的代价是精度从 float 降到 8 bit。颜色通道和宽度、强度用 0 到 255 的精度已经足够；阴影偏移没有压缩，仍然直接存 float。
+Shader 解包Shader 顶点输入结构需要增加 TEXCOORD2：
+struct vertex_t&#123;    float4 position  : POSITION;    fixed4 color     : COLOR;    float2 texcoord0 : TEXCOORD0;    float2 texcoord1 : TEXCOORD1;    float4 texcoord2 : TEXCOORD2;&#125;;struct pixel_t&#123;    float4 position     : SV_POSITION;    fixed4 color        : COLOR;    float2 atlas        : TEXCOORD0;    float4 param        : TEXCOORD1;    float4 vertexEffect : TEXCOORD6;&#125;;
+
+顶点阶段只负责把数据传到片元阶段：
+output.vertexEffect = float4(input.texcoord2.xyz, input.texcoord2.w);
+
+解包函数与 C# 的打包规则对应：
+float2 DecodePackedBlueAndWidth(float packedValue)&#123;    float packedInt = floor(saturate(packedValue) * 65535.0 + 0.5);    float highValue = floor(packedInt / 256.0) / 255.0;    float lowValue = (packedInt - floor(packedInt / 256.0) * 256.0) / 255.0;    return float2(highValue, lowValue);&#125;float DecodeVertexEffectMode(float packedMode)&#123;    return floor(packedMode + 0.5);&#125;float DecodeShadowPackedBlueAndStrength(float packedMode)&#123;    return saturate((packedMode - 2.0) * 10.0);&#125;float DecodeOutlineDirection(float packedMode)&#123;    return step(0.5, saturate((packedMode - 1.0) * 10.0));&#125;
+
+片元阶段先判断当前模式，再决定是使用材质上的描边参数，还是使用顶点传进来的参数：
+float effectMode = DecodeVertexEffectMode(input.vertexEffect.w);float outlineMode = 1.0 - step(0.5, abs(effectMode - 1.0));float shadowMode = 1.0 - step(0.5, abs(effectMode - 2.0));float2 decodedOutline = DecodePackedBlueAndWidth(input.vertexEffect.z);float vertexOutlineWidth = decodedOutline.y * outlineMode;half4 vertexOutlineColor =    half4(input.vertexEffect.rg, decodedOutline.x, 1);half4 outlineColor = lerp(    _OutlineColor,    vertexOutlineColor,    step(0.0001, vertexOutlineWidth));
+
+阴影也是同理。偏移从 x/y 直接取，颜色和强度从压缩值里解出来：
+float2 decodedShadowRedAndGreen =    DecodePackedBlueAndWidth(input.vertexEffect.z);float2 decodedShadowBlueAndStrength =    DecodePackedBlueAndWidth(        DecodeShadowPackedBlueAndStrength(input.vertexEffect.w));float2 vertexShadowOffset =    -input.vertexEffect.xy * _GradientScale /    float2(_TextureWidth, _TextureHeight);float shadowSample = tex2D(_MainTex, input.atlas + vertexShadowOffset).a;float shadowAlpha =    saturate((shadowSample - 0.5) * scale + 0.5) *    decodedShadowBlueAndStrength.y *    shadowMode;half4 vertexShadowColor = half4(    decodedShadowRedAndGreen.x,    decodedShadowRedAndGreen.y,    decodedShadowBlueAndStrength.x,    1);vertexShadowColor.a *= shadowAlpha;vertexShadowColor.rgb *= vertexShadowColor.a;faceColor += vertexShadowColor * (1 - faceColor.a);
+
+弯曲效果弯曲没有必要进 Shader，因为它本质上是改顶点位置，不是像素颜色。这里直接根据文字包围盒把 x 坐标归一化到 0 到 1，再用 AnimationCurve 得到 y 方向偏移：
+private void ApplyBend(TMP_MeshInfo meshInfo)&#123;    Vector3[] vertices = meshInfo.vertices;    Bounds bounds = textComponent.textBounds;    float width = Mathf.Max(bounds.size.x, 0.001f);    float bendScale = bendStrength * width * 0.25f;    AnimationCurve curve = bendCurve ?? CreateArchCurve();    for (int i = 0; i &lt; vertices.Length; i++)    &#123;        float normalizedX =            Mathf.InverseLerp(bounds.min.x, bounds.max.x, vertices[i].x);        vertices[i].y += curve.Evaluate(normalizedX) * bendScale;    &#125;    meshInfo.mesh.vertices = vertices;    meshInfo.mesh.RecalculateBounds();&#125;
+
+这种方式的好处是弯曲可以和描边、阴影同时存在：弯曲改 position，描边和阴影读 TEXCOORD2，两者互不抢数据。
+使用方式我额外加了一个创建入口：GameObject/UI/TMP Vertex Outline Text。它会自动创建 TMP 文本、挂上 TMPVertexOutlineUGUI，并切换到自定义 Shader 材质。
+已有的 TextMeshProUGUI 也可以在组件右键菜单中选择 Add Vertex Outline Controller。如果手动配置，需要确认两件事：
+
+文本材质使用 TextMeshPro/Distance Field Vertex Outline。
+所在 Canvas 开启了 AdditionalCanvasShaderChannels.TexCoord2。
+
+
+
+总结这套方案的核心是把“材质级参数”变成“顶点级参数”。材质只保留一份通用 Shader，具体颜色、宽度、偏移、强度都从顶点通道读取。数据量不大时，用两个 8 bit 值压进一个 float，可以在不额外增加通道的情况下放下更多参数。
+它适合用于大量 TMP UGUI 文本需要不同描边或阴影的场景。限制也很明确：写入顶点后，文字内容变化、字体变化、Mesh 刷新时都要重新写入；如果还想扩展更多效果，需要重新规划 Vector4 的字段分配，或者启用更多顶点通道。
+项目地址OptimizeUnityTMP
+参考文章TMP(TextMeshPro)优化篇 — 描边投影效果
+]]></content>
+  </entry>
+  <entry>
     <title>Unity节点编辑器(一) -- 需求分析</title>
     <url>/posts/4cce52e3.html</url>
     <content><![CDATA[最近需求的思考最近工作上在处理项目内的引导系统，我之前的做法是根据策划的需求，通过继承引导基类实现具体子类的做法，来实现不同的引导。但是这样有一个缺点：所有的引导实现都基于我的硬编码，当引导的流程变更的时候，我代码的流程也需要跟着修改，非常麻烦。而且这些变更也仅仅是步骤改变，1-&gt;2-&gt;3变成了1-&gt;3-&gt;2，修改就是纯粹的体力活，非常的琐碎。然后最近在各种机缘巧合之下，接触到了节点编辑器，突然激发了我的灵感，要是我把引导的逻辑封装在一个Node里面，由策划自己去建立Node流程，就是完全由策划编辑，我提供具体的引导Node实现，完美解决。
 关于节点编辑器其实这个东西在已经应用非常广泛了，Unity的ShareGraph和UE的蓝图，都是节点编辑器的应用。而且在Unity上开源的节点编辑器框架也不少，比较出名的就有：xNode，NodeGraphProcessor。本来是打算直接使用这些框架，省下自己造轮子的时间，但是深入了解之后，发现这些框架为了通用性，代码都比较多且太重度了(我目前的需求根本用不上)。所以就想着自己造一个只提供流程的简单节点编辑器。
 编辑器需求首先，因为颜值问题节点编辑器我选择了基于Unity的GraphView实现。要实现的需求：1、GraphView的创建与资源的打开。2、Node的创建、连接。3、GraphView的保存、序列化&#x2F;反序列化。4、需要具有拓展性，为之后功能提供底层复用。
 代码结构因为编辑器窗口仅做显示和把数据保存，就只有model-view两层。model层为保存的Unity的so数据，view层则是解析so数据创建出对应的节点和连接。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity节点编辑器(二) -- GraphView窗口</title>
-    <url>/posts/9891abd3.html</url>
-    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
-窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
-public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
-背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
-
-GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
-创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
-拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
-
-实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity节点编辑器(五) -- 引导遮罩</title>
-    <url>/posts/d34f19cf.html</url>
-    <content><![CDATA[遮罩需求目前市面上游戏的引导，基本上都采用了在需要突出的地方高亮引导玩家，通过点击等方式去触发下一步操作。所以需求就抽象成两个：1.高亮某一块区域2.高亮区域的点击判断和通知
-高亮区域实现高亮区域有多种做法，第一种是通过继承Unity的BaseMeshEffect去自己写顶点、三角面最后形成高亮，第二种是使用Shader通过像素的判定实现。第一种比较里面的逻辑比较复杂，所以我用的是第二种。
-矩形高亮区域的C#代码实现一个矩形高亮区域需要两个数据：矩形的中心和大小。为了使用同一个材质实现合批，我使用一个继承于BaseMeshEffect的类中(Unity提供的类不熟悉的可以查一下)，在类中把这两个数据写入每个顶点中。
-顶点处理基类重写ModifyMesh方法，在其中使用抽象方法SetVertexData，传入顶点数据，并重新赋值出来。
-public abstract class MaskVertexBase : BaseMeshEffect&#123;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);&#125;
-矩形顶点类在具体的矩形类中，把中心位置，高度和宽度放入顶点的uv1信息中。
-public class RectMaskVertex : MaskVertexBase&#123;    [Header(&quot;中心位置&quot;)]    public Vector2 centerPos;    [Header(&quot;宽度&quot;)]    public float width;    [Header(&quot;高度&quot;)]    public float height;        protected override UIVertex SetVertexData(UIVertex vertex)    &#123;        vertex.uv1.x = centerPos.x;        vertex.uv1.y = centerPos.y;        vertex.uv1.z = width;        vertex.uv1.w = height;        return vertex;    &#125;&#125;
-
-高亮区域的Shader代码高亮逻辑有两步：1.在顶点着色器中获得像素的屏幕坐标位置。因为挂载的材质是在Unity的UI中所以model空间坐标直接就是屏幕坐标。2.在片元着色器中判断像素是否需要高亮。是否需要高亮则是对应的需求。如果是在一个矩形中，则需要判断这个像素坐标位置是否在其中，在则直接输出透明，反之输出源颜色。下面给出矩形的实现。
- v2f vert (appdata v)&#123;    v2f o;    o.screenPos = v.vertex.xy;    o.vertex = UnityObjectToClipPos(v.vertex);    o.uv = TRANSFORM_TEX(v.uv, _MainTex);    o.uv1 = v.uv1;    o.color = v.color;    return o;&#125;fixed4 frag (v2f i) : SV_Target&#123;    fixed4 col = tex2D(_MainTex, i.uv)*i.color;    float2 centerPos = i.uv1.xy;    float width = i.uv1.z / 2;    float height = i.uv1.w / 2;    float2 offset = i.screenPos.xy - centerPos;    col.a *= (abs(offset.x) &gt; width) || (abs(offset.y) &gt; height);         return col;&#125;
-
-高亮区域的点击判断和通知判断是否点击到了高亮区域，这个逻辑需要在C#端实现。在顶点处理基类中继承了IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler这几个接口去监听点击输入，并且抽象了一个判断是否在高亮区域内的委托，在具体的业务中添加进来。只需要在点击的时候执行委托进行判定，若判定为true则通过eventSystem.RaycastAll(eventData, raycastResult)获得当前高亮后的，所有的可点击物体，然后遍历去执行第一个GameObject的点击。下面给出完整的MaskVertexBase代码
-using System.Collections;using System.Collections.Generic;using UnityEngine;using UnityEngine.EventSystems;using UnityEngine.UI;public delegate bool PointerEventCallback(PointerEventData eventData);/// &lt;summary&gt;/// 遮罩的定点类，负责设置遮罩的顶点数据/// &lt;/summary&gt;[RequireComponent(typeof(Image))]public abstract class MaskVertexBase : BaseMeshEffect, IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler&#123;    [Header(&quot;向Shader传递的数据&quot;)]    public AdditionalCanvasShaderChannels additionalCanvasShaderChannels;    protected Canvas canvas;    protected Camera uiCamera;    protected RectTransform canvansRect;    protected RectTransform rectTransform;    [HideInInspector]    public EventSystem eventSystem;    [HideInInspector]    public PointerEventCallback raycastLocationValid;    private List&lt;RaycastResult&gt; raycastResult;    private GameObject m_lastHoverGameObject;    protected virtual void OnEnable()    &#123;        base.OnEnable();        if (canvas == null)        &#123;            canvas = transform.GetComponentInParent&lt;Canvas&gt;();            uiCamera = canvas.worldCamera;            rectTransform = transform.GetComponent&lt;RectTransform&gt;();            canvansRect = canvas.transform.GetComponent&lt;RectTransform&gt;();            raycastResult = new List&lt;RaycastResult&gt;();            AdditionalCanvasShaderChannels();        &#125;    &#125;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);    /// &lt;summary&gt;    /// 添加Canvas向Shader传递的数据    /// &lt;/summary&gt;    protected virtual void AdditionalCanvasShaderChannels()    &#123;        if (canvas == null)        &#123;            return;        &#125;        if (additionalCanvasShaderChannels == UnityEngine.AdditionalCanvasShaderChannels.None)        &#123;            return;        &#125;        if ((canvas.additionalShaderChannels &amp; additionalCanvasShaderChannels) == 0)        &#123;            canvas.additionalShaderChannels |= additionalCanvasShaderChannels;            graphic.SetVerticesDirty();        &#125;    &#125;    #region 对外方法    public void SetEventSystem(EventSystem eventSystem)    &#123;        this.eventSystem = eventSystem;    &#125;        public bool GetLocalPointByScreenPos(Vector2 screenPos, out Vector2 localPoint)    &#123;        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(rectTransform, screenPos, uiCamera, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public bool GetLocalPointByWorldPos(Vector3 worldPos, Camera watchCamera, out Vector2 localPoint)    &#123;        Vector3 screenPos = watchCamera.WorldToScreenPoint(worldPos);        if (GetLocalPointByScreenPos(screenPos, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public Camera GetCanvasWorldCamera()    &#123;        return uiCamera;    &#125;    #endregion    #region 点击实现    private void CheckAndChangeHover(GameObject newHoverGameObject, PointerEventData eventData)    &#123;        if (newHoverGameObject != m_lastHoverGameObject)        &#123;            if (m_lastHoverGameObject != null)            &#123;                ExecuteEvents.Execute(m_lastHoverGameObject, eventData, ExecuteEvents.pointerExitHandler);            &#125;            if (newHoverGameObject != null)            &#123;                ExecuteEvents.Execute(newHoverGameObject, eventData, ExecuteEvents.pointerEnterHandler);            &#125;            m_lastHoverGameObject = newHoverGameObject;        &#125;    &#125;    protected virtual GameObject PassEvent&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        raycastResult.Clear();        eventSystem.RaycastAll(eventData, raycastResult);        bool isExecute = false;        foreach (var result in raycastResult)        &#123;            if (result.gameObject == transform.gameObject)            &#123;                continue;            &#125;            isExecute = ExecuteEvents.Execute(result.gameObject, eventData, function);            return result.gameObject;        &#125;        return null;    &#125;    protected virtual GameObject CheckRaycastLocationValid&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        if (raycastLocationValid != null)        &#123;            bool isCanClick = raycastLocationValid.Invoke(eventData);            if (isCanClick)            &#123;                return PassEvent(eventData, function);            &#125;            // 判断 function 是否指向 pointerClickHandler            if (typeof(T) == typeof(IPointerClickHandler) &amp;&amp;                 function.Method == ExecuteEvents.pointerClickHandler.Method)            &#123;                MessageSystem.Instance.SendMessage(MessageDefine.MASK_CLICK);            &#125;        &#125;        return null;    &#125;    public virtual void OnPointerClick(PointerEventData eventData)    &#123;                var result = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerClickHandler);        if (result != null)        &#123;            MessageSystem.Instance.SendMessage(MessageDefine.MASK_HIGH_LINGHT_CLICK);                   &#125;    &#125;    public virtual void OnPointerEnter(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerEnterHandler);    &#125;    public virtual void OnPointerDown(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerDownHandler);    &#125;    public virtual void OnPointerUp(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerUpHandler);    &#125;    public void OnPointerExit(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerExitHandler);    &#125;    public void OnPointerMove(PointerEventData eventData)    &#123;        GameObject enterObject = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerMoveHandler);        CheckAndChangeHover(enterObject, eventData);    &#125;    #endregion#if UNITY_EDITOR    void OnValidate()    &#123;        if (graphic != null)        &#123;            graphic.SetVerticesDirty();            AdditionalCanvasShaderChannels();        &#125;    &#125;#endif&#125;
-
-遮罩预览
 ]]></content>
   </entry>
   <entry>
@@ -1207,6 +1270,41 @@ StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView�
 [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]public static void CreateGraph()&#123;    GraphEditorUnility.CreateDefaultGraph();&#125;public static void CreateDefaultGraph()&#123;    GraphSoData graph = ScriptableObject.CreateInstance&lt;GraphSoData&gt;();    int soFileCount = CountFilesExcludingMeta(DEFAULT_FILE_PATH);    string defaultFileName = string.Format(DEFAULT_FILE_NAME, soFileCount);    string defaultFilePath = System.IO.Path.Combine(DEFAULT_FILE_PATH, defaultFileName);    graph.graphName = string.Format(DEFAULT_FILE_SAVE_NAME, soFileCount);    AssetDatabase.CreateAsset(graph, defaultFilePath);    NodeSoData defaultNode = CreateDefaultNodeData(true);    graph.nodeSoDataList.Add(defaultNode);    AssetDatabase.AddObjectToAsset(defaultNode, graph);        EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(defaultNode);    AssetDatabase.SaveAssets();&#125;public static NodeSoData CreateDefaultNodeData(bool isStartNode)&#123;    NodeSoData defaultSoData = ScriptableObject.CreateInstance&lt;NodeSoData&gt;();    defaultSoData.name = &quot;node&quot;;    defaultSoData.nodeID = GraphUtility.GenerateID();    defaultSoData.nodeTitle = &quot;New Node&quot;;    defaultSoData.nodePos = new Vector2(200, 200);    //起始节点加入输出node    if (isStartNode)    &#123;        defaultSoData.nodeFullTypeName = typeof(StartNode).FullName;        StartNodeData startNodeData = new StartNodeData();        startNodeData.isStartNode = true;        defaultSoData.userData = startNodeData;        defaultSoData.AddOutputPortData();    &#125;    else    &#123;        defaultSoData.nodeFullTypeName = typeof(NodeBase).FullName;    &#125;    defaultSoData.outputPortDataList = new List&lt;PortSerializationData&gt;();    defaultSoData.intputPortDataList = new List&lt;PortSerializationData&gt;();    return defaultSoData;&#125;
 
 结果可以在菜单项创建新的节点数据，并且双击打开能看到一个开始节点。
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity节点编辑器(五) -- 引导遮罩</title>
+    <url>/posts/d34f19cf.html</url>
+    <content><![CDATA[遮罩需求目前市面上游戏的引导，基本上都采用了在需要突出的地方高亮引导玩家，通过点击等方式去触发下一步操作。所以需求就抽象成两个：1.高亮某一块区域2.高亮区域的点击判断和通知
+高亮区域实现高亮区域有多种做法，第一种是通过继承Unity的BaseMeshEffect去自己写顶点、三角面最后形成高亮，第二种是使用Shader通过像素的判定实现。第一种比较里面的逻辑比较复杂，所以我用的是第二种。
+矩形高亮区域的C#代码实现一个矩形高亮区域需要两个数据：矩形的中心和大小。为了使用同一个材质实现合批，我使用一个继承于BaseMeshEffect的类中(Unity提供的类不熟悉的可以查一下)，在类中把这两个数据写入每个顶点中。
+顶点处理基类重写ModifyMesh方法，在其中使用抽象方法SetVertexData，传入顶点数据，并重新赋值出来。
+public abstract class MaskVertexBase : BaseMeshEffect&#123;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);&#125;
+矩形顶点类在具体的矩形类中，把中心位置，高度和宽度放入顶点的uv1信息中。
+public class RectMaskVertex : MaskVertexBase&#123;    [Header(&quot;中心位置&quot;)]    public Vector2 centerPos;    [Header(&quot;宽度&quot;)]    public float width;    [Header(&quot;高度&quot;)]    public float height;        protected override UIVertex SetVertexData(UIVertex vertex)    &#123;        vertex.uv1.x = centerPos.x;        vertex.uv1.y = centerPos.y;        vertex.uv1.z = width;        vertex.uv1.w = height;        return vertex;    &#125;&#125;
+
+高亮区域的Shader代码高亮逻辑有两步：1.在顶点着色器中获得像素的屏幕坐标位置。因为挂载的材质是在Unity的UI中所以model空间坐标直接就是屏幕坐标。2.在片元着色器中判断像素是否需要高亮。是否需要高亮则是对应的需求。如果是在一个矩形中，则需要判断这个像素坐标位置是否在其中，在则直接输出透明，反之输出源颜色。下面给出矩形的实现。
+ v2f vert (appdata v)&#123;    v2f o;    o.screenPos = v.vertex.xy;    o.vertex = UnityObjectToClipPos(v.vertex);    o.uv = TRANSFORM_TEX(v.uv, _MainTex);    o.uv1 = v.uv1;    o.color = v.color;    return o;&#125;fixed4 frag (v2f i) : SV_Target&#123;    fixed4 col = tex2D(_MainTex, i.uv)*i.color;    float2 centerPos = i.uv1.xy;    float width = i.uv1.z / 2;    float height = i.uv1.w / 2;    float2 offset = i.screenPos.xy - centerPos;    col.a *= (abs(offset.x) &gt; width) || (abs(offset.y) &gt; height);         return col;&#125;
+
+高亮区域的点击判断和通知判断是否点击到了高亮区域，这个逻辑需要在C#端实现。在顶点处理基类中继承了IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler这几个接口去监听点击输入，并且抽象了一个判断是否在高亮区域内的委托，在具体的业务中添加进来。只需要在点击的时候执行委托进行判定，若判定为true则通过eventSystem.RaycastAll(eventData, raycastResult)获得当前高亮后的，所有的可点击物体，然后遍历去执行第一个GameObject的点击。下面给出完整的MaskVertexBase代码
+using System.Collections;using System.Collections.Generic;using UnityEngine;using UnityEngine.EventSystems;using UnityEngine.UI;public delegate bool PointerEventCallback(PointerEventData eventData);/// &lt;summary&gt;/// 遮罩的定点类，负责设置遮罩的顶点数据/// &lt;/summary&gt;[RequireComponent(typeof(Image))]public abstract class MaskVertexBase : BaseMeshEffect, IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler&#123;    [Header(&quot;向Shader传递的数据&quot;)]    public AdditionalCanvasShaderChannels additionalCanvasShaderChannels;    protected Canvas canvas;    protected Camera uiCamera;    protected RectTransform canvansRect;    protected RectTransform rectTransform;    [HideInInspector]    public EventSystem eventSystem;    [HideInInspector]    public PointerEventCallback raycastLocationValid;    private List&lt;RaycastResult&gt; raycastResult;    private GameObject m_lastHoverGameObject;    protected virtual void OnEnable()    &#123;        base.OnEnable();        if (canvas == null)        &#123;            canvas = transform.GetComponentInParent&lt;Canvas&gt;();            uiCamera = canvas.worldCamera;            rectTransform = transform.GetComponent&lt;RectTransform&gt;();            canvansRect = canvas.transform.GetComponent&lt;RectTransform&gt;();            raycastResult = new List&lt;RaycastResult&gt;();            AdditionalCanvasShaderChannels();        &#125;    &#125;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);    /// &lt;summary&gt;    /// 添加Canvas向Shader传递的数据    /// &lt;/summary&gt;    protected virtual void AdditionalCanvasShaderChannels()    &#123;        if (canvas == null)        &#123;            return;        &#125;        if (additionalCanvasShaderChannels == UnityEngine.AdditionalCanvasShaderChannels.None)        &#123;            return;        &#125;        if ((canvas.additionalShaderChannels &amp; additionalCanvasShaderChannels) == 0)        &#123;            canvas.additionalShaderChannels |= additionalCanvasShaderChannels;            graphic.SetVerticesDirty();        &#125;    &#125;    #region 对外方法    public void SetEventSystem(EventSystem eventSystem)    &#123;        this.eventSystem = eventSystem;    &#125;        public bool GetLocalPointByScreenPos(Vector2 screenPos, out Vector2 localPoint)    &#123;        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(rectTransform, screenPos, uiCamera, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public bool GetLocalPointByWorldPos(Vector3 worldPos, Camera watchCamera, out Vector2 localPoint)    &#123;        Vector3 screenPos = watchCamera.WorldToScreenPoint(worldPos);        if (GetLocalPointByScreenPos(screenPos, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public Camera GetCanvasWorldCamera()    &#123;        return uiCamera;    &#125;    #endregion    #region 点击实现    private void CheckAndChangeHover(GameObject newHoverGameObject, PointerEventData eventData)    &#123;        if (newHoverGameObject != m_lastHoverGameObject)        &#123;            if (m_lastHoverGameObject != null)            &#123;                ExecuteEvents.Execute(m_lastHoverGameObject, eventData, ExecuteEvents.pointerExitHandler);            &#125;            if (newHoverGameObject != null)            &#123;                ExecuteEvents.Execute(newHoverGameObject, eventData, ExecuteEvents.pointerEnterHandler);            &#125;            m_lastHoverGameObject = newHoverGameObject;        &#125;    &#125;    protected virtual GameObject PassEvent&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        raycastResult.Clear();        eventSystem.RaycastAll(eventData, raycastResult);        bool isExecute = false;        foreach (var result in raycastResult)        &#123;            if (result.gameObject == transform.gameObject)            &#123;                continue;            &#125;            isExecute = ExecuteEvents.Execute(result.gameObject, eventData, function);            return result.gameObject;        &#125;        return null;    &#125;    protected virtual GameObject CheckRaycastLocationValid&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        if (raycastLocationValid != null)        &#123;            bool isCanClick = raycastLocationValid.Invoke(eventData);            if (isCanClick)            &#123;                return PassEvent(eventData, function);            &#125;            // 判断 function 是否指向 pointerClickHandler            if (typeof(T) == typeof(IPointerClickHandler) &amp;&amp;                 function.Method == ExecuteEvents.pointerClickHandler.Method)            &#123;                MessageSystem.Instance.SendMessage(MessageDefine.MASK_CLICK);            &#125;        &#125;        return null;    &#125;    public virtual void OnPointerClick(PointerEventData eventData)    &#123;                var result = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerClickHandler);        if (result != null)        &#123;            MessageSystem.Instance.SendMessage(MessageDefine.MASK_HIGH_LINGHT_CLICK);                   &#125;    &#125;    public virtual void OnPointerEnter(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerEnterHandler);    &#125;    public virtual void OnPointerDown(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerDownHandler);    &#125;    public virtual void OnPointerUp(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerUpHandler);    &#125;    public void OnPointerExit(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerExitHandler);    &#125;    public void OnPointerMove(PointerEventData eventData)    &#123;        GameObject enterObject = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerMoveHandler);        CheckAndChangeHover(enterObject, eventData);    &#125;    #endregion#if UNITY_EDITOR    void OnValidate()    &#123;        if (graphic != null)        &#123;            graphic.SetVerticesDirty();            AdditionalCanvasShaderChannels();        &#125;    &#125;#endif&#125;
+
+遮罩预览
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity节点编辑器(二) -- GraphView窗口</title>
+    <url>/posts/9891abd3.html</url>
+    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
+窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
+public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
+背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
+
+GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
+创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
+拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
+
+实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
 ]]></content>
   </entry>
   <entry>
@@ -1259,26 +1357,6 @@ private void AddToolBar()&#123;    Toolbar toolbar = new Toolbar();    //// 设�
 public virtual void SaveData()&#123;    List&lt;NodeSerializationData&gt; nodeSaveData = new List&lt;NodeSerializationData&gt;();    foreach (var node in nodes)    &#123;        if (node == null)        &#123;            continue;        &#125;        if (node is NodeBase nodeBase)        &#123;            nodeSaveData.Add(nodeBase.GetSerializationData());        &#125;    &#125;    if (nodeSaveData.Count &lt;= 0)    &#123;        Debug.Log(&quot;Graph的Node数量为0!&quot;);        return;    &#125;    // string data = MergeUnsafe(nodeSaveData);    var data = MergeNodeData(nodeSaveData);    GraphEditorUnility.SaveDataToBytes(data, m_graphData.graphName);&#125;private string MergeNodeData(List&lt;NodeSerializationData&gt; nodeData)&#123;    StringBuilder sb = new StringBuilder();    for (int i = 0; i &lt; nodeData.Count; i++)    &#123;        string data = nodeData[i].Serialize();        //Debug.Log(data);        sb.Append(data);        if (i &lt; nodeData.Count - 1)        &#123;            sb.Append(&quot;|&quot;);        &#125;    &#125;    return sb.ToString();&#125;
 
 结果因为是继承Unity的GraphView和Node，所以现在已经能自由的添加&#x2F;删除连接、添加&#x2F;删除节点了。节点编辑器的基本功能已经实现完成了。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity颜色空间:sRGB和Linear</title>
-    <url>/posts/b73f5a7a.html</url>
-    <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
-sRGB和Linear在物理世界中，如果光增加一倍，那么亮度也增加一倍，这是线性关系。但是在最早的显示器中，显示图像的时候，电压增加一倍，亮度并不是跟着增加一倍，而是呈亮度增加量等于电压增加量的2.2次幂的非线性关系:&nbsp;&nbsp;l_亮度&#x3D;u2.2&nbsp;&nbsp;&nbsp;&nbsp;(l ∈[0,1],u∈[0,1])2.2也叫做显示器的Gamma值。因为亮度0是黑，1是白，这种关系意味着当电压线性变化的时候，相对于真实的世界来说，亮度的变化在暗处黑的地方变换比较慢，暗占据数据范围更广，颜色整体偏暗。如图，直线代表物理世界的线性空间（Linear Space），下曲线是显示器输出的Gamma2.2空间（Gamma Space）。
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;横坐标表示电压，纵坐标表示亮度
-常情况下，人眼看物理世界感知到了正常的亮度。而如果显示器输出一个颜色后再被你看到，即相当于走了一次Gamma2.2曲线的调整，这下子颜色就变暗了。如果我们在显示器输出之前，做一个操作把显示器的Gamma2.2影响平衡掉，那就和人眼直接观察物理世界一样了！这个平衡的操作就叫做伽马校正。在数学上，伽马校正是一个约0.45的幂运算（和上面的2.2次幂互为逆运算）:&nbsp;&nbsp;Co &#x3D; Ci1&#x2F;2.2
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;左(Gamma0.45) 中(Gamma2.2) 右(线性物理空间)
-Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的纹理如果是sRGB（Gamma0.45），那我们要进行一个操作转换到线性空间。这个操作叫做Remove Gamma Correction，在数学上是一个2.2的幂运算 。如果输入不是sRGB，而是已经在线性空间的纹理了呢？那就可以跳过Remove Gamma Correction了。注：美术输出资源时都是在sRGB空间的，但Normal Map等其他电脑计算出来的纹理则一般在线性空间，即Linear Texture。
-第二步，现在输入已经在线性空间了，那么进行Shader中光照、插值等计算后就是比较真实的结果了，如果不对sRGB进行Remove Gamma Correction直接就进入Shader计算，那算出来的就会不自然。
-第三步，Shader计算完成后，需要进行Gamma Correction，从线性空间变换到Gamma0.45空间，在数学上是一个约为0.45的幂运算。如果不进行Gamma Correction输出会怎么样？那显示器就会将颜色从线性空间转换到Gamma2.2空间，接着再被你看到，结果会更暗。我遇到问题的原因！
-第四步，经过了前面的Gamma Correction，显示器输出在了线性空间，这就和人眼看物理世界的过程是一样的了！
-问题解决知道了sRGB和Linear的底层原理和变暗的原因，那么解决方案也就清晰明了：因为相机是Linear空间，会对输入进行一次Gamma2.2的操作。如果我们这里想要看到正常的图片，就有两种解决方案：
-如果在运行时截图显示：对显示的Texuture2D，进行一次Gamma0.45去和Remove Gamma Correction的Gamma2.2抵消(因为我也是运行时改图，这也是我采用的方案)。最终效果
-如果是读取编辑器的图片：直接在Inspector面板取消sRGB选项，Unity会做一次Gamma0.45，然后在Unity编辑器中看到的图片是偏白的。
-Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
-
-参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
 ]]></content>
   </entry>
   <entry>
@@ -1623,6 +1701,26 @@ TextMeshPro 文档
 ]]></content>
   </entry>
   <entry>
+    <title>Unity颜色空间:sRGB和Linear</title>
+    <url>/posts/b73f5a7a.html</url>
+    <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
+sRGB和Linear在物理世界中，如果光增加一倍，那么亮度也增加一倍，这是线性关系。但是在最早的显示器中，显示图像的时候，电压增加一倍，亮度并不是跟着增加一倍，而是呈亮度增加量等于电压增加量的2.2次幂的非线性关系:&nbsp;&nbsp;l_亮度&#x3D;u2.2&nbsp;&nbsp;&nbsp;&nbsp;(l ∈[0,1],u∈[0,1])2.2也叫做显示器的Gamma值。因为亮度0是黑，1是白，这种关系意味着当电压线性变化的时候，相对于真实的世界来说，亮度的变化在暗处黑的地方变换比较慢，暗占据数据范围更广，颜色整体偏暗。如图，直线代表物理世界的线性空间（Linear Space），下曲线是显示器输出的Gamma2.2空间（Gamma Space）。
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;横坐标表示电压，纵坐标表示亮度
+常情况下，人眼看物理世界感知到了正常的亮度。而如果显示器输出一个颜色后再被你看到，即相当于走了一次Gamma2.2曲线的调整，这下子颜色就变暗了。如果我们在显示器输出之前，做一个操作把显示器的Gamma2.2影响平衡掉，那就和人眼直接观察物理世界一样了！这个平衡的操作就叫做伽马校正。在数学上，伽马校正是一个约0.45的幂运算（和上面的2.2次幂互为逆运算）:&nbsp;&nbsp;Co &#x3D; Ci1&#x2F;2.2
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;左(Gamma0.45) 中(Gamma2.2) 右(线性物理空间)
+Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的纹理如果是sRGB（Gamma0.45），那我们要进行一个操作转换到线性空间。这个操作叫做Remove Gamma Correction，在数学上是一个2.2的幂运算 。如果输入不是sRGB，而是已经在线性空间的纹理了呢？那就可以跳过Remove Gamma Correction了。注：美术输出资源时都是在sRGB空间的，但Normal Map等其他电脑计算出来的纹理则一般在线性空间，即Linear Texture。
+第二步，现在输入已经在线性空间了，那么进行Shader中光照、插值等计算后就是比较真实的结果了，如果不对sRGB进行Remove Gamma Correction直接就进入Shader计算，那算出来的就会不自然。
+第三步，Shader计算完成后，需要进行Gamma Correction，从线性空间变换到Gamma0.45空间，在数学上是一个约为0.45的幂运算。如果不进行Gamma Correction输出会怎么样？那显示器就会将颜色从线性空间转换到Gamma2.2空间，接着再被你看到，结果会更暗。我遇到问题的原因！
+第四步，经过了前面的Gamma Correction，显示器输出在了线性空间，这就和人眼看物理世界的过程是一样的了！
+问题解决知道了sRGB和Linear的底层原理和变暗的原因，那么解决方案也就清晰明了：因为相机是Linear空间，会对输入进行一次Gamma2.2的操作。如果我们这里想要看到正常的图片，就有两种解决方案：
+如果在运行时截图显示：对显示的Texuture2D，进行一次Gamma0.45去和Remove Gamma Correction的Gamma2.2抵消(因为我也是运行时改图，这也是我采用的方案)。最终效果
+如果是读取编辑器的图片：直接在Inspector面板取消sRGB选项，Unity会做一次Gamma0.45，然后在Unity编辑器中看到的图片是偏白的。
+Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
+
+参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
+]]></content>
+  </entry>
+  <entry>
     <title>基于前缀树的红点系统设计与实现</title>
     <url>/posts/79323865.html</url>
     <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
@@ -1653,18 +1751,18 @@ public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotN
 ]]></content>
   </entry>
   <entry>
-    <title>第一篇博客</title>
-    <url>/posts/ff05b5bf.html</url>
-    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
-]]></content>
-  </entry>
-  <entry>
     <title>算法--判断点是否在多边形中(包含凹凸多边形)</title>
     <url>/posts/ca3fa1d1.html</url>
     <content><![CDATA[判断点是否在一个凸多边形内部，可以根据面积、叉乘的方法判断。但是包括凹多边形的时候，就得使用射线法判断。下面介绍这种算法。
 算法原理奇-偶规则（Odd-even Rule）：奇数表示在多边形内，偶数表示在多边形外从任意位置p作任意方向的一条射线，若与该射线相交的多边形边的数目为奇数，则p是多边形内部点，否则是外部点。以上图为例：从红点向任意方向发射射线(上图是向左和向右)，与图形的边的交点总和为奇数时，点在内部；为偶数时，点在外部。（上图向左有5个点，向右有3个点），所以红点在多边形的内部。所以，问题就从判断点在多边形的内部转化为了：判断点朝任意方向的射线与多边形的边的交点个数的奇、偶问题。
 如何判断射线与多边形的交点？从上图可以非常直观地看出，取出多边形中两个相邻的点P1、P2，根据两点得到直线的方程为：Y&#x3D;(y1-y2)&#x2F;(X1-X2)*（X - X1）+Y1。将待监测点P0的X0代入直线方程（如果向上打射线）,计算出X0在该射线上的Y位置，如果Y&gt;Y0则说明：该P0点在线段P1、P2的下方，交点数+1；反之则为下方。
 代码实现public static bool checkPosInPolygon(List&lt;Vector3&gt; PosList, Vector3 checkPos)&#123;    if (PosList == null || PosList.Count &lt;= 0)    &#123;        return false;    &#125;    int num = 0;    for (int i = 0; i &lt; PosList.Count; i++)    &#123;        Vector3 curPos = PosList[i] ;        Vector3 nextPos = PosList[(i + 1) % PosList.Count] ;        if (checkPos.y &gt;= Mathf.Max(curPos.y, nextPos.y) || checkPos.y &lt;= Mathf.Min(curPos.y, nextPos.y))        &#123;            continue;        &#125;        float lineSlope = (curPos.x - nextPos.x) / (curPos.y - nextPos.y);        float linePosx = (checkPos.y - curPos.y) * lineSlope + curPos.x;        if (linePosx &lt; checkPos.x || Mathf.Approximately(linePosx, checkPos.x))        &#123;            num++;        &#125;    &#125;    return (num % 2 != 0);&#125;]]></content>
+  </entry>
+  <entry>
+    <title>第一篇博客</title>
+    <url>/posts/ff05b5bf.html</url>
+    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
+]]></content>
   </entry>
   <entry>
     <title></title>

@@ -1,0 +1,268 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover"><title>Unity的TMP顶点数据优化 | 穿越时空的思念</title><meta name="author" content="穿越时空的思念"><meta name="copyright" content="穿越时空的思念"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#ffffff"><meta name="description" content="上一篇写了 Unity的TMP的纹理优化，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。 优化目标TMP 默认的 SDF Shader 已经支持描边、阴影、Glow 等效果，但这些参数大多来自 Material。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Unity的TMP顶点数据优化">
+<meta property="og:url" content="https://cyskdsn.top/posts/7c9d3a21.html">
+<meta property="og:site_name" content="穿越时空的思念">
+<meta property="og:description" content="上一篇写了 Unity的TMP的纹理优化，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。 优化目标TMP 默认的 SDF Shader 已经支持描边、阴影、Glow 等效果，但这些参数大多来自 Material。">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://cyskdsn.top/img/Title/TMP_vertex_optimization.jpeg">
+<meta property="article:published_time" content="2026-08-11T13:10:06.206Z">
+<meta property="article:modified_time" content="2026-08-11T13:39:32.667Z">
+<meta property="article:author" content="穿越时空的思念">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://cyskdsn.top/img/Title/TMP_vertex_optimization.jpeg"><script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "Unity的TMP顶点数据优化",
+  "url": "https://cyskdsn.top/posts/7c9d3a21.html",
+  "image": "https://cyskdsn.top/img/Title/TMP_vertex_optimization.jpeg",
+  "datePublished": "2026-08-11T13:10:06.206Z",
+  "dateModified": "2026-08-11T13:39:32.667Z",
+  "author": [
+    {
+      "@type": "Person",
+      "name": "穿越时空的思念",
+      "url": "https://cyskdsn.top"
+    }
+  ]
+}</script><link rel="shortcut icon" href="/img/favicon.png"><link rel="canonical" href="https://cyskdsn.top/posts/7c9d3a21.html"><link rel="preconnect" href="//cdn.jsdelivr.net"/><link rel="manifest" href="/null"/><link rel="apple-touch-icon" sizes="180x180" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="32x32" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="16x16" href="/img/heaIcon16.ico"/><link rel="mask-icon" href="/img/heaIcon16.ico" color="#5bbad5"/><link rel="stylesheet" href="/css/index.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css"><script>
+    (() => {
+      
+    const saveToLocal = {
+      set: (key, value, ttl) => {
+        if (!ttl) return
+        const expiry = Date.now() + ttl * 86400000
+        localStorage.setItem(key, JSON.stringify({ value, expiry }))
+      },
+      get: key => {
+        const itemStr = localStorage.getItem(key)
+        if (!itemStr) return undefined
+        const { value, expiry } = JSON.parse(itemStr)
+        if (Date.now() > expiry) {
+          localStorage.removeItem(key)
+          return undefined
+        }
+        return value
+      }
+    }
+
+    window.btf = {
+      saveToLocal,
+      getScript: (url, attr = {}) => new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = url
+        script.async = true
+        Object.entries(attr).forEach(([key, val]) => script.setAttribute(key, val))
+        script.onload = script.onreadystatechange = () => {
+          if (!script.readyState || /loaded|complete/.test(script.readyState)) resolve()
+        }
+        script.onerror = reject
+        document.head.appendChild(script)
+      }),
+      getCSS: (url, id) => new Promise((resolve, reject) => {
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = url
+        if (id) link.id = id
+        link.onload = link.onreadystatechange = () => {
+          if (!link.readyState || /loaded|complete/.test(link.readyState)) resolve()
+        }
+        link.onerror = reject
+        document.head.appendChild(link)
+      }),
+      addGlobalFn: (key, fn, name = false, parent = window) => {
+        if (!false && key.startsWith('pjax')) return
+        const globalFn = parent.globalFn || {}
+        globalFn[key] = globalFn[key] || {}
+        globalFn[key][name || Object.keys(globalFn[key]).length] = fn
+        parent.globalFn = globalFn
+      }
+    }
+  
+      
+      const activateDarkMode = () => {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#0d0d0d')
+        }
+      }
+      const activateLightMode = () => {
+        document.documentElement.setAttribute('data-theme', 'light')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#ffffff')
+        }
+      }
+
+      btf.activateDarkMode = activateDarkMode
+      btf.activateLightMode = activateLightMode
+
+      const theme = saveToLocal.get('theme')
+    
+          theme === 'dark' ? activateDarkMode() : theme === 'light' ? activateLightMode() : null
+        
+      
+      const asideStatus = saveToLocal.get('aside-status')
+      if (asideStatus !== undefined) {
+        document.documentElement.classList.toggle('hide-aside', asideStatus === 'hide')
+      }
+    
+      
+    const detectApple = () => {
+      if (/iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('apple')
+      }
+    }
+    detectApple()
+  
+    })()
+  </script><script>const GLOBAL_CONFIG = {
+  root: '/',
+  algolia: undefined,
+  localSearch: {"path":"/search.xml","preload":false,"top_n_per_article":1,"unescape":false,"languages":{"hits_empty":"未找到符合您查询的内容：${query}","hits_stats":"共找到 ${hits} 篇文章"}},
+  translate: undefined,
+  highlight: {"plugin":"highlight.js","highlightCopy":true,"highlightLang":true,"highlightHeightLimit":false,"highlightFullpage":false,"highlightMacStyle":false},
+  copy: {
+    success: '复制成功',
+    error: '复制失败',
+    noSupport: '浏览器不支持'
+  },
+  relativeDate: {
+    homepage: false,
+    post: false
+  },
+  runtime: '',
+  dateSuffix: {
+    just: '刚刚',
+    min: '分钟前',
+    hour: '小时前',
+    day: '天前',
+    month: '个月前'
+  },
+  copyright: undefined,
+  lightbox: 'null',
+  Snackbar: undefined,
+  infinitegrid: {
+    js: 'https://cdn.jsdelivr.net/npm/@egjs/infinitegrid/dist/infinitegrid.min.js',
+    buttonText: '加载更多'
+  },
+  isPhotoFigcaption: false,
+  islazyloadPlugin: false,
+  isAnchor: false,
+  percent: {
+    toc: true,
+    rightside: false,
+  },
+  autoDarkmode: false
+}</script><script id="config-diff">var GLOBAL_CONFIG_SITE = {
+  title: 'Unity的TMP顶点数据优化',
+  isHighlightShrink: false,
+  isToc: true,
+  pageType: 'post'
+}</script><link rel="stylesheet" href="/css/style.css"><meta name="generator" content="Hexo 7.3.0"></head><body><div id="sidebar"><div id="menu-mask"></div><div id="sidebar-menus"><div class="avatar-img text-center"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="site-data text-center"><a href="/archives/"><div class="headline">文章</div><div class="length-num">22</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">5</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div></div></div><div class="post" id="body-wrap"><header class="post-bg" id="page-header" style="background-image: url(/img/Title/TMP_vertex_optimization.jpeg);"><nav id="nav"><span id="blog-info"><a class="nav-site-title" href="/"><span class="site-name">穿越时空的思念</span></a><a class="nav-page-title" href="/"><span class="site-name">Unity的TMP顶点数据优化</span><span class="site-name"><i class="fa-solid fa-circle-arrow-left"></i><span>  返回首页</span></span></a></span><div id="menus"><div id="search-button"><span class="site-page social-icon search"><i class="fas fa-search fa-fw"></i><span> 搜索</span></span></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div><div id="toggle-menu"><span class="site-page"><i class="fas fa-bars fa-fw"></i></span></div></div></nav><div id="post-info"><h1 class="post-title">Unity的TMP顶点数据优化</h1><div id="post-meta"><div class="meta-firstline"><span class="post-meta-date"><i class="far fa-calendar-alt fa-fw post-meta-icon"></i><span class="post-meta-label">发表于</span><time class="post-meta-date-created" datetime="2026-08-11T13:10:06.206Z" title="发表于 2026-08-11 21:10:06">2026-08-11</time><span class="post-meta-separator">|</span><i class="fas fa-history fa-fw post-meta-icon"></i><span class="post-meta-label">更新于</span><time class="post-meta-date-updated" datetime="2026-08-11T13:39:32.667Z" title="更新于 2026-08-11 21:39:32">2026-08-11</time></span></div><div class="meta-secondline"><span class="post-meta-separator">|</span><span class="post-meta-wordcount"><i class="far fa-file-word fa-fw post-meta-icon"></i><span class="post-meta-label">总字数:</span><span class="word-count">2.1k</span><span class="post-meta-separator">|</span><i class="far fa-clock fa-fw post-meta-icon"></i><span class="post-meta-label">阅读时长:</span><span>8分钟</span></span></div></div></div></header><main class="layout" id="content-inner"><div id="post"><article class="container post-content" id="article-container"><p>上一篇写了 <a href="https://cyskdsn.top/posts/af72c7f2.html">Unity的TMP的纹理优化</a>，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。</p>
+<h2 id="优化目标"><a href="#优化目标" class="headerlink" title="优化目标"></a>优化目标</h2><p>TMP 默认的 SDF Shader 已经支持描边、阴影、Glow 等效果，但这些参数大多来自 Material。只要某个文本的描边颜色、宽度不一样，就很容易产生新的材质实例。UI 里如果存在大量名字、伤害数字、状态文字，这部分材质数量和 Canvas 渲染批次都会变得不好控制。</p>
+<p>我的做法是让材质只负责通用渲染逻辑，把每个文本独有的数据写入 Mesh 顶点通道。Shader 渲染每个字时，从顶点里读取自己的描边或阴影参数。这样多个文字可以共用同一个材质，同时又能显示不同效果。</p>
+<p><img src="/img/TMP_VertexTool.png" alt="这里替换为顶点工具 Inspector 截图"></p>
+<h2 id="为什么可以把数据放进顶点"><a href="#为什么可以把数据放进顶点" class="headerlink" title="为什么可以把数据放进顶点"></a>为什么可以把数据放进顶点</h2><p>Unity 的 UI Mesh 顶点不只有 position、color、uv0。Canvas 还可以通过 <code>additionalShaderChannels</code> 额外传递 uv1、uv2、normal、tangent 等数据。对 TMP UGUI 来说，我们可以把自定义数据写入 Mesh 的 UV3，也就是代码里的 <code>SetUVs(2, data)</code>，在 Shader 里对应 <code>TEXCOORD2</code>。</p>
+<p>这里不把数据写进 <code>color</code>，是因为 TMP 原本就会使用顶点颜色做文字颜色和透明度。也不写进 <code>uv0</code>，因为 <code>uv0</code> 要采样字体 Atlas。选择 <code>TEXCOORD2</code> 的好处是与 TMP 原有采样逻辑解耦，结构也足够清晰：一个 <code>Vector4</code> 就有四个 float 可以使用。</p>
+<p>需要注意的是，UGUI 默认不会把所有额外通道都传给 Shader，所以必须打开 Canvas 的 <code>TexCoord2</code>：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">EnsureCanvasChannels</span>()</span></span><br><span class="line">&#123;</span><br><span class="line">    Canvas canvas = GetComponentInParent&lt;Canvas&gt;();</span><br><span class="line">    <span class="keyword">if</span> (canvas == <span class="literal">null</span>)</span><br><span class="line">    &#123;</span><br><span class="line">        <span class="keyword">return</span>;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    canvas.additionalShaderChannels |= AdditionalCanvasShaderChannels.TexCoord2;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h2 id="写入顶点数据"><a href="#写入顶点数据" class="headerlink" title="写入顶点数据"></a>写入顶点数据</h2><p>每次参数变化或文字内容变化时，先让 TMP 刷新 Mesh，然后遍历 <code>textInfo.meshInfo</code>。每个 sub mesh 都填入同一份效果数据，再写到 UV3：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> <span class="keyword">void</span> <span class="title">ApplyVertexEffect</span>()</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="keyword">if</span> (isApplying)</span><br><span class="line">    &#123;</span><br><span class="line">        <span class="keyword">return</span>;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    CacheTextComponent();</span><br><span class="line">    <span class="keyword">if</span> (textComponent == <span class="literal">null</span>)</span><br><span class="line">    &#123;</span><br><span class="line">        <span class="keyword">return</span>;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    isApplying = <span class="literal">true</span>;</span><br><span class="line">    <span class="keyword">try</span></span><br><span class="line">    &#123;</span><br><span class="line">        textComponent.ForceMeshUpdate(<span class="literal">false</span>, <span class="literal">false</span>);</span><br><span class="line"></span><br><span class="line">        TMP_TextInfo textInfo = textComponent.textInfo;</span><br><span class="line">        Vector4 effectData = PackEffectData();</span><br><span class="line">        TMP_MeshInfo[] meshInfos = textInfo.meshInfo;</span><br><span class="line"></span><br><span class="line">        <span class="keyword">for</span> (<span class="built_in">int</span> i = <span class="number">0</span>; i &lt; meshInfos.Length; i++)</span><br><span class="line">        &#123;</span><br><span class="line">            Mesh mesh = meshInfos[i].mesh;</span><br><span class="line">            <span class="keyword">if</span> (mesh == <span class="literal">null</span> || mesh.vertexCount == <span class="number">0</span>)</span><br><span class="line">            &#123;</span><br><span class="line">                <span class="keyword">continue</span>;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            FillChannel(effectChannel, mesh.vertexCount, effectData);</span><br><span class="line">            mesh.SetUVs(<span class="number">2</span>, effectChannel);</span><br><span class="line">            textComponent.UpdateGeometry(mesh, i);</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="keyword">if</span> (textComponent.mesh != <span class="literal">null</span>)</span><br><span class="line">        &#123;</span><br><span class="line">            textComponent.canvasRenderer.SetMesh(textComponent.mesh);</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="keyword">finally</span></span><br><span class="line">    &#123;</span><br><span class="line">        isApplying = <span class="literal">false</span>;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>这段逻辑的关键是 <code>mesh.SetUVs(2, effectChannel)</code>。下标 2 对应 UV3，在 Shader 的输入结构里就是 <code>texcoord2 : TEXCOORD2</code>。只要顶点数一致，每个字的四个顶点都能拿到同一组效果参数。</p>
+<h2 id="数据如何设计"><a href="#数据如何设计" class="headerlink" title="数据如何设计"></a>数据如何设计</h2><p>我把效果分成三种模式：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="built_in">enum</span> TMPVertexEffectMode</span><br><span class="line">&#123;</span><br><span class="line">    None = <span class="number">0</span>,</span><br><span class="line">    Outline = <span class="number">1</span>,</span><br><span class="line">    Shadow = <span class="number">2</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p><code>Vector4</code> 的四个分量被这样使用：</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>x</th>
+<th>y</th>
+<th>z</th>
+<th>w</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>描边</td>
+<td>R</td>
+<td>G</td>
+<td>B + width</td>
+<td>mode + direction</td>
+</tr>
+<tr>
+<td>阴影</td>
+<td>offsetX</td>
+<td>offsetY</td>
+<td>R + G</td>
+<td>mode + B + strength</td>
+</tr>
+</tbody></table>
+<p>描边和阴影不会同时作为像素效果写入同一个 <code>Vector4</code>，这样可以用同一套通道表达两套数据。弯曲效果不进 Shader，而是在 C# 端直接修改顶点位置，所以可以和描边或阴影叠加。</p>
+<h2 id="数据压缩原理"><a href="#数据压缩原理" class="headerlink" title="数据压缩原理"></a>数据压缩原理</h2><p>一个 <code>Vector4</code> 看起来有四个 float，但要表达描边颜色 RGB、宽度、方向，或者阴影颜色 RGB、偏移、强度和模式，直接存会不够。解决办法是把两个 0 到 1 的值压进一个 float。</p>
+<p>压缩步骤是：</p>
+<ol>
+<li>把两个归一化值分别量化成 0 到 255 的整数，也就是 8 bit。</li>
+<li>第一个值左移 8 位放到高 8 位，第二个值放到低 8 位。</li>
+<li>合成一个 0 到 65535 的 16 bit 整数。</li>
+<li>再除以 65535，变回 0 到 1 的 float，方便走顶点通道传给 Shader。</li>
+</ol>
+<p>核心代码如下：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">static</span> <span class="built_in">float</span> <span class="title">PackTwoBytes</span>(<span class="params"><span class="built_in">float</span> highValue, <span class="built_in">float</span> lowValue</span>)</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="built_in">int</span> highByte = Mathf.RoundToInt(Mathf.Clamp01(highValue) * <span class="number">255f</span>);</span><br><span class="line">    <span class="built_in">int</span> lowByte = Mathf.RoundToInt(Mathf.Clamp01(lowValue) * <span class="number">255f</span>);</span><br><span class="line">    <span class="keyword">return</span> ((highByte &lt;&lt; <span class="number">8</span>) | lowByte) / <span class="number">65535f</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>描边模式里，<code>x/y</code> 存颜色的 R&#x2F;G，<code>z</code> 存 B 和描边宽度，<code>w</code> 存模式和描边方向：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">static</span> Vector4 <span class="title">PackOutlineData</span>(<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="function">    Color color,</span></span></span><br><span class="line"><span class="params"><span class="function">    <span class="built_in">float</span> width,</span></span></span><br><span class="line"><span class="params"><span class="function">    TMPVertexOutlineDirection direction</span>)</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="built_in">int</span> blue = Mathf.RoundToInt(Mathf.Clamp01(color.b) * <span class="number">255f</span>);</span><br><span class="line">    <span class="built_in">int</span> widthByte = Mathf.RoundToInt(Mathf.Clamp01(width) * <span class="number">255f</span>);</span><br><span class="line">    <span class="built_in">float</span> packedBlueAndWidth = ((blue &lt;&lt; <span class="number">8</span>) | widthByte) / <span class="number">65535f</span>;</span><br><span class="line">    <span class="built_in">float</span> packedModeAndDirection =</span><br><span class="line">        (<span class="built_in">float</span>)TMPVertexEffectMode.Outline +</span><br><span class="line">        (direction == TMPVertexOutlineDirection.Outer ? <span class="number">0.1f</span> : <span class="number">0f</span>);</span><br><span class="line"></span><br><span class="line">    <span class="keyword">return</span> <span class="keyword">new</span> Vector4(</span><br><span class="line">        color.r,</span><br><span class="line">        color.g,</span><br><span class="line">        packedBlueAndWidth,</span><br><span class="line">        packedModeAndDirection);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>阴影模式里，<code>x/y</code> 直接存偏移。颜色和强度被拆成两组压缩数据：<code>z</code> 存 R&#x2F;G，<code>w</code> 的小数部分存 B&#x2F;strength：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">static</span> Vector4 <span class="title">PackShadowData</span>(<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="function">    Color color,</span></span></span><br><span class="line"><span class="params"><span class="function">    Vector2 offset,</span></span></span><br><span class="line"><span class="params"><span class="function">    <span class="built_in">float</span> strength</span>)</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="built_in">float</span> packedRedAndGreen = PackTwoBytes(color.r, color.g);</span><br><span class="line">    <span class="built_in">float</span> packedBlueAndStrength = PackTwoBytes(color.b, strength);</span><br><span class="line"></span><br><span class="line">    <span class="keyword">return</span> <span class="keyword">new</span> Vector4(</span><br><span class="line">        offset.x,</span><br><span class="line">        offset.y,</span><br><span class="line">        packedRedAndGreen,</span><br><span class="line">        (<span class="built_in">float</span>)TMPVertexEffectMode.Shadow + packedBlueAndStrength * <span class="number">0.1f</span>);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>这里把阴影的 <code>packedBlueAndStrength</code> 乘以 <code>0.1</code> 放进 <code>w</code> 的小数部分，是为了让 <code>w</code> 的整数部分仍然能表示模式 <code>2</code>。Shader 端用四舍五入取模式，用 <code>(w - 2) * 10</code> 取回被压缩的数据。</p>
+<p>这个方案的代价是精度从 float 降到 8 bit。颜色通道和宽度、强度用 0 到 255 的精度已经足够；阴影偏移没有压缩，仍然直接存 float。</p>
+<h2 id="Shader-解包"><a href="#Shader-解包" class="headerlink" title="Shader 解包"></a>Shader 解包</h2><p>Shader 顶点输入结构需要增加 <code>TEXCOORD2</code>：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br></pre></td><td class="code"><pre><span class="line">struct vertex_t</span><br><span class="line">&#123;</span><br><span class="line">    float4 position  : POSITION;</span><br><span class="line">    fixed4 color     : COLOR;</span><br><span class="line">    float2 texcoord0 : TEXCOORD0;</span><br><span class="line">    float2 texcoord1 : TEXCOORD1;</span><br><span class="line">    float4 texcoord2 : TEXCOORD2;</span><br><span class="line">&#125;;</span><br><span class="line"></span><br><span class="line">struct pixel_t</span><br><span class="line">&#123;</span><br><span class="line">    float4 position     : SV_POSITION;</span><br><span class="line">    fixed4 color        : COLOR;</span><br><span class="line">    float2 atlas        : TEXCOORD0;</span><br><span class="line">    float4 param        : TEXCOORD1;</span><br><span class="line">    float4 vertexEffect : TEXCOORD6;</span><br><span class="line">&#125;;</span><br></pre></td></tr></table></figure>
+
+<p>顶点阶段只负责把数据传到片元阶段：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">output.vertexEffect = float4(input.texcoord2.xyz, input.texcoord2.w);</span><br></pre></td></tr></table></figure>
+
+<p>解包函数与 C# 的打包规则对应：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br></pre></td><td class="code"><pre><span class="line">float2 DecodePackedBlueAndWidth(float packedValue)</span><br><span class="line">&#123;</span><br><span class="line">    float packedInt = floor(saturate(packedValue) * 65535.0 + 0.5);</span><br><span class="line">    float highValue = floor(packedInt / 256.0) / 255.0;</span><br><span class="line">    float lowValue = (packedInt - floor(packedInt / 256.0) * 256.0) / 255.0;</span><br><span class="line">    return float2(highValue, lowValue);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">float DecodeVertexEffectMode(float packedMode)</span><br><span class="line">&#123;</span><br><span class="line">    return floor(packedMode + 0.5);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">float DecodeShadowPackedBlueAndStrength(float packedMode)</span><br><span class="line">&#123;</span><br><span class="line">    return saturate((packedMode - 2.0) * 10.0);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">float DecodeOutlineDirection(float packedMode)</span><br><span class="line">&#123;</span><br><span class="line">    return step(0.5, saturate((packedMode - 1.0) * 10.0));</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>片元阶段先判断当前模式，再决定是使用材质上的描边参数，还是使用顶点传进来的参数：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br></pre></td><td class="code"><pre><span class="line">float effectMode = DecodeVertexEffectMode(input.vertexEffect.w);</span><br><span class="line">float outlineMode = 1.0 - step(0.5, abs(effectMode - 1.0));</span><br><span class="line">float shadowMode = 1.0 - step(0.5, abs(effectMode - 2.0));</span><br><span class="line"></span><br><span class="line">float2 decodedOutline = DecodePackedBlueAndWidth(input.vertexEffect.z);</span><br><span class="line">float vertexOutlineWidth = decodedOutline.y * outlineMode;</span><br><span class="line"></span><br><span class="line">half4 vertexOutlineColor =</span><br><span class="line">    half4(input.vertexEffect.rg, decodedOutline.x, 1);</span><br><span class="line"></span><br><span class="line">half4 outlineColor = lerp(</span><br><span class="line">    _OutlineColor,</span><br><span class="line">    vertexOutlineColor,</span><br><span class="line">    step(0.0001, vertexOutlineWidth));</span><br></pre></td></tr></table></figure>
+
+<p>阴影也是同理。偏移从 <code>x/y</code> 直接取，颜色和强度从压缩值里解出来：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br></pre></td><td class="code"><pre><span class="line">float2 decodedShadowRedAndGreen =</span><br><span class="line">    DecodePackedBlueAndWidth(input.vertexEffect.z);</span><br><span class="line"></span><br><span class="line">float2 decodedShadowBlueAndStrength =</span><br><span class="line">    DecodePackedBlueAndWidth(</span><br><span class="line">        DecodeShadowPackedBlueAndStrength(input.vertexEffect.w));</span><br><span class="line"></span><br><span class="line">float2 vertexShadowOffset =</span><br><span class="line">    -input.vertexEffect.xy * _GradientScale /</span><br><span class="line">    float2(_TextureWidth, _TextureHeight);</span><br><span class="line"></span><br><span class="line">float shadowSample = tex2D(_MainTex, input.atlas + vertexShadowOffset).a;</span><br><span class="line">float shadowAlpha =</span><br><span class="line">    saturate((shadowSample - 0.5) * scale + 0.5) *</span><br><span class="line">    decodedShadowBlueAndStrength.y *</span><br><span class="line">    shadowMode;</span><br><span class="line"></span><br><span class="line">half4 vertexShadowColor = half4(</span><br><span class="line">    decodedShadowRedAndGreen.x,</span><br><span class="line">    decodedShadowRedAndGreen.y,</span><br><span class="line">    decodedShadowBlueAndStrength.x,</span><br><span class="line">    1);</span><br><span class="line"></span><br><span class="line">vertexShadowColor.a *= shadowAlpha;</span><br><span class="line">vertexShadowColor.rgb *= vertexShadowColor.a;</span><br><span class="line">faceColor += vertexShadowColor * (1 - faceColor.a);</span><br></pre></td></tr></table></figure>
+
+<h2 id="弯曲效果"><a href="#弯曲效果" class="headerlink" title="弯曲效果"></a>弯曲效果</h2><p>弯曲没有必要进 Shader，因为它本质上是改顶点位置，不是像素颜色。这里直接根据文字包围盒把 x 坐标归一化到 0 到 1，再用 <code>AnimationCurve</code> 得到 y 方向偏移：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">ApplyBend</span>(<span class="params">TMP_MeshInfo meshInfo</span>)</span></span><br><span class="line">&#123;</span><br><span class="line">    Vector3[] vertices = meshInfo.vertices;</span><br><span class="line">    Bounds bounds = textComponent.textBounds;</span><br><span class="line">    <span class="built_in">float</span> width = Mathf.Max(bounds.size.x, <span class="number">0.001f</span>);</span><br><span class="line">    <span class="built_in">float</span> bendScale = bendStrength * width * <span class="number">0.25f</span>;</span><br><span class="line">    AnimationCurve curve = bendCurve ?? CreateArchCurve();</span><br><span class="line"></span><br><span class="line">    <span class="keyword">for</span> (<span class="built_in">int</span> i = <span class="number">0</span>; i &lt; vertices.Length; i++)</span><br><span class="line">    &#123;</span><br><span class="line">        <span class="built_in">float</span> normalizedX =</span><br><span class="line">            Mathf.InverseLerp(bounds.min.x, bounds.max.x, vertices[i].x);</span><br><span class="line">        vertices[i].y += curve.Evaluate(normalizedX) * bendScale;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    meshInfo.mesh.vertices = vertices;</span><br><span class="line">    meshInfo.mesh.RecalculateBounds();</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>这种方式的好处是弯曲可以和描边、阴影同时存在：弯曲改 position，描边和阴影读 <code>TEXCOORD2</code>，两者互不抢数据。</p>
+<h2 id="使用方式"><a href="#使用方式" class="headerlink" title="使用方式"></a>使用方式</h2><p>我额外加了一个创建入口：<code>GameObject/UI/TMP Vertex Outline Text</code>。它会自动创建 TMP 文本、挂上 <code>TMPVertexOutlineUGUI</code>，并切换到自定义 Shader 材质。</p>
+<p>已有的 <code>TextMeshProUGUI</code> 也可以在组件右键菜单中选择 <code>Add Vertex Outline Controller</code>。如果手动配置，需要确认两件事：</p>
+<ol>
+<li>文本材质使用 <code>TextMeshPro/Distance Field Vertex Outline</code>。</li>
+<li>所在 Canvas 开启了 <code>AdditionalCanvasShaderChannels.TexCoord2</code>。</li>
+</ol>
+<p><img src="/img/TMP_VertexCreateMenu.png" alt="这里替换为创建菜单或组件右键菜单截图"></p>
+<p><img src="/img/TMP_VertexEffect.png" alt="弯曲、描边和阴影总效果"></p>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>这套方案的核心是把“材质级参数”变成“顶点级参数”。材质只保留一份通用 Shader，具体颜色、宽度、偏移、强度都从顶点通道读取。数据量不大时，用两个 8 bit 值压进一个 float，可以在不额外增加通道的情况下放下更多参数。</p>
+<p>它适合用于大量 TMP UGUI 文本需要不同描边或阴影的场景。限制也很明确：写入顶点后，文字内容变化、字体变化、Mesh 刷新时都要重新写入；如果还想扩展更多效果，需要重新规划 <code>Vector4</code> 的字段分配，或者启用更多顶点通道。</p>
+<h2 id="项目地址"><a href="#项目地址" class="headerlink" title="项目地址"></a>项目地址</h2><p><a target="_blank" rel="noopener" href="https://github.com/Jin8868/OptimizeUnityTMP">OptimizeUnityTMP</a></p>
+<h2 id="参考文章"><a href="#参考文章" class="headerlink" title="参考文章"></a>参考文章</h2><p><a target="_blank" rel="noopener" href="https://zhuanlan.zhihu.com/p/411764156">TMP(TextMeshPro)优化篇 — 描边投影效果</a></p>
+</article><div class="post-copyright"><div class="post-copyright__author"><span class="post-copyright-meta"><i class="fas fa-circle-user fa-fw"></i>文章作者: </span><span class="post-copyright-info"><a href="https://cyskdsn.top">穿越时空的思念</a></span></div><div class="post-copyright__type"><span class="post-copyright-meta"><i class="fas fa-square-arrow-up-right fa-fw"></i>文章链接: </span><span class="post-copyright-info"><a href="https://cyskdsn.top/posts/7c9d3a21.html">https://cyskdsn.top/posts/7c9d3a21.html</a></span></div><div class="post-copyright__notice"><span class="post-copyright-meta"><i class="fas fa-circle-exclamation fa-fw"></i>版权声明: </span><span class="post-copyright-info">本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a> 许可协议。转载请注明来源 <a href="https://cyskdsn.top" target="_blank">穿越时空的思念</a>！</span></div></div><div class="tag_share"><div class="post-share"><div class="social-share" data-image="/img/Title/TMP_vertex_optimization.jpeg" data-sites="facebook,twitter,wechat,weibo,qq"></div><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/css/share.min.css" media="print" onload="this.media='all'"><script src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/js/social-share.min.js" defer></script></div></div><nav class="pagination-post" id="pagination"><a class="pagination-related full-width" href="/posts/6045236e.html" title="UniTask 0GC实现原理"><img class="cover" src="/img/Title/Unitask.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of next post"><div class="info text-right"><div class="info-1"><div class="info-item-1">下一篇</div><div class="info-item-2">UniTask 0GC实现原理</div></div><div class="info-2"><div class="info-item-1">UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。 Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。 UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：  用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。  下面从源码角度拆开看。 1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的...</div></div></div></a></nav></div><div class="aside-content" id="aside-content"><div class="card-widget card-info text-center"><div class="avatar-img"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="author-info-name">穿越时空的思念</div><div class="author-info-description">每天进步一点，做更好的自己!</div><div class="site-data"><a href="/archives/"><div class="headline">文章</div><div class="length-num">22</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">5</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><a id="card-info-btn" target="_blank" rel="noopener" href="https://github.com/Jin8868"><i class="fab fa-github"></i><span>Follow Me</span></a></div><div class="card-widget card-announcement"><div class="item-headline"><i class="fas fa-bullhorn fa-shake"></i><span>公告</span></div><div class="announcement_content"></div></div><div class="sticky_layout"><div class="card-widget" id="card-toc"><div class="item-headline"><i class="fas fa-stream"></i><span>目录</span><span class="toc-percentage"></span></div><div class="toc-content"><ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BC%98%E5%8C%96%E7%9B%AE%E6%A0%87"><span class="toc-number">1.</span> <span class="toc-text">优化目标</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%BA%E4%BB%80%E4%B9%88%E5%8F%AF%E4%BB%A5%E6%8A%8A%E6%95%B0%E6%8D%AE%E6%94%BE%E8%BF%9B%E9%A1%B6%E7%82%B9"><span class="toc-number">2.</span> <span class="toc-text">为什么可以把数据放进顶点</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%86%99%E5%85%A5%E9%A1%B6%E7%82%B9%E6%95%B0%E6%8D%AE"><span class="toc-number">3.</span> <span class="toc-text">写入顶点数据</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%95%B0%E6%8D%AE%E5%A6%82%E4%BD%95%E8%AE%BE%E8%AE%A1"><span class="toc-number">4.</span> <span class="toc-text">数据如何设计</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%95%B0%E6%8D%AE%E5%8E%8B%E7%BC%A9%E5%8E%9F%E7%90%86"><span class="toc-number">5.</span> <span class="toc-text">数据压缩原理</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#Shader-%E8%A7%A3%E5%8C%85"><span class="toc-number">6.</span> <span class="toc-text">Shader 解包</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%BC%AF%E6%9B%B2%E6%95%88%E6%9E%9C"><span class="toc-number">7.</span> <span class="toc-text">弯曲效果</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BD%BF%E7%94%A8%E6%96%B9%E5%BC%8F"><span class="toc-number">8.</span> <span class="toc-text">使用方式</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%80%BB%E7%BB%93"><span class="toc-number">9.</span> <span class="toc-text">总结</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E9%A1%B9%E7%9B%AE%E5%9C%B0%E5%9D%80"><span class="toc-number">10.</span> <span class="toc-text">项目地址</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%8F%82%E8%80%83%E6%96%87%E7%AB%A0"><span class="toc-number">11.</span> <span class="toc-text">参考文章</span></a></li></ol></div></div><div class="card-widget card-recent-post"><div class="item-headline"><i class="fas fa-history"></i><span>最新文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/7c9d3a21.html" title="Unity的TMP顶点数据优化"><img src="/img/Title/TMP_vertex_optimization.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity的TMP顶点数据优化"/></a><div class="content"><a class="title" href="/posts/7c9d3a21.html" title="Unity的TMP顶点数据优化">Unity的TMP顶点数据优化</a><time datetime="2026-08-11T13:10:06.206Z" title="发表于 2026-08-11 21:10:06">2026-08-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/6045236e.html" title="UniTask 0GC实现原理"><img src="/img/Title/Unitask.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="UniTask 0GC实现原理"/></a><div class="content"><a class="title" href="/posts/6045236e.html" title="UniTask 0GC实现原理">UniTask 0GC实现原理</a><time datetime="2026-06-07T06:53:56.627Z" title="发表于 2026-06-07 14:53:56">2026-06-07</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/4483a5b.html" title="UniTask学习与使用"><img src="/img/Title/Unitask.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="UniTask学习与使用"/></a><div class="content"><a class="title" href="/posts/4483a5b.html" title="UniTask学习与使用">UniTask学习与使用</a><time datetime="2026-05-23T07:13:37.986Z" title="发表于 2026-05-23 15:13:37">2026-05-23</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/b9e16296.html" title="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask"><img src="/img/Title/waitChoose.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask"/></a><div class="content"><a class="title" href="/posts/b9e16296.html" title="Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask">Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</a><time datetime="2026-05-23T04:20:00.000Z" title="发表于 2026-05-23 12:20:00">2026-05-23</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/604d34e4.html" title="ZString-Unity的0GC字符串操作"><img src="/img/Title/ZString.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="ZString-Unity的0GC字符串操作"/></a><div class="content"><a class="title" href="/posts/604d34e4.html" title="ZString-Unity的0GC字符串操作">ZString-Unity的0GC字符串操作</a><time datetime="2026-05-10T09:05:26.076Z" title="发表于 2026-05-10 17:05:26">2026-05-10</time></div></div></div></div></div></div></main><footer id="footer"><div class="footer-other"><div class="footer-copyright"><span class="copyright">&copy;2025 - 2026 By 穿越时空的思念</span></div><div class="footer_custom_text">每天进步一点，做更好的自己!</div></div></footer></div><div id="rightside"><div id="rightside-config-hide"><button id="readmode" type="button" title="阅读模式"><i class="fas fa-book-open"></i></button><button id="darkmode" type="button" title="日间和夜间模式切换"><i class="fas fa-adjust"></i></button><button id="hide-aside-btn" type="button" title="单栏和双栏切换"><i class="fas fa-arrows-alt-h"></i></button></div><div id="rightside-config-show"><button id="rightside-config" type="button" title="设置"><i class="fas fa-cog fa-spin"></i></button><button class="close" id="mobile-toc-button" type="button" title="目录"><i class="fas fa-list-ul"></i></button><button id="go-up" type="button" title="回到顶部"><span class="scroll-percent"></span><i class="fas fa-arrow-up"></i></button></div></div><div><script src="/js/utils.js"></script><script src="/js/main.js"></script><div class="js-pjax"><script>(async () => {
+  const showKatex = () => {
+    document.querySelectorAll('#article-container .katex').forEach(el => el.classList.add('katex-show'))
+  }
+
+  if (!window.katex_js_css) {
+    window.katex_js_css = true
+    await btf.getCSS('https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css')
+    if (true) {
+      await btf.getScript('https://cdn.jsdelivr.net/npm/katex/dist/contrib/copy-tex.min.js')
+    }
+  }
+
+  showKatex()
+})()</script></div><script defer="defer" id="ribbon" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-ribbon.min.js" size="150" alpha="0.6" zIndex="-1" mobile="true" data-click="true"></script><script defer="defer" id="fluttering_ribbon" mobile="true" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-fluttering-ribbon.min.js"></script><div id="local-search"><div class="search-dialog"><nav class="search-nav"><span class="search-dialog-title">搜索</span><span id="loading-status"></span><button class="search-close-button"><i class="fas fa-times"></i></button></nav><div class="text-center" id="loading-database"><i class="fas fa-spinner fa-pulse"></i><span>  数据加载中</span></div><div class="search-wrap"><div id="local-search-input"><div class="local-search-box"><input class="local-search-box--input" placeholder="搜索文章" type="text"/></div></div><hr/><div id="local-search-results"></div><div id="local-search-stats-wrap"></div></div></div><div id="search-mask"></div><script src="/js/search/local-search.js"></script></div></div></body></html>
