@@ -33,6 +33,559 @@ shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#12
 ]]></content>
   </entry>
   <entry>
+    <title>UniTask 0GC实现原理</title>
+    <url>/posts/6045236e.html</url>
+    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
+Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
+UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
+
+用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
+
+下面从源码角度拆开看。
+1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
+await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
+
+前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
+例如：
+await someUniTask;
+
+编译器大致会按下面的模式展开：
+var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
+
+而：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
+所以 UniTask 的优化也分成两部分：
+
+实现并优化 await UniTask 的 awaiter 语法糖。
+实现并优化 async UniTask 的 builder 语法糖。
+
+2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
+public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
+
+GetAwaiter() 返回的 Awaiter 是结构体：
+public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
+
+它提供 awaiter pattern 需要的成员：
+public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
+
+这些成员分别对应 await 的几个阶段：
+GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
+
+因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
+也就是说，下面这句：
+await UniTask.Yield();
+
+在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
+UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
+3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
+第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
+第二，Awaiter 内部只保存一个 UniTask 值：
+readonly UniTask task;
+
+第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
+internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
+
+这样可以避免每次 await 都创建一个新的包装委托。
+第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
+所以 await UniTask 的低分配来自几个点叠加：
+UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
+
+4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
+
+UniTask&lt;T&gt; 也是结构体：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
+
+这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
+如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
+如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
+也就是说：
+同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
+
+这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
+5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
+
+它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
+例如：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器大致会生成类似这样的状态机代码：
+var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
+
+遇到 await 时：
+builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
+
+方法正常完成：
+builder.SetResult();
+
+方法抛异常：
+builder.SetException(exception);
+
+注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
+6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
+public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
+
+它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
+它真正做的是：
+
+作为编译器 async 语法的入口。
+启动状态机。
+在第一次异步挂起时，创建或复用一个 runner。
+把 runner 的 MoveNext 注册给 awaiter。
+在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
+通过 Task 属性把最终的 UniTask 返回给调用方。
+
+关键代码在 AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里有两个重点：
+第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
+第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
+7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
+internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
+
+它的职责非常集中：
+
+保存编译器生成的状态机副本。
+提供 MoveNext 给 awaiter 作为 continuation。
+实现 IUniTaskSource，让外部 UniTask 可以 await 它。
+保存完成、异常、取消状态。
+完成后清空并回收到对象池。
+
+第一次挂起时，builder 调用：
+AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
+
+内部会先从池里取：
+if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
+
+这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
+awaiter 完成后，会调用：
+runnerPromise.MoveNext
+
+实际进入：
+void Run()&#123;    stateMachine.MoveNext();&#125;
+
+这就恢复了 async 方法后续逻辑。
+8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
+AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
+public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
+
+调用方拿到的 UniTask 内部指向这个 runner：
+UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
+
+core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
+
+当前状态。
+continuation。
+异常或取消信息。
+version token。
+
+正常完成时：
+public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
+
+异常时：
+public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
+
+调用方 await 完成后会进入：
+public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
+
+TryReturn() 会清理状态并回池：
+core.Reset();stateMachine = default;pool.TryPush(this);
+
+这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
+9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
+典型结构是：
+static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
+
+使用时：
+pool.TryPop(out var result)pool.TryPush(this)
+
+因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
+这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
+10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
+await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+
+UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
+PlayerLoopHelper.AddAction(timing, result);
+
+YieldPromise 本身也是可池化的：
+sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
+
+在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
+public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
+
+完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
+所以在类似 UI 填充动画这样的循环中：
+while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
+
+预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
+11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
+AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
+
+因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
+async UniTaskVoid 使用的是：
+AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
+
+UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
+简单说：
+UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
+
+12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
+
+第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
+CancellationTokenSource、CreateLinkedTokenSource 会分配。
+取消时可能创建 OperationCanceledException。
+异常路径会捕获异常信息。
+闭包、lambda 捕获、LINQ、装箱仍然会分配。
+Debug.Log、字符串拼接、Unity 日志系统可能分配。
+Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
+
+因此更严谨的说法是：
+
+UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
+
+13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
+
+总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
+
+UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
+[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
+AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
+AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
+UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
+TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
+PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
+awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
+
+最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity的==与空并运算符(？.)</title>
+    <url>/posts/1bd27c8e.html</url>
+    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
+Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
+Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
+差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
+在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
+Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</title>
+    <url>/posts/b9e16296.html</url>
+    <content><![CDATA[Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask
+在 Unity 项目里，”等一段时间再做某件事”、”等加载完再回调”、”等动画播完再切场景” 这类需求几乎天天遇到。选型不当，轻则代码难读，重则 GC 卡顿、生命周期错乱、回调地狱。本文把目前主流的三种方案放在一起做一次彻底的对比。
+
+
+引子：我们到底在解决什么问题Unity 的核心循环是单线程帧驱动的：所有游戏逻辑都跑在主线程，按 PlayerLoop 的节拍一帧一帧推进。这就意味着 “异步等待” 在 Unity 里本质上是一个时间&#x2F;事件维度的问题，而不是一个 “线程切换” 的问题。
+我们需要解决的典型场景有：
+
+等待 N 秒后执行某件事（技能 CD、UI 提示自动消失）
+等待某个资源加载完成（AssetBundle、Addressables、网络请求）
+等待某个条件成立（敌人进入视野、玩家按下按键、动画播放到某一帧）
+串行&#x2F;并行编排多个上述等待（连招、剧情演出、新手引导）
+
+围绕这些需求，社区演化出了三种主流方案，下面逐一拆解。
+
+方案一：自己编写基于 Mono 的管理器，在 Update 中轮询思路写一个常驻的 MonoBehaviour 单例（通常叫 TimerManager、UpdateManager 之类），把所有”等一会儿&#x2F;等条件”的任务塞进一个 List，每帧 Update 里遍历检查，到点了就触发回调。
+最小示例public class TimerManager : MonoBehaviour&#123;    public static TimerManager Instance &#123; get; private set; &#125;    private class TimerTask    &#123;        public float remaining;        public Action onComplete;        public bool useUnscaled;    &#125;    private readonly List&lt;TimerTask&gt; _tasks = new(64);    private readonly List&lt;TimerTask&gt; _toRemove = new(16);    private void Awake()    &#123;        if (Instance != null) &#123; Destroy(gameObject); return; &#125;        Instance = this;        DontDestroyOnLoad(gameObject);    &#125;    public void Delay(float seconds, Action callback, bool useUnscaled = false)    &#123;        _tasks.Add(new TimerTask        &#123;            remaining = seconds,            onComplete = callback,            useUnscaled = useUnscaled        &#125;);    &#125;    private void Update()    &#123;        float dt = Time.deltaTime;        float unscaledDt = Time.unscaledDeltaTime;        for (int i = 0; i &lt; _tasks.Count; i++)        &#123;            var t = _tasks[i];            t.remaining -= t.useUnscaled ? unscaledDt : dt;            if (t.remaining &lt;= 0f)            &#123;                try &#123; t.onComplete?.Invoke(); &#125;                catch (Exception e) &#123; Debug.LogException(e); &#125;                _toRemove.Add(t);            &#125;        &#125;        if (_toRemove.Count &gt; 0)        &#123;            for (int i = 0; i &lt; _toRemove.Count; i++) _tasks.Remove(_toRemove[i]);            _toRemove.Clear();        &#125;    &#125;&#125;// 使用TimerManager.Instance.Delay(1.5f, () =&gt; Debug.Log(&quot;到点了&quot;));
+
+优势
+完全可控：调度逻辑是你自己写的，想加优先级、想分组暂停、想统一加锁、想统一序列化保存——全在掌心。
+无第三方依赖：项目不引入任何外部库，体积可控，审包也方便。
+行为可预测：所有任务统一在一个 Update 节点跑，时序非常确定，没有”在 LateUpdate 还是 FixedUpdate 触发”之类的隐性陷阱。
+天然适合数据驱动：任务是普通 C# 对象，序列化、热重载、回放都好接。
+性能基线清晰：知道 Update 里就一个 for 循环，开销心里有数；优化也容易做（比如改最小堆、按到期时间排序）。
+
+劣势
+写法是回调式的，连续等待会变成回调地狱
+TimerManager.Instance.Delay(1f, () =&gt; &#123;    Load(&quot;a&quot;, () =&gt; &#123;        TimerManager.Instance.Delay(0.5f, () =&gt; &#123;            Load(&quot;b&quot;, () =&gt; &#123;                // ……            &#125;);        &#125;);    &#125;);&#125;);
+
+代码缩进越来越深，业务流程被割裂在多个 lambda 里，调试栈也基本看不出原始顺序。
+
+生命周期管理全靠自觉：发起方对象被销毁了，回调里访问 this.transform 直接 MissingReferenceException。你得自己在管理器里加 owner 检查，或者每个回调里手写 if (this == null) return;。
+
+错误处理分散：每个 callback 内部都得自己 try&#x2F;catch，否则一个异常就吞掉，难定位。
+
+每种”等待类型”都要手写一遍：等时间、等条件、等帧数、等资源——管理器要么膨胀成大杂烩，要么拆成一堆 Manager。
+
+没有”取消”的统一语义：要支持取消，就得自己设计 handle、token 之类的机制，相当于把 .NET 的 CancellationToken 又造了一遍。
+
+
+推荐使用场景
+项目是底层框架&#x2F;SDK，不希望引入 UniTask 这种较大的依赖。
+需要极强的调度可控性：比如帧同步联机游戏，要求所有定时任务在固定的 PlayerLoop 节点执行，且要能被回放系统记录。
+运行环境受限：某些老版本 Unity（5.x、2017 早期）、IL2CPP 兼容性敏感的平台。
+场景非常简单：整个项目就十几个定时回调，犯不上引入异步框架。
+
+
+方案二：使用 Unity 协程（Coroutine）思路利用 C# 的迭代器 (IEnumerator + yield return) 配合 Unity 的 StartCoroutine API，让”等待”在语法层面顺序化。底层其实就是 Unity 自己维护了一个状态机调度器，每帧遍历活跃的协程、检查 YieldInstruction 是否完成、不完成就跳过、完成就 MoveNext 一次。
+最小示例public class Demo : MonoBehaviour&#123;    private void Start()    &#123;        StartCoroutine(Sequence());    &#125;    private IEnumerator Sequence()    &#123;        Debug.Log(&quot;开始&quot;);        yield return new WaitForSeconds(1f);        Debug.Log(&quot;加载资源&quot;);        var req = Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        yield return req;        var tex = req.asset as Texture;        Debug.Log($&quot;加载完成: &#123;tex.name&#125;&quot;);        yield return new WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;&#125;
+
+优势
+官方原生支持：无依赖，所有 Unity 版本都可用，文档与社区资料丰富。
+顺序化写法：相比方案一的回调嵌套，协程是直线代码，读起来接近同步代码的体验。
+与 MonoBehaviour 生命周期联动：对象被 SetActive(false) 时协程自动暂停，被 Destroy 时协程自动停止——很多生命周期问题被官方兜底了。
+学习成本低：只要懂 yield，半天就能上手。
+与 Unity 自有异步 API 天然兼容：AsyncOperation、UnityWebRequest、Resources.LoadAsync 这些都可以直接 yield return。
+
+劣势
+不能返回值：IEnumerator 没有泛型版本，想从协程拿结果只能塞 out 参数包装、塞回调、或者塞到成员变量里——非常别扭。
+
+不能 try&#x2F;catch 跨 yield 的异常：yield return 之后的代码不在原调用栈，异常一旦发生，要么被吞，要么打到 Console 里，外层的 try&#x2F;catch 抓不到。
+IEnumerator Bad()&#123;    yield return new WaitForSeconds(1f);    throw new Exception(&quot;boom&quot;);  // 外层无法 catch&#125;
+
+GC 压力：new WaitForSeconds(1f) 每次都堆分配；yield return null 触发的状态机本身也是引用类型。高频协程（比如每个子弹一个）很容易刷出 GC 曲线。
+
+缓解办法是缓存 WaitForSeconds 实例、或用 WaitForSecondsRealtime，但只是缓解，不是根治。
+
+
+取消只能 StopCoroutine：取消粒度粗糙，而且 StopCoroutine 是直接终止状态机，不会执行 finally（在某些 Unity 版本里 finally 会执行，但行为历来不太一致），资源清理需要靠 OnDisable &#x2F; OnDestroy 兜底。
+
+必须挂在 MonoBehaviour 上：纯 C# 类（比如你的 Service、Model 层）不能直接开协程，要么持有一个 MB 引用，要么做一个”协程宿主”单例，相当于回退到方案一的思路。
+
+组合困难：想要”并行等 A 和 B 然后继续”、”等 A 或 B 任一完成就继续”——协程没有原生的 WhenAll &#x2F; WhenAny，得自己用计数器或者嵌套协程实现，很笨拙。
+
+不支持线程切换：完全跑在主线程，想做 CPU 密集型计算后回主线程，还是得自己用 Task + SynchronizationContext 手搓。
+
+PlayerLoop 时序固定：协程只在固定几个时机推进（Update、LateUpdate、FixedUpdate 后等），想精确控制”我希望这个回调在 PreLateUpdate 触发”做不到。
+
+
+推荐使用场景
+简单的 UI&#x2F;演出&#x2F;教程流程：步骤短、不需要返回值、不需要复杂错误处理。
+遗留项目：项目已经大量使用协程，团队熟悉这种风格，没有迁移收益。
+学习&#x2F;原型阶段：快速验证想法，不在乎 GC 与扩展性。
+被某些第三方 API 强制要求：比如某些插件的回调只支持 IEnumerator 形式。
+
+
+方案三：使用 UniTask思路UniTask 是 Cysharp 开源的、专为 Unity 设计的高性能异步库。它用 struct 实现的 UniTask 类型替代 Task，把异步续体直接挂到 Unity 的 PlayerLoop 上跑，配合 C# 的 async/await 语法，让 Unity 的异步代码既顺序化、又零分配。
+最小示例using Cysharp.Threading.Tasks;public class Demo : MonoBehaviour&#123;    private async UniTaskVoid Start()    &#123;        Debug.Log(&quot;开始&quot;);        await UniTask.Delay(1000);        Debug.Log(&quot;加载资源&quot;);        var tex = await Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        Debug.Log($&quot;加载完成&quot;);        await UniTask.WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;    private async UniTask&lt;int&gt; LoadScoreAsync()    &#123;        await UniTask.Delay(500);        return 100;  // 协程做不到的&quot;带返回值&quot;    &#125;&#125;
+
+优势
+async/await 顺序化语法：和协程一样直线易读，但比协程更接近”普通同步代码”，try&#x2F;catch、return、using 都正常工作。
+
+可返回值：UniTask&lt;T&gt; 直接拿结果，告别”用成员变量传值”的丑陋写法。
+
+真正的异常传播：异常会顺着 await 链一路传到能 catch 的地方，全链路 try&#x2F;catch 都能抓。
+try&#123;    await LoadAsync();&#125;catch (Exception ex)&#123;    Debug.LogError(ex);  // 真的会进来&#125;
+
+零&#x2F;极低 GC：基于 struct + 自定义 AsyncMethodBuilder + 对象池，同步完成路径完全零分配，异步路径上也远低于 Task 和协程。在高频调用场景（每帧、每个子弹、每个 AI 决策）差距非常显著。
+
+强大的取消机制：标准 CancellationToken 一路透传，配合 this.GetCancellationTokenOnDestroy() 可以让对象销毁时所有相关异步自动取消，杜绝”对象死了回调还在跑”的事故。
+
+PlayerLoop 时序可精确控制：UniTask.Yield(PlayerLoopTiming.PreLateUpdate) 这种精度，协程做不到。
+
+组合算子丰富：WhenAll &#x2F; WhenAny &#x2F; Timeout &#x2F; Retry 一应俱全。
+
+不依赖 MonoBehaviour：纯 C# 层（服务、网络层、数据层）也能畅快写异步，不再需要”协程宿主”。
+
+原生支持 Unity 异步 API：AsyncOperation、UnityWebRequest、Addressables、SceneManager.LoadSceneAsync 全部可以直接 await。
+
+调试工具完善：自带 UniTask Tracker，可以在 Editor 里看到当前所有活跃的 UniTask、它们卡在哪一行、由哪个对象持有。
+
+支持线程切换：UniTask.SwitchToThreadPool() &#x2F; UniTask.SwitchToMainThread() 让 CPU 密集计算→主线程回调一行代码搞定。
+
+
+劣势
+学习曲线：team 里如果有人不熟 async/await，需要培训。UniTask vs UniTaskVoid vs Forget() vs WhenAll 等概念都要消化。
+第三方依赖：要引入一个外部库（虽然作者活跃、稳定性极好，但仍是依赖）。
+滥用风险：async/await 太顺手了，容易”事事 async”，造成不必要的状态机开销、隐藏控制流复杂度。
+错误用法的坑：忘记 .Forget() 会有警告；async void 写在 Unity 里依旧危险（应该用 UniTaskVoid）；不传 CancellationToken 会导致协程式的生命周期问题重现。
+平台兼容性：极个别老版本 Unity (2018 之前) 或某些定制 IL2CPP 平台需要确认是否完美支持，但 2019.3+ 基本无忧。
+
+推荐使用场景
+绝大多数中大型 Unity 项目的默认选择。
+异步流程复杂、需要组合、需要返回值、需要错误处理的场景：登录流程、资源管线、网络请求、剧情演出、AI 决策。
+对性能&#x2F;GC 敏感：移动端、VR、大型 MMO、需要稳定 60&#x2F;120 帧的项目。
+团队已经熟悉 async/await：从后端、客户端 (WPF&#x2F;Xamarin) 转来的同学几乎零成本上手。
+
+
+横向对比表
+
+
+维度
+Mono 轮询管理器
+Unity 协程
+UniTask
+
+
+
+语法直观度
+回调嵌套，差
+顺序化，好
+顺序化 + 同步语义，最好
+
+
+返回值
+靠回调传
+不支持
+原生 UniTask&lt;T&gt;
+
+
+异常处理
+手动 try&#x2F;catch 每个回调
+跨 yield 抓不到
+全链路 try&#x2F;catch
+
+
+取消机制
+自己造 handle
+StopCoroutine (粗糙)
+CancellationToken (标准)
+
+
+GC 压力
+取决于实现，通常较低
+较高（WaitForSeconds 等）
+极低（零分配路径）
+
+
+生命周期联动
+手动检查
+跟随 MonoBehaviour
+跟随 CancellationToken
+
+
+线程切换
+自己实现
+不支持
+一行 SwitchToXxx
+
+
+组合 (All&#x2F;Any)
+自己实现
+难写
+原生支持
+
+
+时序精度
+自己控制
+固定几个时机
+全 PlayerLoop 节点可选
+
+
+调试工具
+无
+Profiler 一般观察
+专属 Tracker
+
+
+学习成本
+低（自己写的）
+低
+中（要懂 async&#x2F;await）
+
+
+依赖
+无
+无
+引入 UniTask 包
+
+
+适合 MB 之外的纯 C# 类
+是
+否
+是
+
+
+
+选型决策建议按”项目规模 × 性能要求 × 团队背景”三轴拆开，可以给出比较明确的建议：
+项目体量很小、就几个定时回调→ 直接写一个简单的 Mono 管理器。引入框架反而是负担。
+遗留项目大量协程、团队习惯协程、没有性能问题→ 维持协程，但新模块可以尝试 UniTask，逐步替换。
+新项目、中大型、对 GC 敏感→ 直接上 UniTask，没有悬念。三套方案里它是综合最优解，唯一的代价就是团队学一下 async/await。
+底层 SDK &#x2F; 框架 &#x2F; 编辑器扩展→ 视情况而定。如果你写的是给别人用的库，且不希望强加 UniTask 依赖，可以用 Mono 管理器 + 暴露回调 API；如果你的 SDK 用户群已经在用 UniTask，那直接用更好。
+帧同步联机游戏 &#x2F; 录像回放系统→ 优先考虑自己写管理器，因为你需要对所有定时任务有完全确定的执行时序，UniTask 虽然时序可控，但要做到 bit-perfect 复现还是自己写更稳。
+
+一些反模式提醒无论选哪种方案，下面几条都值得记一下：
+
+不要 async void 写 Unity 业务方法。要么 UniTask 让人 await，要么 UniTaskVoid + .Forget() 明确即发即弃。
+不要在协程&#x2F;UniTask 里裸引用 this.transform 而不检查存活。给所有跨帧异步都传 CancellationToken，或者首行加 if (this == null) return;。
+不要每帧 new WaitForSeconds(0.1f)。要么缓存实例，要么改用 UniTask。
+不要混用多套方案而不做边界。一个项目里既写协程又写 UniTask 不是不行，但建议按模块划清楚，避免一个流程里两种写法穿插。
+不要把 UniTask 当万金油。简单的 Invoke(&quot;Foo&quot;, 1f) 能解决的事，不必非要 await UniTask.Delay。
+
+
+结语三种方案并不是互斥关系，而是覆盖了不同的复杂度区间：
+
+Mono 轮询管理器：最底层、最可控，适合简单或极特殊需求。
+协程：Unity 内置的默认选择，简单顺手，但天花板低。
+UniTask：现代 Unity 项目的事实标准，几乎在所有维度上都是协程的超集。
+
+如果让我用一句话总结：新项目无脑选 UniTask，老项目按模块渐进式迁移，特殊底层场景留给 Mono 管理器。
+]]></content>
+      <tags>
+        <tag>Unity</tag>
+        <tag>异步编程</tag>
+        <tag>协程</tag>
+        <tag>UniTask</tag>
+        <tag>性能优化</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Unity的动态图集实现</title>
+    <url>/posts/71da87fc.html</url>
+    <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
+性能优化测试效果未使用动态图集，2张图4个Draw Call。使用动态图集，2张图3个Drwa Call，图越多解决越多。
+动态图集原理动态图集的核心原理为：在运行时维护一张较大的纹理区域，在运行时动态地往纹理区域内添加或移除，现实上直接把纹理区域指定给RawIamge的texture然后设置其UV Rect即可。由于同时渲染的icon数量往往远远小于实际icon的资源数量，因此通常一张1024或者2048大小的动态图集即可以满足大多数的游戏需求。该方法的好处在于，内存在可控范围，并且icon可以共享纹理从而省draw call。下面详细介绍动态图集实现的技术细节。
+二维装箱算法因为放入的每张图片大小不一，所以高效的寻找图片在纹理区域中的位置，从而打到最大空间利用，是动态图集实现最为核心的问题。对于区域的增删查改，可以抽象成一个二维空间装箱操作，算法上有比较多的实现，有兴趣的可以了解这篇文章概述二维空间uv装箱算法：Shelf、Guillotine、MAXRECTS、Skyline。目前的几个算法都是在不重叠的前提下，尽可能大地利用空间，这是一个NP-hard问题，因此没有有效的算法可以解决所有情况。我这里选用的就是Max-Rect的BSSF最短边匹配优先。
+public IntRect Insert(int w, int h)&#123;    // 1. 找最佳空闲区域（最短边匹配优先 BSSF）    int bestIdx = -1;    int bestShort = int.MaxValue;    for (int i = 0; i &lt; m_freeRects.Count; i++)    &#123;        var free = m_freeRects[i];        if (w &lt;= free.width &amp;&amp; h &lt;= free.height)        &#123;            int leftover = Mathf.Min(free.width - w, free.height - h);            if (leftover &lt; bestShort)            &#123;                bestShort = leftover;                bestIdx = i;            &#125;        &#125;    &#125;    if (bestIdx &lt; 0) return null;    // 2. 放置    var best = m_freeRects[bestIdx];    var placed = new IntRect(best.x, best.y, w, h);    // 3. 裁剪所有重叠的空闲矩形    for (int i = m_freeRects.Count - 1; i &gt;= 0; i--)    &#123;        if (Overlaps(placed, m_freeRects[i]))        &#123;            SplitFreeRect(m_freeRects[i], placed);            m_freeRects.RemoveAt(i);        &#125;    &#125;    // 4. 去除冗余    RemoveRedundant();    return placed;&#125;/// &lt;summary&gt;/// 回收（释放）一个已放置的矩形区域，使其重新可用/// &lt;/summary&gt;/// &lt;param name=&quot;rect&quot;&gt;之前 Insert 返回的矩形&lt;/param&gt;public void Recycle(IntRect rect)&#123;    if (rect == null) return;    // 1. 边界校验    if (rect.x &lt; 0 || rect.y &lt; 0 || rect.right &gt; m_width || rect.top &gt; m_height)        return;    if (rect.width &lt;= 0 || rect.height &lt;= 0)        return;    // 2. 将释放区域加入空闲列表    m_freeRects.Add(new IntRect(rect.x, rect.y, rect.width, rect.height));    // 3. 合并空闲矩形    MergeFreeRects();    // 4. 去除冗余    RemoveRedundant();&#125;
+
+图片拷贝的API选择通过装箱算法知道了图片的位置和区域，第二个问题就是如何高效地把图片拷贝到对于的纹理中。在Unity中纹理的拷贝有两种方式：Graphics.CopyTexture和Texture.Get&#x2F;SetPixels
+Graphics.CopyTexture优点：1.首先第一个就是它是从GPU的显存到显存的直接拷贝，效率非常高。2.不需要勾选texture的read&#x2F;write enabled。由于是直接的显存拷贝，因此并不需要在系统内存里再存储一份texture数据。缺点：1.底层调用OpenGL接口glCopyImageSubData。该接口要求OpenGL4.3以上或者GL ES3.2以上才能支持。
+Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如下图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
+因为Texture.Get&#x2F;SetPixels有诸多的性能问题，Graphics.CopyTexture仅有一个支持API版本问题，并且对应的OpenGL4.3和GL ES3.2，为别IOS8（Iphone 5S）和Android 7.0(2016年发布)。已经是10年前的机型了，所以这里我直接选择了Graphics.CopyTexture。
+动态图集初始大小和区域满后的处理图集的初始大小可能纠结的只有初始太大，导致利用率低，这个根据项目实际使用情况分配就行了，建议初始大小设置成1024*1024。但是一张图如果放满了就有两种处理办法：纹理扩容和多张纹理。下面分类讨论这两种实现。
+纹理扩容图片扩容需要做3件事：1、开辟一张更大的纹理，把原纹理拷贝到大纹理中。2、更新所有图片的UV区域信息。3、更新场景中存在的所有RawIamge组件的UV Rect信息。这个方案的第二、第三步都是O(n)级别的复杂度，并且随着纹理的扩大n也越大，越扩容性能消耗越大。
+多张纹理多张纹理则是新建一张大小一致的纹理，这种做法不需要更新图片UV区域。在代码层面就要维护一个图片数组，每次有新图要加入时从数组中遍历得到一个空闲的纹理加入。同时因为提供的纹理不同，所以会多一些Draw Call的开销。
+综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
+代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
+项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity的TMP和Text原理和使用优化</title>
+    <url>/posts/b46c3d6a.html</url>
+    <content><![CDATA[Unity在2018版本加入了TextMeshPro，并且现在已经将Text标记为Legacy。下面是我有关于TMP和Text的理解和思考。
+Text的渲染原理Unity的text组件是使用FreeType库来加载TrueType字体来实现的。通过加载TrueType字体并为每一个字形生成位图以及计算几个度量值(Metric)，生成出一个具体的字形的位图纹理。text动态渲染一个字符过程为：判断一个字符是否已经存在字体纹理中，在则直接获取对应的纹理坐标渲染；若不在则读取ttf文件中字符数据生成字符的位图，并放入纹理中管理。若放入时图集已满，则会对图集进行一次扩大。因为每个size、粗体、斜体的度量值不同，所以当修改Text的这些值的时候，纹理中会出现同一个字符多个位图的情况。
+TMP的渲染原理TMP是基于SDF(有向距离场)的技术渲染的，将字体中每个像素或顶点离其最近的形状边缘的距离值，存储到一张距离纹理中。所以TMP在显示前必须生成这个距离纹理，否则将无法显示(Unity中TMP会缺字出现口的原因)。因为显示的像素为动态计算该使用何种颜色和透明度，从而创建出精细、高品质的字体效果。所以TMP几乎不受放大的影响，能一直提供锐利清晰的图像。并且因为有距离信息，所以TMP能以一个较小的开销支持描边、投影等效果。在Unity的SDF中可以看到这张纹理，可以看到字体内部为白色，外部为黑色，在字体边缘之间黑白渐变，也就是距离从近到远的变化。
+TMP和Text的性能对比这里使用的TTF文件为AlibabaPuHuiTi-3-65-Medium，TMP和Text渲染内容一篇滕王阁序。为了模拟实际项目中显示所有字符的需求，所有TMP和Text都选择字符模式都为Dynamic。下面从渲染DrawCall和内存两方面对比
+Text的性能表现首先是Text的DrawCall,得益于所有的字符都在一张字符纹理中，所以Text只有一个DC。其次是内存因为滕王阁序的字符有限，所以Text的内存占用也仅有0.5MB。
+TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Unity把文章字符分到了3个不同的字符纹理中，最终使用了3个DrwaCall。内存占用也是3个字符纹理的占用，为6MB。
+性能总结在有限字符的渲染中，Text凭借只会取需要的字符位图存储，所以内存和DrwaCall下更优。但是这里TMP有着明显的优化空间，就是使用静态把所有的文字都的烘培一张纹理中。此时drwaCall为1，内存占用也为一张纹理2MB。但在实际的项目中，除非是没有聊天、排行榜等玩家自定义字符的功能，否则静态纹理一定会出现字符缺失的情况。对于Text来说，只能是使用Dynamic去扩容纹理大小，在纹理达到4096*4096后，也会出现多张纹理导致DrawCall上升。对于TMP因为官方支持了FallBack字体，所以可以使用一个静态纹理打入常用的3000或者7000字符，使用的FallBack字符再设置为动态，可以有效的避免游戏过程中因为贴图扩大的性能开销。
+技术选型的思考1、Text不支持图文混排，除非自己实现一套富文本图片解析。所以有图文混排需求建议无脑TMP。2、仅有描边、投影的需求。之前实现了一个Text的描边和弯曲组件，所以在字符有限的项目中(不考虑本地化、玩家自定义情况)使用Text和TMP，在性能和效果上和TMP差不多。但在字符无限的项目中，推荐使用静态常用字TMP+动态TMP配合，既有较好的性能效果，也能使用TMP的各种功能。3、对渲染效果更高的要求，这个就不用纠结了，美术一定会让你选TMP。
+参考资料[1].Unity字体渲染原理[2].unity-UGUI源码分析(4):Text与TextMeshPro[3].文本渲染-LearnOpenGL
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity的TMP的纹理优化</title>
+    <url>/posts/af72c7f2.html</url>
+    <content><![CDATA[上一篇文章介绍了Unity的TMP和Text，TMP在渲染时需要先一张距离纹理，这不禁让我想到一种优化策略：如果对这张纹理选择不同图像压缩方式，是不是就可以以牺牲显示效果为代价，换取内存开销。
+Unity SDF Asset结构使用AlibabaPuHuiTi-3-65-Medium.ttf文件创建一个SDF Asset，选择渲染模式为static，并使用3500常用字生成贴图，可以看到Unity生成了一张4096*4096的纹理，并且大部分面积都存了字体。Unity还把纹理贴图当成了SDF Asset结构的一部分管理起来，不允许我们直接修改图像的压缩方式。
+TMP纹理的提取不幸中的万幸，Unity把TMP的源码跟着package一起放在了本地，通过对于的编辑器界面逻辑，我找到了Unity保存纹理的过程代码。其中Save_Bitmap_FontAsset和Save_SDF_FontAsset都走向了执行的逻辑都相同，都是做了同样的三件事：1、把纹理赋值给atlasTextures字段。2、把纹理资源设置到FontAsset中。3、更新FontAsset资源的材质主帖图为当前纹理。
+我们的提取和替换逻辑：只需要从FontAsset下的atlasTexture读出对应的texture保存，然后把FontAssest下的指定为我们保存的texture，最后再把FontAsset的资源删除，就大功告成了。把相关思路灌给AI，然后AI生成了代码。下面给出核心的代码逻辑。
+导出代码在FontAsset中atlasTexture是public的所以直接读取，因为Unity默认没开纹理贴图的read&#x2F;Write，所以MakeTextureReadable把图拷贝到一个新的texutre中，并保存下来。
+private void ExportCurrentFontTexture()&#123;    if (targetFont == null || targetFont.atlasTexture == null)    &#123;        EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);        return;    &#125;    string savePath = EditorUtility.SaveFilePanel(        &quot;导出字体纹理&quot;,        Application.dataPath,        $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,        &quot;png&quot;    );    if (!string.IsNullOrEmpty(savePath))    &#123;        ExportTextureAsPNG(targetFont.atlasTexture, savePath);    &#125;&#125;private void ExportTextureAsPNG(Texture2D texture, string path)&#123;    if (texture == null) return;    Texture2D readableTexture = MakeTextureReadable(texture);    byte[] pngData = readableTexture.EncodeToPNG();    File.WriteAllBytes(path, pngData);    if (readableTexture != texture)    &#123;        DestroyImmediate(readableTexture);    &#125;    //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);    AssetDatabase.Refresh();    ConfigureTextureForSDF(path);    EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);&#125;private Texture2D MakeTextureReadable(Texture2D texture)&#123;    if (texture == null || texture.isReadable) return texture;    RenderTexture rt = RenderTexture.GetTemporary(        texture.width,        texture.height,        0,        RenderTextureFormat.ARGB32,        RenderTextureReadWrite.Linear    );    Graphics.Blit(texture, rt);    RenderTexture previous = RenderTexture.active;    RenderTexture.active = rt;    Texture2D readableTexture = new Texture2D(        texture.width,        texture.height,        TextureFormat.RGBA32,        false    );    readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);    readableTexture.Apply();    RenderTexture.active = previous;    RenderTexture.ReleaseTemporary(rt);    return readableTexture;&#125;
+替换代码替换的核心代码，非常简单，先遍历把所有的删掉，然后把输入的贴图指定回去，最后保存。
+if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)&#123;    for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)    &#123;        var texture = targetFont.atlasTextures[i];        if (texture == null)        &#123;            continue;        &#125;        AssetDatabase.RemoveObjectFromAsset(texture);        DestroyImmediate(texture);    &#125;&#125;targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;targetFont.material.mainTexture = replacementTexture;// 保存字体资产EditorUtility.SetDirty(targetFont);AssetDatabase.SaveAssets();
+
+纹理压缩验证现在在Inspector面板下，此SDF Asset的纹理贴图成功指定到保存出来的纹理。对其进行纹理格式改变，字体也同步模糊和清晰，说明修改成功！
+内存优化效果在Game视图下，ASTC6x6和Aplpha 8(原生类型)，看着差别不大，但是内存一个是16MB，一个是7.1MB，相差将近一倍。
+编辑器全部代码#if UNITY_EDITORusing UnityEngine;using UnityEditor;using TMPro;using System.IO;using System.Linq;using System.Collections.Generic;using UnityEngine.TextCore;using UnityEngine.TextCore.LowLevel;public class TMPSpriteExporterWindow : EditorWindow&#123;    private TMP_FontAsset targetFont;    private Texture2D replacementTexture;    private Texture2D replacementSDFTexture;    private Vector2 scrollPosition;    private Texture2D processedPreviewTexture;    [MenuItem(&quot;Tools/TMP/SDF字体纹理替换器&quot;)]    public static void ShowWindow()    &#123;        var window = GetWindow&lt;TMPSpriteExporterWindow&gt;(&quot;TMP SDF字体纹理替换器&quot;, true, typeof(SceneView));        window.minSize = new Vector2(450, 800);    &#125;    private void OnGUI()    &#123;        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);        EditorGUILayout.LabelField(&quot;TMP SDF字体纹理替换器&quot;, EditorStyles.boldLabel);        EditorGUILayout.HelpBox(&quot;此工具用于替换TMP SDF字体的Font Atlas纹理。注意：SDF字体需要特殊的距离场数据。&quot;, MessageType.Info);        EditorGUILayout.Space(10);        // 1. 选择SDF字体        EditorGUI.BeginChangeCheck();        targetFont = (TMP_FontAsset)EditorGUILayout.ObjectField(&quot;目标SDF字体&quot;, targetFont, typeof(TMP_FontAsset), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (targetFont != null)        &#123;            DisplayFontInfo();        &#125;        EditorGUILayout.Space(20);        // 2. 选择替换纹理        EditorGUILayout.LabelField(&quot;替换纹理设置&quot;, EditorStyles.boldLabel);        EditorGUI.BeginChangeCheck();        replacementTexture =            (Texture2D)EditorGUILayout.ObjectField(&quot;源PNG纹理&quot;, replacementTexture, typeof(Texture2D), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (replacementTexture != null)        &#123;            EditorGUILayout.HelpBox(                $&quot;纹理尺寸: &#123;replacementTexture.width&#125;x&#123;replacementTexture.height&#125; | 格式: &#123;replacementTexture.format&#125;&quot;,                MessageType.None);        &#125;        EditorGUILayout.Space(10);                // 4. 功能按钮        EditorGUILayout.BeginHorizontal();        if (GUILayout.Button(&quot;替换字体纹理&quot;, GUILayout.Height(30)))        &#123;            ReplaceSDFFontTexture();        &#125;        EditorGUILayout.EndHorizontal();        EditorGUILayout.Space(10);        if (GUILayout.Button(&quot;导出当前字体纹理&quot;, GUILayout.Height(30)))        &#123;            ExportCurrentFontTexture();        &#125;        EditorGUILayout.Space(20);        // 5. 预览区域        DrawPreviewSection();        EditorGUILayout.EndScrollView();    &#125;    private void DisplayFontInfo()    &#123;        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField($&quot;当前纹理: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);            EditorGUILayout.LabelField($&quot;字符数量: &#123;targetFont.characterTable?.Count ?? 0&#125;&quot;, EditorStyles.miniLabel);            if (targetFont.material != null)            &#123;                Shader shader = targetFont.material.shader;                bool isSDF = shader != null &amp;&amp; shader.name.Contains(&quot;SDF&quot;);                EditorGUILayout.LabelField($&quot;着色器: &#123;shader?.name&#125; &#123;(isSDF ? &quot;(SDF)&quot; : &quot;(Bitmap)&quot;)&#125;&quot;,                    EditorStyles.miniLabel);            &#125;        &#125;        else        &#123;            EditorGUILayout.HelpBox(&quot;警告：此字体没有纹理图集！&quot;, MessageType.Warning);        &#125;        EditorGUILayout.EndVertical();    &#125;    private void UpdatePreview()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);            processedPreviewTexture = null;        &#125;    &#125;    private void ReplaceSDFFontTexture()    &#123;        if (targetFont == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择目标SDF字体！&quot;, &quot;确定&quot;);            return;        &#125;        if (processedPreviewTexture == null &amp;&amp; replacementTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先生成SDF纹理或选择源纹理！&quot;, &quot;确定&quot;);            return;        &#125;        Texture2D textureToUse = processedPreviewTexture ?? replacementTexture;        if (!EditorUtility.DisplayDialog(&quot;确认替换&quot;,                $&quot;确定要替换 &#x27;&#123;targetFont.name&#125;&#x27; 的Font Atlas纹理吗？\n\n&quot; +                $&quot;新纹理: &#123;textureToUse.width&#125;x&#123;textureToUse.height&#125;\n&quot; +                $&quot;此操作会修改字体资产，请确保已备份！&quot;,                &quot;替换&quot;, &quot;取消&quot;))        &#123;            return;        &#125;        try        &#123;            EditorUtility.DisplayProgressBar(&quot;替换字体纹理&quot;, &quot;处理中...&quot;, 0.5f);            if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)            &#123;                for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)                &#123;                    var texture = targetFont.atlasTextures[i];                    if (texture == null)                    &#123;                        continue;                    &#125;                    AssetDatabase.RemoveObjectFromAsset(texture);                    DestroyImmediate(texture);                &#125;            &#125;            targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;            targetFont.material.mainTexture = replacementTexture;                        // 保存字体资产            EditorUtility.SetDirty(targetFont);            AssetDatabase.SaveAssets();            // 刷新场景            RefreshAllTMPTextComponents(targetFont);            EditorUtility.ClearProgressBar();            EditorUtility.DisplayDialog(&quot;成功&quot;,                $&quot;已成功替换SDF字体纹理！\n\n&quot; +                $&quot;已刷新所有相关文本组件。&quot;,                &quot;确定&quot;);        &#125;        catch (System.Exception e)        &#123;            EditorUtility.ClearProgressBar();            Debug.LogError($&quot;替换SDF字体纹理失败: &#123;e.Message&#125;\n&#123;e.StackTrace&#125;&quot;);            EditorUtility.DisplayDialog(&quot;错误&quot;, $&quot;替换失败: &#123;e.Message&#125;&quot;, &quot;确定&quot;);        &#125;    &#125;        private void ConfigureTextureForSDF(string texturePath)    &#123;        // 检查路径是否在Assets目录下        if (!texturePath.StartsWith(&quot;Assets/&quot;))        &#123;            // 尝试转换为相对路径            string relativePath = GetRelativeAssetPath(texturePath);            if (string.IsNullOrEmpty(relativePath))            &#123;                Debug.LogError($&quot;路径不在Assets目录下: &#123;texturePath&#125;&quot;);                EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;文件必须保存在Assets目录下才能修改导入设置&quot;, &quot;确定&quot;);                return;            &#125;            texturePath = relativePath;        &#125;               TextureImporter importer = AssetImporter.GetAtPath(texturePath) as TextureImporter;        if (importer == null)        &#123;            EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;importer为空!&quot;,&quot;OK&quot;);            return;        &#125;        // 对于SDF纹理，启用alpha通道处理        importer.textureType = TextureImporterType.Default;  // 使用单通道类型        importer.alphaSource = TextureImporterAlphaSource.FromInput;        importer.alphaIsTransparency = true;                importer.isReadable = false;        importer.wrapMode = TextureWrapMode.Clamp;        importer.filterMode = FilterMode.Bilinear;        importer.mipmapEnabled = false;        importer.sRGBTexture = false;  // 对于SDF，通常使用线性颜色空间        // 设置各平台格式        SetPlatformSettings(importer, &quot;Standalone&quot;, TextureImporterFormat.Alpha8, 4096, false);        SetPlatformSettings(importer, &quot;iPhone&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);        SetPlatformSettings(importer, &quot;Android&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);            // 应用更改        importer.SaveAndReimport();        //EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;修改成功&quot;,&quot;OK&quot;);    &#125;        // 将绝对路径转换为Assets相对路径    private string GetRelativeAssetPath(string fullPath)    &#123;        string dataPath = Application.dataPath;        if (fullPath.StartsWith(dataPath))        &#123;            return &quot;Assets&quot; + fullPath.Substring(dataPath.Length).Replace(&quot;\\&quot;, &quot;/&quot;);        &#125;        return null;    &#125;    private void SetPlatformSettings(TextureImporter importer, string platform,         TextureImporterFormat format, int maxSize, bool compressed)    &#123;        var settings = new TextureImporterPlatformSettings();        settings.name = platform;        settings.overridden = true;        settings.format = format;        settings.maxTextureSize = maxSize;        settings.textureCompression = compressed ?             TextureImporterCompression.Compressed :             TextureImporterCompression.Uncompressed;        settings.compressionQuality = 50;            importer.SetPlatformTextureSettings(settings);    &#125;        private void RefreshAllTMPTextComponents(TMP_FontAsset fontAsset)    &#123;        if (fontAsset == null) return;        int count = 0;        // 刷新场景中的文本        TMP_Text[] sceneTexts = GameObject.FindObjectsOfType&lt;TMP_Text&gt;(true);        foreach (TMP_Text text in sceneTexts)        &#123;            if (text.font == fontAsset)            &#123;                text.ForceMeshUpdate();                EditorUtility.SetDirty(text);                count++;            &#125;        &#125;        // 刷新预制件        string[] prefabGUIDs = AssetDatabase.FindAssets(&quot;t:Prefab&quot;);        foreach (string guid in prefabGUIDs)        &#123;            string path = AssetDatabase.GUIDToAssetPath(guid);            GameObject prefab = AssetDatabase.LoadAssetAtPath&lt;GameObject&gt;(path);            if (prefab != null)            &#123;                TMP_Text[] prefabTexts = prefab.GetComponentsInChildren&lt;TMP_Text&gt;(true);                bool changed = false;                foreach (TMP_Text text in prefabTexts)                &#123;                    if (text.font == fontAsset)                    &#123;                        text.ForceMeshUpdate();                        EditorUtility.SetDirty(text);                        changed = true;                        count++;                    &#125;                &#125;                if (changed)                &#123;                    PrefabUtility.SavePrefabAsset(prefab);                &#125;            &#125;        &#125;        Debug.Log($&quot;已刷新 &#123;count&#125; 个文本组件&quot;);    &#125;    private Texture2D MakeTextureReadable(Texture2D texture)    &#123;        if (texture == null || texture.isReadable) return texture;        RenderTexture rt = RenderTexture.GetTemporary(            texture.width,            texture.height,            0,            RenderTextureFormat.ARGB32,            RenderTextureReadWrite.Linear        );        Graphics.Blit(texture, rt);        RenderTexture previous = RenderTexture.active;        RenderTexture.active = rt;        Texture2D readableTexture = new Texture2D(            texture.width,            texture.height,            TextureFormat.RGBA32,            false        );        readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);        readableTexture.Apply();        RenderTexture.active = previous;        RenderTexture.ReleaseTemporary(rt);        return readableTexture;    &#125;    private void ExportCurrentFontTexture()    &#123;        if (targetFont == null || targetFont.atlasTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);            return;        &#125;        string savePath = EditorUtility.SaveFilePanel(            &quot;导出字体纹理&quot;,            Application.dataPath,            $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,            &quot;png&quot;        );        if (!string.IsNullOrEmpty(savePath))        &#123;            ExportTextureAsPNG(targetFont.atlasTexture, savePath);        &#125;    &#125;    private void ExportTextureAsPNG(Texture2D texture, string path)    &#123;        if (texture == null) return;        Texture2D readableTexture = MakeTextureReadable(texture);        byte[] pngData = readableTexture.EncodeToPNG();        File.WriteAllBytes(path, pngData);        if (readableTexture != texture)        &#123;            DestroyImmediate(readableTexture);        &#125;        //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);        AssetDatabase.Refresh();        ConfigureTextureForSDF(path);        EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);    &#125;    private void DrawPreviewSection()    &#123;        EditorGUILayout.Space(20);        EditorGUILayout.LabelField(&quot;预览&quot;, EditorStyles.boldLabel);        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont != null &amp;&amp; targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField(&quot;当前字体纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect origRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(origRect, targetFont.atlasTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);        &#125;        if (processedPreviewTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;生成的SDF纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect newRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(newRect, processedPreviewTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;processedPreviewTexture.width&#125;x&#123;processedPreviewTexture.height&#125;&quot;,                EditorStyles.miniLabel);            // 显示SDF预览            DrawSDFPreview(processedPreviewTexture);        &#125;        else if (replacementTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;源纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect srcRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(srcRect, replacementTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        // 警告信息        if (targetFont != null &amp;&amp; replacementTexture != null)        &#123;            if (targetFont.atlasTexture != null &amp;&amp;                (targetFont.atlasTexture.width != replacementTexture.width ||                 targetFont.atlasTexture.height != replacementTexture.height))            &#123;                EditorGUILayout.HelpBox(                    &quot;⚠️ 警告：纹理尺寸不匹配！\n&quot; +                    &quot;SDF字体的字符UV映射可能不正确，建议使用相同尺寸的纹理。&quot;,                    MessageType.Warning                );            &#125;        &#125;    &#125;    private void DrawSDFPreview(Texture2D sdfTexture)    &#123;        EditorGUILayout.BeginHorizontal();        // 原始预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;Alpha通道&quot;, EditorStyles.miniLabel);        Rect alphaRect = GUILayoutUtility.GetAspectRect(1f);        EditorGUI.DrawTextureAlpha(alphaRect, sdfTexture, ScaleMode.ScaleToFit);        EditorGUILayout.EndVertical();        // 着色预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;距离场预览&quot;, EditorStyles.miniLabel);        Rect colorRect = GUILayoutUtility.GetAspectRect(1f);        // 创建临时材质用于预览SDF        Material previewMat = new Material(Shader.Find(&quot;Hidden/TMP_SDFPreview&quot;));        if (previewMat != null)        &#123;            EditorGUI.DrawPreviewTexture(colorRect, sdfTexture, previewMat);            DestroyImmediate(previewMat);        &#125;        else        &#123;            EditorGUI.DrawTextureTransparent(colorRect, sdfTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        EditorGUILayout.EndHorizontal();    &#125;        private void OnDestroy()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);        &#125;    &#125;&#125;#endif]]></content>
+  </entry>
+  <entry>
     <title>UniTask学习与使用</title>
     <url>/posts/4483a5b.html</url>
     <content><![CDATA[UniTask 学习文档
@@ -576,559 +1129,6 @@ GetAsyncOnTriggerEnterTrigger()
 ]]></content>
   </entry>
   <entry>
-    <title>UniTask 0GC实现原理</title>
-    <url>/posts/6045236e.html</url>
-    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
-Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
-UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
-
-用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
-
-下面从源码角度拆开看。
-1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
-await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
-
-前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
-例如：
-await someUniTask;
-
-编译器大致会按下面的模式展开：
-var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
-
-而：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
-所以 UniTask 的优化也分成两部分：
-
-实现并优化 await UniTask 的 awaiter 语法糖。
-实现并优化 async UniTask 的 builder 语法糖。
-
-2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
-public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
-
-GetAwaiter() 返回的 Awaiter 是结构体：
-public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
-
-它提供 awaiter pattern 需要的成员：
-public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
-
-这些成员分别对应 await 的几个阶段：
-GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
-
-因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
-也就是说，下面这句：
-await UniTask.Yield();
-
-在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
-UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
-3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
-第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
-第二，Awaiter 内部只保存一个 UniTask 值：
-readonly UniTask task;
-
-第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
-internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
-
-这样可以避免每次 await 都创建一个新的包装委托。
-第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
-所以 await UniTask 的低分配来自几个点叠加：
-UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
-
-4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
-
-UniTask&lt;T&gt; 也是结构体：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
-
-这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
-如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
-如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
-也就是说：
-同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
-
-这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
-5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
-
-它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
-例如：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器大致会生成类似这样的状态机代码：
-var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
-
-遇到 await 时：
-builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
-
-方法正常完成：
-builder.SetResult();
-
-方法抛异常：
-builder.SetException(exception);
-
-注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
-6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
-public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
-
-它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
-它真正做的是：
-
-作为编译器 async 语法的入口。
-启动状态机。
-在第一次异步挂起时，创建或复用一个 runner。
-把 runner 的 MoveNext 注册给 awaiter。
-在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
-通过 Task 属性把最终的 UniTask 返回给调用方。
-
-关键代码在 AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里有两个重点：
-第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
-第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
-7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
-internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
-
-它的职责非常集中：
-
-保存编译器生成的状态机副本。
-提供 MoveNext 给 awaiter 作为 continuation。
-实现 IUniTaskSource，让外部 UniTask 可以 await 它。
-保存完成、异常、取消状态。
-完成后清空并回收到对象池。
-
-第一次挂起时，builder 调用：
-AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
-
-内部会先从池里取：
-if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
-
-这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
-awaiter 完成后，会调用：
-runnerPromise.MoveNext
-
-实际进入：
-void Run()&#123;    stateMachine.MoveNext();&#125;
-
-这就恢复了 async 方法后续逻辑。
-8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
-AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
-public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
-
-调用方拿到的 UniTask 内部指向这个 runner：
-UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
-
-core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
-
-当前状态。
-continuation。
-异常或取消信息。
-version token。
-
-正常完成时：
-public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
-
-异常时：
-public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
-
-调用方 await 完成后会进入：
-public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
-
-TryReturn() 会清理状态并回池：
-core.Reset();stateMachine = default;pool.TryPush(this);
-
-这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
-9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
-典型结构是：
-static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
-
-使用时：
-pool.TryPop(out var result)pool.TryPush(this)
-
-因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
-这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
-10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
-await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
-
-UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
-PlayerLoopHelper.AddAction(timing, result);
-
-YieldPromise 本身也是可池化的：
-sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
-
-在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
-public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
-
-完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
-所以在类似 UI 填充动画这样的循环中：
-while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
-
-预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
-11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
-AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
-
-因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
-async UniTaskVoid 使用的是：
-AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
-
-UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
-简单说：
-UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
-
-12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
-
-第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
-CancellationTokenSource、CreateLinkedTokenSource 会分配。
-取消时可能创建 OperationCanceledException。
-异常路径会捕获异常信息。
-闭包、lambda 捕获、LINQ、装箱仍然会分配。
-Debug.Log、字符串拼接、Unity 日志系统可能分配。
-Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
-
-因此更严谨的说法是：
-
-UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
-
-13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
-
-总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
-
-UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
-[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
-AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
-AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
-UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
-TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
-PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
-awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
-
-最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity的动态图集实现</title>
-    <url>/posts/71da87fc.html</url>
-    <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
-性能优化测试效果未使用动态图集，2张图4个Draw Call。使用动态图集，2张图3个Drwa Call，图越多解决越多。
-动态图集原理动态图集的核心原理为：在运行时维护一张较大的纹理区域，在运行时动态地往纹理区域内添加或移除，现实上直接把纹理区域指定给RawIamge的texture然后设置其UV Rect即可。由于同时渲染的icon数量往往远远小于实际icon的资源数量，因此通常一张1024或者2048大小的动态图集即可以满足大多数的游戏需求。该方法的好处在于，内存在可控范围，并且icon可以共享纹理从而省draw call。下面详细介绍动态图集实现的技术细节。
-二维装箱算法因为放入的每张图片大小不一，所以高效的寻找图片在纹理区域中的位置，从而打到最大空间利用，是动态图集实现最为核心的问题。对于区域的增删查改，可以抽象成一个二维空间装箱操作，算法上有比较多的实现，有兴趣的可以了解这篇文章概述二维空间uv装箱算法：Shelf、Guillotine、MAXRECTS、Skyline。目前的几个算法都是在不重叠的前提下，尽可能大地利用空间，这是一个NP-hard问题，因此没有有效的算法可以解决所有情况。我这里选用的就是Max-Rect的BSSF最短边匹配优先。
-public IntRect Insert(int w, int h)&#123;    // 1. 找最佳空闲区域（最短边匹配优先 BSSF）    int bestIdx = -1;    int bestShort = int.MaxValue;    for (int i = 0; i &lt; m_freeRects.Count; i++)    &#123;        var free = m_freeRects[i];        if (w &lt;= free.width &amp;&amp; h &lt;= free.height)        &#123;            int leftover = Mathf.Min(free.width - w, free.height - h);            if (leftover &lt; bestShort)            &#123;                bestShort = leftover;                bestIdx = i;            &#125;        &#125;    &#125;    if (bestIdx &lt; 0) return null;    // 2. 放置    var best = m_freeRects[bestIdx];    var placed = new IntRect(best.x, best.y, w, h);    // 3. 裁剪所有重叠的空闲矩形    for (int i = m_freeRects.Count - 1; i &gt;= 0; i--)    &#123;        if (Overlaps(placed, m_freeRects[i]))        &#123;            SplitFreeRect(m_freeRects[i], placed);            m_freeRects.RemoveAt(i);        &#125;    &#125;    // 4. 去除冗余    RemoveRedundant();    return placed;&#125;/// &lt;summary&gt;/// 回收（释放）一个已放置的矩形区域，使其重新可用/// &lt;/summary&gt;/// &lt;param name=&quot;rect&quot;&gt;之前 Insert 返回的矩形&lt;/param&gt;public void Recycle(IntRect rect)&#123;    if (rect == null) return;    // 1. 边界校验    if (rect.x &lt; 0 || rect.y &lt; 0 || rect.right &gt; m_width || rect.top &gt; m_height)        return;    if (rect.width &lt;= 0 || rect.height &lt;= 0)        return;    // 2. 将释放区域加入空闲列表    m_freeRects.Add(new IntRect(rect.x, rect.y, rect.width, rect.height));    // 3. 合并空闲矩形    MergeFreeRects();    // 4. 去除冗余    RemoveRedundant();&#125;
-
-图片拷贝的API选择通过装箱算法知道了图片的位置和区域，第二个问题就是如何高效地把图片拷贝到对于的纹理中。在Unity中纹理的拷贝有两种方式：Graphics.CopyTexture和Texture.Get&#x2F;SetPixels
-Graphics.CopyTexture优点：1.首先第一个就是它是从GPU的显存到显存的直接拷贝，效率非常高。2.不需要勾选texture的read&#x2F;write enabled。由于是直接的显存拷贝，因此并不需要在系统内存里再存储一份texture数据。缺点：1.底层调用OpenGL接口glCopyImageSubData。该接口要求OpenGL4.3以上或者GL ES3.2以上才能支持。
-Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如下图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
-因为Texture.Get&#x2F;SetPixels有诸多的性能问题，Graphics.CopyTexture仅有一个支持API版本问题，并且对应的OpenGL4.3和GL ES3.2，为别IOS8（Iphone 5S）和Android 7.0(2016年发布)。已经是10年前的机型了，所以这里我直接选择了Graphics.CopyTexture。
-动态图集初始大小和区域满后的处理图集的初始大小可能纠结的只有初始太大，导致利用率低，这个根据项目实际使用情况分配就行了，建议初始大小设置成1024*1024。但是一张图如果放满了就有两种处理办法：纹理扩容和多张纹理。下面分类讨论这两种实现。
-纹理扩容图片扩容需要做3件事：1、开辟一张更大的纹理，把原纹理拷贝到大纹理中。2、更新所有图片的UV区域信息。3、更新场景中存在的所有RawIamge组件的UV Rect信息。这个方案的第二、第三步都是O(n)级别的复杂度，并且随着纹理的扩大n也越大，越扩容性能消耗越大。
-多张纹理多张纹理则是新建一张大小一致的纹理，这种做法不需要更新图片UV区域。在代码层面就要维护一个图片数组，每次有新图要加入时从数组中遍历得到一个空闲的纹理加入。同时因为提供的纹理不同，所以会多一些Draw Call的开销。
-综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
-代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
-项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</title>
-    <url>/posts/b9e16296.html</url>
-    <content><![CDATA[Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask
-在 Unity 项目里，”等一段时间再做某件事”、”等加载完再回调”、”等动画播完再切场景” 这类需求几乎天天遇到。选型不当，轻则代码难读，重则 GC 卡顿、生命周期错乱、回调地狱。本文把目前主流的三种方案放在一起做一次彻底的对比。
-
-
-引子：我们到底在解决什么问题Unity 的核心循环是单线程帧驱动的：所有游戏逻辑都跑在主线程，按 PlayerLoop 的节拍一帧一帧推进。这就意味着 “异步等待” 在 Unity 里本质上是一个时间&#x2F;事件维度的问题，而不是一个 “线程切换” 的问题。
-我们需要解决的典型场景有：
-
-等待 N 秒后执行某件事（技能 CD、UI 提示自动消失）
-等待某个资源加载完成（AssetBundle、Addressables、网络请求）
-等待某个条件成立（敌人进入视野、玩家按下按键、动画播放到某一帧）
-串行&#x2F;并行编排多个上述等待（连招、剧情演出、新手引导）
-
-围绕这些需求，社区演化出了三种主流方案，下面逐一拆解。
-
-方案一：自己编写基于 Mono 的管理器，在 Update 中轮询思路写一个常驻的 MonoBehaviour 单例（通常叫 TimerManager、UpdateManager 之类），把所有”等一会儿&#x2F;等条件”的任务塞进一个 List，每帧 Update 里遍历检查，到点了就触发回调。
-最小示例public class TimerManager : MonoBehaviour&#123;    public static TimerManager Instance &#123; get; private set; &#125;    private class TimerTask    &#123;        public float remaining;        public Action onComplete;        public bool useUnscaled;    &#125;    private readonly List&lt;TimerTask&gt; _tasks = new(64);    private readonly List&lt;TimerTask&gt; _toRemove = new(16);    private void Awake()    &#123;        if (Instance != null) &#123; Destroy(gameObject); return; &#125;        Instance = this;        DontDestroyOnLoad(gameObject);    &#125;    public void Delay(float seconds, Action callback, bool useUnscaled = false)    &#123;        _tasks.Add(new TimerTask        &#123;            remaining = seconds,            onComplete = callback,            useUnscaled = useUnscaled        &#125;);    &#125;    private void Update()    &#123;        float dt = Time.deltaTime;        float unscaledDt = Time.unscaledDeltaTime;        for (int i = 0; i &lt; _tasks.Count; i++)        &#123;            var t = _tasks[i];            t.remaining -= t.useUnscaled ? unscaledDt : dt;            if (t.remaining &lt;= 0f)            &#123;                try &#123; t.onComplete?.Invoke(); &#125;                catch (Exception e) &#123; Debug.LogException(e); &#125;                _toRemove.Add(t);            &#125;        &#125;        if (_toRemove.Count &gt; 0)        &#123;            for (int i = 0; i &lt; _toRemove.Count; i++) _tasks.Remove(_toRemove[i]);            _toRemove.Clear();        &#125;    &#125;&#125;// 使用TimerManager.Instance.Delay(1.5f, () =&gt; Debug.Log(&quot;到点了&quot;));
-
-优势
-完全可控：调度逻辑是你自己写的，想加优先级、想分组暂停、想统一加锁、想统一序列化保存——全在掌心。
-无第三方依赖：项目不引入任何外部库，体积可控，审包也方便。
-行为可预测：所有任务统一在一个 Update 节点跑，时序非常确定，没有”在 LateUpdate 还是 FixedUpdate 触发”之类的隐性陷阱。
-天然适合数据驱动：任务是普通 C# 对象，序列化、热重载、回放都好接。
-性能基线清晰：知道 Update 里就一个 for 循环，开销心里有数；优化也容易做（比如改最小堆、按到期时间排序）。
-
-劣势
-写法是回调式的，连续等待会变成回调地狱
-TimerManager.Instance.Delay(1f, () =&gt; &#123;    Load(&quot;a&quot;, () =&gt; &#123;        TimerManager.Instance.Delay(0.5f, () =&gt; &#123;            Load(&quot;b&quot;, () =&gt; &#123;                // ……            &#125;);        &#125;);    &#125;);&#125;);
-
-代码缩进越来越深，业务流程被割裂在多个 lambda 里，调试栈也基本看不出原始顺序。
-
-生命周期管理全靠自觉：发起方对象被销毁了，回调里访问 this.transform 直接 MissingReferenceException。你得自己在管理器里加 owner 检查，或者每个回调里手写 if (this == null) return;。
-
-错误处理分散：每个 callback 内部都得自己 try&#x2F;catch，否则一个异常就吞掉，难定位。
-
-每种”等待类型”都要手写一遍：等时间、等条件、等帧数、等资源——管理器要么膨胀成大杂烩，要么拆成一堆 Manager。
-
-没有”取消”的统一语义：要支持取消，就得自己设计 handle、token 之类的机制，相当于把 .NET 的 CancellationToken 又造了一遍。
-
-
-推荐使用场景
-项目是底层框架&#x2F;SDK，不希望引入 UniTask 这种较大的依赖。
-需要极强的调度可控性：比如帧同步联机游戏，要求所有定时任务在固定的 PlayerLoop 节点执行，且要能被回放系统记录。
-运行环境受限：某些老版本 Unity（5.x、2017 早期）、IL2CPP 兼容性敏感的平台。
-场景非常简单：整个项目就十几个定时回调，犯不上引入异步框架。
-
-
-方案二：使用 Unity 协程（Coroutine）思路利用 C# 的迭代器 (IEnumerator + yield return) 配合 Unity 的 StartCoroutine API，让”等待”在语法层面顺序化。底层其实就是 Unity 自己维护了一个状态机调度器，每帧遍历活跃的协程、检查 YieldInstruction 是否完成、不完成就跳过、完成就 MoveNext 一次。
-最小示例public class Demo : MonoBehaviour&#123;    private void Start()    &#123;        StartCoroutine(Sequence());    &#125;    private IEnumerator Sequence()    &#123;        Debug.Log(&quot;开始&quot;);        yield return new WaitForSeconds(1f);        Debug.Log(&quot;加载资源&quot;);        var req = Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        yield return req;        var tex = req.asset as Texture;        Debug.Log($&quot;加载完成: &#123;tex.name&#125;&quot;);        yield return new WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;&#125;
-
-优势
-官方原生支持：无依赖，所有 Unity 版本都可用，文档与社区资料丰富。
-顺序化写法：相比方案一的回调嵌套，协程是直线代码，读起来接近同步代码的体验。
-与 MonoBehaviour 生命周期联动：对象被 SetActive(false) 时协程自动暂停，被 Destroy 时协程自动停止——很多生命周期问题被官方兜底了。
-学习成本低：只要懂 yield，半天就能上手。
-与 Unity 自有异步 API 天然兼容：AsyncOperation、UnityWebRequest、Resources.LoadAsync 这些都可以直接 yield return。
-
-劣势
-不能返回值：IEnumerator 没有泛型版本，想从协程拿结果只能塞 out 参数包装、塞回调、或者塞到成员变量里——非常别扭。
-
-不能 try&#x2F;catch 跨 yield 的异常：yield return 之后的代码不在原调用栈，异常一旦发生，要么被吞，要么打到 Console 里，外层的 try&#x2F;catch 抓不到。
-IEnumerator Bad()&#123;    yield return new WaitForSeconds(1f);    throw new Exception(&quot;boom&quot;);  // 外层无法 catch&#125;
-
-GC 压力：new WaitForSeconds(1f) 每次都堆分配；yield return null 触发的状态机本身也是引用类型。高频协程（比如每个子弹一个）很容易刷出 GC 曲线。
-
-缓解办法是缓存 WaitForSeconds 实例、或用 WaitForSecondsRealtime，但只是缓解，不是根治。
-
-
-取消只能 StopCoroutine：取消粒度粗糙，而且 StopCoroutine 是直接终止状态机，不会执行 finally（在某些 Unity 版本里 finally 会执行，但行为历来不太一致），资源清理需要靠 OnDisable &#x2F; OnDestroy 兜底。
-
-必须挂在 MonoBehaviour 上：纯 C# 类（比如你的 Service、Model 层）不能直接开协程，要么持有一个 MB 引用，要么做一个”协程宿主”单例，相当于回退到方案一的思路。
-
-组合困难：想要”并行等 A 和 B 然后继续”、”等 A 或 B 任一完成就继续”——协程没有原生的 WhenAll &#x2F; WhenAny，得自己用计数器或者嵌套协程实现，很笨拙。
-
-不支持线程切换：完全跑在主线程，想做 CPU 密集型计算后回主线程，还是得自己用 Task + SynchronizationContext 手搓。
-
-PlayerLoop 时序固定：协程只在固定几个时机推进（Update、LateUpdate、FixedUpdate 后等），想精确控制”我希望这个回调在 PreLateUpdate 触发”做不到。
-
-
-推荐使用场景
-简单的 UI&#x2F;演出&#x2F;教程流程：步骤短、不需要返回值、不需要复杂错误处理。
-遗留项目：项目已经大量使用协程，团队熟悉这种风格，没有迁移收益。
-学习&#x2F;原型阶段：快速验证想法，不在乎 GC 与扩展性。
-被某些第三方 API 强制要求：比如某些插件的回调只支持 IEnumerator 形式。
-
-
-方案三：使用 UniTask思路UniTask 是 Cysharp 开源的、专为 Unity 设计的高性能异步库。它用 struct 实现的 UniTask 类型替代 Task，把异步续体直接挂到 Unity 的 PlayerLoop 上跑，配合 C# 的 async/await 语法，让 Unity 的异步代码既顺序化、又零分配。
-最小示例using Cysharp.Threading.Tasks;public class Demo : MonoBehaviour&#123;    private async UniTaskVoid Start()    &#123;        Debug.Log(&quot;开始&quot;);        await UniTask.Delay(1000);        Debug.Log(&quot;加载资源&quot;);        var tex = await Resources.LoadAsync&lt;Texture&gt;(&quot;icon&quot;);        Debug.Log($&quot;加载完成&quot;);        await UniTask.WaitUntil(() =&gt; Input.GetKeyDown(KeyCode.Space));        Debug.Log(&quot;玩家按了空格&quot;);    &#125;    private async UniTask&lt;int&gt; LoadScoreAsync()    &#123;        await UniTask.Delay(500);        return 100;  // 协程做不到的&quot;带返回值&quot;    &#125;&#125;
-
-优势
-async/await 顺序化语法：和协程一样直线易读，但比协程更接近”普通同步代码”，try&#x2F;catch、return、using 都正常工作。
-
-可返回值：UniTask&lt;T&gt; 直接拿结果，告别”用成员变量传值”的丑陋写法。
-
-真正的异常传播：异常会顺着 await 链一路传到能 catch 的地方，全链路 try&#x2F;catch 都能抓。
-try&#123;    await LoadAsync();&#125;catch (Exception ex)&#123;    Debug.LogError(ex);  // 真的会进来&#125;
-
-零&#x2F;极低 GC：基于 struct + 自定义 AsyncMethodBuilder + 对象池，同步完成路径完全零分配，异步路径上也远低于 Task 和协程。在高频调用场景（每帧、每个子弹、每个 AI 决策）差距非常显著。
-
-强大的取消机制：标准 CancellationToken 一路透传，配合 this.GetCancellationTokenOnDestroy() 可以让对象销毁时所有相关异步自动取消，杜绝”对象死了回调还在跑”的事故。
-
-PlayerLoop 时序可精确控制：UniTask.Yield(PlayerLoopTiming.PreLateUpdate) 这种精度，协程做不到。
-
-组合算子丰富：WhenAll &#x2F; WhenAny &#x2F; Timeout &#x2F; Retry 一应俱全。
-
-不依赖 MonoBehaviour：纯 C# 层（服务、网络层、数据层）也能畅快写异步，不再需要”协程宿主”。
-
-原生支持 Unity 异步 API：AsyncOperation、UnityWebRequest、Addressables、SceneManager.LoadSceneAsync 全部可以直接 await。
-
-调试工具完善：自带 UniTask Tracker，可以在 Editor 里看到当前所有活跃的 UniTask、它们卡在哪一行、由哪个对象持有。
-
-支持线程切换：UniTask.SwitchToThreadPool() &#x2F; UniTask.SwitchToMainThread() 让 CPU 密集计算→主线程回调一行代码搞定。
-
-
-劣势
-学习曲线：team 里如果有人不熟 async/await，需要培训。UniTask vs UniTaskVoid vs Forget() vs WhenAll 等概念都要消化。
-第三方依赖：要引入一个外部库（虽然作者活跃、稳定性极好，但仍是依赖）。
-滥用风险：async/await 太顺手了，容易”事事 async”，造成不必要的状态机开销、隐藏控制流复杂度。
-错误用法的坑：忘记 .Forget() 会有警告；async void 写在 Unity 里依旧危险（应该用 UniTaskVoid）；不传 CancellationToken 会导致协程式的生命周期问题重现。
-平台兼容性：极个别老版本 Unity (2018 之前) 或某些定制 IL2CPP 平台需要确认是否完美支持，但 2019.3+ 基本无忧。
-
-推荐使用场景
-绝大多数中大型 Unity 项目的默认选择。
-异步流程复杂、需要组合、需要返回值、需要错误处理的场景：登录流程、资源管线、网络请求、剧情演出、AI 决策。
-对性能&#x2F;GC 敏感：移动端、VR、大型 MMO、需要稳定 60&#x2F;120 帧的项目。
-团队已经熟悉 async/await：从后端、客户端 (WPF&#x2F;Xamarin) 转来的同学几乎零成本上手。
-
-
-横向对比表
-
-
-维度
-Mono 轮询管理器
-Unity 协程
-UniTask
-
-
-
-语法直观度
-回调嵌套，差
-顺序化，好
-顺序化 + 同步语义，最好
-
-
-返回值
-靠回调传
-不支持
-原生 UniTask&lt;T&gt;
-
-
-异常处理
-手动 try&#x2F;catch 每个回调
-跨 yield 抓不到
-全链路 try&#x2F;catch
-
-
-取消机制
-自己造 handle
-StopCoroutine (粗糙)
-CancellationToken (标准)
-
-
-GC 压力
-取决于实现，通常较低
-较高（WaitForSeconds 等）
-极低（零分配路径）
-
-
-生命周期联动
-手动检查
-跟随 MonoBehaviour
-跟随 CancellationToken
-
-
-线程切换
-自己实现
-不支持
-一行 SwitchToXxx
-
-
-组合 (All&#x2F;Any)
-自己实现
-难写
-原生支持
-
-
-时序精度
-自己控制
-固定几个时机
-全 PlayerLoop 节点可选
-
-
-调试工具
-无
-Profiler 一般观察
-专属 Tracker
-
-
-学习成本
-低（自己写的）
-低
-中（要懂 async&#x2F;await）
-
-
-依赖
-无
-无
-引入 UniTask 包
-
-
-适合 MB 之外的纯 C# 类
-是
-否
-是
-
-
-
-选型决策建议按”项目规模 × 性能要求 × 团队背景”三轴拆开，可以给出比较明确的建议：
-项目体量很小、就几个定时回调→ 直接写一个简单的 Mono 管理器。引入框架反而是负担。
-遗留项目大量协程、团队习惯协程、没有性能问题→ 维持协程，但新模块可以尝试 UniTask，逐步替换。
-新项目、中大型、对 GC 敏感→ 直接上 UniTask，没有悬念。三套方案里它是综合最优解，唯一的代价就是团队学一下 async/await。
-底层 SDK &#x2F; 框架 &#x2F; 编辑器扩展→ 视情况而定。如果你写的是给别人用的库，且不希望强加 UniTask 依赖，可以用 Mono 管理器 + 暴露回调 API；如果你的 SDK 用户群已经在用 UniTask，那直接用更好。
-帧同步联机游戏 &#x2F; 录像回放系统→ 优先考虑自己写管理器，因为你需要对所有定时任务有完全确定的执行时序，UniTask 虽然时序可控，但要做到 bit-perfect 复现还是自己写更稳。
-
-一些反模式提醒无论选哪种方案，下面几条都值得记一下：
-
-不要 async void 写 Unity 业务方法。要么 UniTask 让人 await，要么 UniTaskVoid + .Forget() 明确即发即弃。
-不要在协程&#x2F;UniTask 里裸引用 this.transform 而不检查存活。给所有跨帧异步都传 CancellationToken，或者首行加 if (this == null) return;。
-不要每帧 new WaitForSeconds(0.1f)。要么缓存实例，要么改用 UniTask。
-不要混用多套方案而不做边界。一个项目里既写协程又写 UniTask 不是不行，但建议按模块划清楚，避免一个流程里两种写法穿插。
-不要把 UniTask 当万金油。简单的 Invoke(&quot;Foo&quot;, 1f) 能解决的事，不必非要 await UniTask.Delay。
-
-
-结语三种方案并不是互斥关系，而是覆盖了不同的复杂度区间：
-
-Mono 轮询管理器：最底层、最可控，适合简单或极特殊需求。
-协程：Unity 内置的默认选择，简单顺手，但天花板低。
-UniTask：现代 Unity 项目的事实标准，几乎在所有维度上都是协程的超集。
-
-如果让我用一句话总结：新项目无脑选 UniTask，老项目按模块渐进式迁移，特殊底层场景留给 Mono 管理器。
-]]></content>
-      <tags>
-        <tag>Unity</tag>
-        <tag>异步编程</tag>
-        <tag>协程</tag>
-        <tag>UniTask</tag>
-        <tag>性能优化</tag>
-      </tags>
-  </entry>
-  <entry>
-    <title>Unity的==与空并运算符(？.)</title>
-    <url>/posts/1bd27c8e.html</url>
-    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
-Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
-Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
-差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
-在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
-Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity的TMP和Text原理和使用优化</title>
-    <url>/posts/b46c3d6a.html</url>
-    <content><![CDATA[Unity在2018版本加入了TextMeshPro，并且现在已经将Text标记为Legacy。下面是我有关于TMP和Text的理解和思考。
-Text的渲染原理Unity的text组件是使用FreeType库来加载TrueType字体来实现的。通过加载TrueType字体并为每一个字形生成位图以及计算几个度量值(Metric)，生成出一个具体的字形的位图纹理。text动态渲染一个字符过程为：判断一个字符是否已经存在字体纹理中，在则直接获取对应的纹理坐标渲染；若不在则读取ttf文件中字符数据生成字符的位图，并放入纹理中管理。若放入时图集已满，则会对图集进行一次扩大。因为每个size、粗体、斜体的度量值不同，所以当修改Text的这些值的时候，纹理中会出现同一个字符多个位图的情况。
-TMP的渲染原理TMP是基于SDF(有向距离场)的技术渲染的，将字体中每个像素或顶点离其最近的形状边缘的距离值，存储到一张距离纹理中。所以TMP在显示前必须生成这个距离纹理，否则将无法显示(Unity中TMP会缺字出现口的原因)。因为显示的像素为动态计算该使用何种颜色和透明度，从而创建出精细、高品质的字体效果。所以TMP几乎不受放大的影响，能一直提供锐利清晰的图像。并且因为有距离信息，所以TMP能以一个较小的开销支持描边、投影等效果。在Unity的SDF中可以看到这张纹理，可以看到字体内部为白色，外部为黑色，在字体边缘之间黑白渐变，也就是距离从近到远的变化。
-TMP和Text的性能对比这里使用的TTF文件为AlibabaPuHuiTi-3-65-Medium，TMP和Text渲染内容一篇滕王阁序。为了模拟实际项目中显示所有字符的需求，所有TMP和Text都选择字符模式都为Dynamic。下面从渲染DrawCall和内存两方面对比
-Text的性能表现首先是Text的DrawCall,得益于所有的字符都在一张字符纹理中，所以Text只有一个DC。其次是内存因为滕王阁序的字符有限，所以Text的内存占用也仅有0.5MB。
-TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Unity把文章字符分到了3个不同的字符纹理中，最终使用了3个DrwaCall。内存占用也是3个字符纹理的占用，为6MB。
-性能总结在有限字符的渲染中，Text凭借只会取需要的字符位图存储，所以内存和DrwaCall下更优。但是这里TMP有着明显的优化空间，就是使用静态把所有的文字都的烘培一张纹理中。此时drwaCall为1，内存占用也为一张纹理2MB。但在实际的项目中，除非是没有聊天、排行榜等玩家自定义字符的功能，否则静态纹理一定会出现字符缺失的情况。对于Text来说，只能是使用Dynamic去扩容纹理大小，在纹理达到4096*4096后，也会出现多张纹理导致DrawCall上升。对于TMP因为官方支持了FallBack字体，所以可以使用一个静态纹理打入常用的3000或者7000字符，使用的FallBack字符再设置为动态，可以有效的避免游戏过程中因为贴图扩大的性能开销。
-技术选型的思考1、Text不支持图文混排，除非自己实现一套富文本图片解析。所以有图文混排需求建议无脑TMP。2、仅有描边、投影的需求。之前实现了一个Text的描边和弯曲组件，所以在字符有限的项目中(不考虑本地化、玩家自定义情况)使用Text和TMP，在性能和效果上和TMP差不多。但在字符无限的项目中，推荐使用静态常用字TMP+动态TMP配合，既有较好的性能效果，也能使用TMP的各种功能。3、对渲染效果更高的要求，这个就不用纠结了，美术一定会让你选TMP。
-参考资料[1].Unity字体渲染原理[2].unity-UGUI源码分析(4):Text与TextMeshPro[3].文本渲染-LearnOpenGL
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity的TMP的纹理优化</title>
-    <url>/posts/af72c7f2.html</url>
-    <content><![CDATA[上一篇文章介绍了Unity的TMP和Text，TMP在渲染时需要先一张距离纹理，这不禁让我想到一种优化策略：如果对这张纹理选择不同图像压缩方式，是不是就可以以牺牲显示效果为代价，换取内存开销。
-Unity SDF Asset结构使用AlibabaPuHuiTi-3-65-Medium.ttf文件创建一个SDF Asset，选择渲染模式为static，并使用3500常用字生成贴图，可以看到Unity生成了一张4096*4096的纹理，并且大部分面积都存了字体。Unity还把纹理贴图当成了SDF Asset结构的一部分管理起来，不允许我们直接修改图像的压缩方式。
-TMP纹理的提取不幸中的万幸，Unity把TMP的源码跟着package一起放在了本地，通过对于的编辑器界面逻辑，我找到了Unity保存纹理的过程代码。其中Save_Bitmap_FontAsset和Save_SDF_FontAsset都走向了执行的逻辑都相同，都是做了同样的三件事：1、把纹理赋值给atlasTextures字段。2、把纹理资源设置到FontAsset中。3、更新FontAsset资源的材质主帖图为当前纹理。
-我们的提取和替换逻辑：只需要从FontAsset下的atlasTexture读出对应的texture保存，然后把FontAssest下的指定为我们保存的texture，最后再把FontAsset的资源删除，就大功告成了。把相关思路灌给AI，然后AI生成了代码。下面给出核心的代码逻辑。
-导出代码在FontAsset中atlasTexture是public的所以直接读取，因为Unity默认没开纹理贴图的read&#x2F;Write，所以MakeTextureReadable把图拷贝到一个新的texutre中，并保存下来。
-private void ExportCurrentFontTexture()&#123;    if (targetFont == null || targetFont.atlasTexture == null)    &#123;        EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);        return;    &#125;    string savePath = EditorUtility.SaveFilePanel(        &quot;导出字体纹理&quot;,        Application.dataPath,        $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,        &quot;png&quot;    );    if (!string.IsNullOrEmpty(savePath))    &#123;        ExportTextureAsPNG(targetFont.atlasTexture, savePath);    &#125;&#125;private void ExportTextureAsPNG(Texture2D texture, string path)&#123;    if (texture == null) return;    Texture2D readableTexture = MakeTextureReadable(texture);    byte[] pngData = readableTexture.EncodeToPNG();    File.WriteAllBytes(path, pngData);    if (readableTexture != texture)    &#123;        DestroyImmediate(readableTexture);    &#125;    //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);    AssetDatabase.Refresh();    ConfigureTextureForSDF(path);    EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);&#125;private Texture2D MakeTextureReadable(Texture2D texture)&#123;    if (texture == null || texture.isReadable) return texture;    RenderTexture rt = RenderTexture.GetTemporary(        texture.width,        texture.height,        0,        RenderTextureFormat.ARGB32,        RenderTextureReadWrite.Linear    );    Graphics.Blit(texture, rt);    RenderTexture previous = RenderTexture.active;    RenderTexture.active = rt;    Texture2D readableTexture = new Texture2D(        texture.width,        texture.height,        TextureFormat.RGBA32,        false    );    readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);    readableTexture.Apply();    RenderTexture.active = previous;    RenderTexture.ReleaseTemporary(rt);    return readableTexture;&#125;
-替换代码替换的核心代码，非常简单，先遍历把所有的删掉，然后把输入的贴图指定回去，最后保存。
-if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)&#123;    for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)    &#123;        var texture = targetFont.atlasTextures[i];        if (texture == null)        &#123;            continue;        &#125;        AssetDatabase.RemoveObjectFromAsset(texture);        DestroyImmediate(texture);    &#125;&#125;targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;targetFont.material.mainTexture = replacementTexture;// 保存字体资产EditorUtility.SetDirty(targetFont);AssetDatabase.SaveAssets();
-
-纹理压缩验证现在在Inspector面板下，此SDF Asset的纹理贴图成功指定到保存出来的纹理。对其进行纹理格式改变，字体也同步模糊和清晰，说明修改成功！
-内存优化效果在Game视图下，ASTC6x6和Aplpha 8(原生类型)，看着差别不大，但是内存一个是16MB，一个是7.1MB，相差将近一倍。
-编辑器全部代码#if UNITY_EDITORusing UnityEngine;using UnityEditor;using TMPro;using System.IO;using System.Linq;using System.Collections.Generic;using UnityEngine.TextCore;using UnityEngine.TextCore.LowLevel;public class TMPSpriteExporterWindow : EditorWindow&#123;    private TMP_FontAsset targetFont;    private Texture2D replacementTexture;    private Texture2D replacementSDFTexture;    private Vector2 scrollPosition;    private Texture2D processedPreviewTexture;    [MenuItem(&quot;Tools/TMP/SDF字体纹理替换器&quot;)]    public static void ShowWindow()    &#123;        var window = GetWindow&lt;TMPSpriteExporterWindow&gt;(&quot;TMP SDF字体纹理替换器&quot;, true, typeof(SceneView));        window.minSize = new Vector2(450, 800);    &#125;    private void OnGUI()    &#123;        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);        EditorGUILayout.LabelField(&quot;TMP SDF字体纹理替换器&quot;, EditorStyles.boldLabel);        EditorGUILayout.HelpBox(&quot;此工具用于替换TMP SDF字体的Font Atlas纹理。注意：SDF字体需要特殊的距离场数据。&quot;, MessageType.Info);        EditorGUILayout.Space(10);        // 1. 选择SDF字体        EditorGUI.BeginChangeCheck();        targetFont = (TMP_FontAsset)EditorGUILayout.ObjectField(&quot;目标SDF字体&quot;, targetFont, typeof(TMP_FontAsset), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (targetFont != null)        &#123;            DisplayFontInfo();        &#125;        EditorGUILayout.Space(20);        // 2. 选择替换纹理        EditorGUILayout.LabelField(&quot;替换纹理设置&quot;, EditorStyles.boldLabel);        EditorGUI.BeginChangeCheck();        replacementTexture =            (Texture2D)EditorGUILayout.ObjectField(&quot;源PNG纹理&quot;, replacementTexture, typeof(Texture2D), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (replacementTexture != null)        &#123;            EditorGUILayout.HelpBox(                $&quot;纹理尺寸: &#123;replacementTexture.width&#125;x&#123;replacementTexture.height&#125; | 格式: &#123;replacementTexture.format&#125;&quot;,                MessageType.None);        &#125;        EditorGUILayout.Space(10);                // 4. 功能按钮        EditorGUILayout.BeginHorizontal();        if (GUILayout.Button(&quot;替换字体纹理&quot;, GUILayout.Height(30)))        &#123;            ReplaceSDFFontTexture();        &#125;        EditorGUILayout.EndHorizontal();        EditorGUILayout.Space(10);        if (GUILayout.Button(&quot;导出当前字体纹理&quot;, GUILayout.Height(30)))        &#123;            ExportCurrentFontTexture();        &#125;        EditorGUILayout.Space(20);        // 5. 预览区域        DrawPreviewSection();        EditorGUILayout.EndScrollView();    &#125;    private void DisplayFontInfo()    &#123;        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField($&quot;当前纹理: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);            EditorGUILayout.LabelField($&quot;字符数量: &#123;targetFont.characterTable?.Count ?? 0&#125;&quot;, EditorStyles.miniLabel);            if (targetFont.material != null)            &#123;                Shader shader = targetFont.material.shader;                bool isSDF = shader != null &amp;&amp; shader.name.Contains(&quot;SDF&quot;);                EditorGUILayout.LabelField($&quot;着色器: &#123;shader?.name&#125; &#123;(isSDF ? &quot;(SDF)&quot; : &quot;(Bitmap)&quot;)&#125;&quot;,                    EditorStyles.miniLabel);            &#125;        &#125;        else        &#123;            EditorGUILayout.HelpBox(&quot;警告：此字体没有纹理图集！&quot;, MessageType.Warning);        &#125;        EditorGUILayout.EndVertical();    &#125;    private void UpdatePreview()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);            processedPreviewTexture = null;        &#125;    &#125;    private void ReplaceSDFFontTexture()    &#123;        if (targetFont == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择目标SDF字体！&quot;, &quot;确定&quot;);            return;        &#125;        if (processedPreviewTexture == null &amp;&amp; replacementTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先生成SDF纹理或选择源纹理！&quot;, &quot;确定&quot;);            return;        &#125;        Texture2D textureToUse = processedPreviewTexture ?? replacementTexture;        if (!EditorUtility.DisplayDialog(&quot;确认替换&quot;,                $&quot;确定要替换 &#x27;&#123;targetFont.name&#125;&#x27; 的Font Atlas纹理吗？\n\n&quot; +                $&quot;新纹理: &#123;textureToUse.width&#125;x&#123;textureToUse.height&#125;\n&quot; +                $&quot;此操作会修改字体资产，请确保已备份！&quot;,                &quot;替换&quot;, &quot;取消&quot;))        &#123;            return;        &#125;        try        &#123;            EditorUtility.DisplayProgressBar(&quot;替换字体纹理&quot;, &quot;处理中...&quot;, 0.5f);            if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)            &#123;                for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)                &#123;                    var texture = targetFont.atlasTextures[i];                    if (texture == null)                    &#123;                        continue;                    &#125;                    AssetDatabase.RemoveObjectFromAsset(texture);                    DestroyImmediate(texture);                &#125;            &#125;            targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;            targetFont.material.mainTexture = replacementTexture;                        // 保存字体资产            EditorUtility.SetDirty(targetFont);            AssetDatabase.SaveAssets();            // 刷新场景            RefreshAllTMPTextComponents(targetFont);            EditorUtility.ClearProgressBar();            EditorUtility.DisplayDialog(&quot;成功&quot;,                $&quot;已成功替换SDF字体纹理！\n\n&quot; +                $&quot;已刷新所有相关文本组件。&quot;,                &quot;确定&quot;);        &#125;        catch (System.Exception e)        &#123;            EditorUtility.ClearProgressBar();            Debug.LogError($&quot;替换SDF字体纹理失败: &#123;e.Message&#125;\n&#123;e.StackTrace&#125;&quot;);            EditorUtility.DisplayDialog(&quot;错误&quot;, $&quot;替换失败: &#123;e.Message&#125;&quot;, &quot;确定&quot;);        &#125;    &#125;        private void ConfigureTextureForSDF(string texturePath)    &#123;        // 检查路径是否在Assets目录下        if (!texturePath.StartsWith(&quot;Assets/&quot;))        &#123;            // 尝试转换为相对路径            string relativePath = GetRelativeAssetPath(texturePath);            if (string.IsNullOrEmpty(relativePath))            &#123;                Debug.LogError($&quot;路径不在Assets目录下: &#123;texturePath&#125;&quot;);                EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;文件必须保存在Assets目录下才能修改导入设置&quot;, &quot;确定&quot;);                return;            &#125;            texturePath = relativePath;        &#125;               TextureImporter importer = AssetImporter.GetAtPath(texturePath) as TextureImporter;        if (importer == null)        &#123;            EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;importer为空!&quot;,&quot;OK&quot;);            return;        &#125;        // 对于SDF纹理，启用alpha通道处理        importer.textureType = TextureImporterType.Default;  // 使用单通道类型        importer.alphaSource = TextureImporterAlphaSource.FromInput;        importer.alphaIsTransparency = true;                importer.isReadable = false;        importer.wrapMode = TextureWrapMode.Clamp;        importer.filterMode = FilterMode.Bilinear;        importer.mipmapEnabled = false;        importer.sRGBTexture = false;  // 对于SDF，通常使用线性颜色空间        // 设置各平台格式        SetPlatformSettings(importer, &quot;Standalone&quot;, TextureImporterFormat.Alpha8, 4096, false);        SetPlatformSettings(importer, &quot;iPhone&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);        SetPlatformSettings(importer, &quot;Android&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);            // 应用更改        importer.SaveAndReimport();        //EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;修改成功&quot;,&quot;OK&quot;);    &#125;        // 将绝对路径转换为Assets相对路径    private string GetRelativeAssetPath(string fullPath)    &#123;        string dataPath = Application.dataPath;        if (fullPath.StartsWith(dataPath))        &#123;            return &quot;Assets&quot; + fullPath.Substring(dataPath.Length).Replace(&quot;\\&quot;, &quot;/&quot;);        &#125;        return null;    &#125;    private void SetPlatformSettings(TextureImporter importer, string platform,         TextureImporterFormat format, int maxSize, bool compressed)    &#123;        var settings = new TextureImporterPlatformSettings();        settings.name = platform;        settings.overridden = true;        settings.format = format;        settings.maxTextureSize = maxSize;        settings.textureCompression = compressed ?             TextureImporterCompression.Compressed :             TextureImporterCompression.Uncompressed;        settings.compressionQuality = 50;            importer.SetPlatformTextureSettings(settings);    &#125;        private void RefreshAllTMPTextComponents(TMP_FontAsset fontAsset)    &#123;        if (fontAsset == null) return;        int count = 0;        // 刷新场景中的文本        TMP_Text[] sceneTexts = GameObject.FindObjectsOfType&lt;TMP_Text&gt;(true);        foreach (TMP_Text text in sceneTexts)        &#123;            if (text.font == fontAsset)            &#123;                text.ForceMeshUpdate();                EditorUtility.SetDirty(text);                count++;            &#125;        &#125;        // 刷新预制件        string[] prefabGUIDs = AssetDatabase.FindAssets(&quot;t:Prefab&quot;);        foreach (string guid in prefabGUIDs)        &#123;            string path = AssetDatabase.GUIDToAssetPath(guid);            GameObject prefab = AssetDatabase.LoadAssetAtPath&lt;GameObject&gt;(path);            if (prefab != null)            &#123;                TMP_Text[] prefabTexts = prefab.GetComponentsInChildren&lt;TMP_Text&gt;(true);                bool changed = false;                foreach (TMP_Text text in prefabTexts)                &#123;                    if (text.font == fontAsset)                    &#123;                        text.ForceMeshUpdate();                        EditorUtility.SetDirty(text);                        changed = true;                        count++;                    &#125;                &#125;                if (changed)                &#123;                    PrefabUtility.SavePrefabAsset(prefab);                &#125;            &#125;        &#125;        Debug.Log($&quot;已刷新 &#123;count&#125; 个文本组件&quot;);    &#125;    private Texture2D MakeTextureReadable(Texture2D texture)    &#123;        if (texture == null || texture.isReadable) return texture;        RenderTexture rt = RenderTexture.GetTemporary(            texture.width,            texture.height,            0,            RenderTextureFormat.ARGB32,            RenderTextureReadWrite.Linear        );        Graphics.Blit(texture, rt);        RenderTexture previous = RenderTexture.active;        RenderTexture.active = rt;        Texture2D readableTexture = new Texture2D(            texture.width,            texture.height,            TextureFormat.RGBA32,            false        );        readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);        readableTexture.Apply();        RenderTexture.active = previous;        RenderTexture.ReleaseTemporary(rt);        return readableTexture;    &#125;    private void ExportCurrentFontTexture()    &#123;        if (targetFont == null || targetFont.atlasTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);            return;        &#125;        string savePath = EditorUtility.SaveFilePanel(            &quot;导出字体纹理&quot;,            Application.dataPath,            $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,            &quot;png&quot;        );        if (!string.IsNullOrEmpty(savePath))        &#123;            ExportTextureAsPNG(targetFont.atlasTexture, savePath);        &#125;    &#125;    private void ExportTextureAsPNG(Texture2D texture, string path)    &#123;        if (texture == null) return;        Texture2D readableTexture = MakeTextureReadable(texture);        byte[] pngData = readableTexture.EncodeToPNG();        File.WriteAllBytes(path, pngData);        if (readableTexture != texture)        &#123;            DestroyImmediate(readableTexture);        &#125;        //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);        AssetDatabase.Refresh();        ConfigureTextureForSDF(path);        EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);    &#125;    private void DrawPreviewSection()    &#123;        EditorGUILayout.Space(20);        EditorGUILayout.LabelField(&quot;预览&quot;, EditorStyles.boldLabel);        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont != null &amp;&amp; targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField(&quot;当前字体纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect origRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(origRect, targetFont.atlasTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);        &#125;        if (processedPreviewTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;生成的SDF纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect newRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(newRect, processedPreviewTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;processedPreviewTexture.width&#125;x&#123;processedPreviewTexture.height&#125;&quot;,                EditorStyles.miniLabel);            // 显示SDF预览            DrawSDFPreview(processedPreviewTexture);        &#125;        else if (replacementTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;源纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect srcRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(srcRect, replacementTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        // 警告信息        if (targetFont != null &amp;&amp; replacementTexture != null)        &#123;            if (targetFont.atlasTexture != null &amp;&amp;                (targetFont.atlasTexture.width != replacementTexture.width ||                 targetFont.atlasTexture.height != replacementTexture.height))            &#123;                EditorGUILayout.HelpBox(                    &quot;⚠️ 警告：纹理尺寸不匹配！\n&quot; +                    &quot;SDF字体的字符UV映射可能不正确，建议使用相同尺寸的纹理。&quot;,                    MessageType.Warning                );            &#125;        &#125;    &#125;    private void DrawSDFPreview(Texture2D sdfTexture)    &#123;        EditorGUILayout.BeginHorizontal();        // 原始预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;Alpha通道&quot;, EditorStyles.miniLabel);        Rect alphaRect = GUILayoutUtility.GetAspectRect(1f);        EditorGUI.DrawTextureAlpha(alphaRect, sdfTexture, ScaleMode.ScaleToFit);        EditorGUILayout.EndVertical();        // 着色预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;距离场预览&quot;, EditorStyles.miniLabel);        Rect colorRect = GUILayoutUtility.GetAspectRect(1f);        // 创建临时材质用于预览SDF        Material previewMat = new Material(Shader.Find(&quot;Hidden/TMP_SDFPreview&quot;));        if (previewMat != null)        &#123;            EditorGUI.DrawPreviewTexture(colorRect, sdfTexture, previewMat);            DestroyImmediate(previewMat);        &#125;        else        &#123;            EditorGUI.DrawTextureTransparent(colorRect, sdfTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        EditorGUILayout.EndHorizontal();    &#125;        private void OnDestroy()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);        &#125;    &#125;&#125;#endif]]></content>
-  </entry>
-  <entry>
     <title>Unity的TMP顶点数据优化</title>
     <url>/posts/7c9d3a21.html</url>
     <content><![CDATA[上一篇写了 Unity的TMP的纹理优化，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。
@@ -1247,6 +1247,21 @@ state变量的使用从截图可以看到，MoveNext()中维护的switch充当�
 ]]></content>
   </entry>
   <entry>
+    <title>Unity节点编辑器(二) -- GraphView窗口</title>
+    <url>/posts/9891abd3.html</url>
+    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
+窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
+public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
+背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
+
+GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
+创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
+拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
+
+实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
+]]></content>
+  </entry>
+  <entry>
     <title>Unity节点编辑器(三) -- 创建Node节点</title>
     <url>/posts/6faec29c.html</url>
     <content><![CDATA[编辑器数据类要做的节点如下图所示根据图片可以很清晰的知道，数据分为4部分。1.要有一个类存储着所有的节点数据。2.每个节点需要保存自己的类型名字(用于反射生成)、节点唯一ID(用于标识节点)、标题、节点位置、输出&#x2F;输出端口的数据、以及一个Object类型的每个子类自己的数据。3.端口数据记录端口所在节点ID、端口唯一ID以及连接的数据。4.连接数据记录着连接的节点ID和端口。我的实现使用了Unity的ScriptableObject。数据结构的图如下。
@@ -1270,41 +1285,6 @@ StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView�
 [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]public static void CreateGraph()&#123;    GraphEditorUnility.CreateDefaultGraph();&#125;public static void CreateDefaultGraph()&#123;    GraphSoData graph = ScriptableObject.CreateInstance&lt;GraphSoData&gt;();    int soFileCount = CountFilesExcludingMeta(DEFAULT_FILE_PATH);    string defaultFileName = string.Format(DEFAULT_FILE_NAME, soFileCount);    string defaultFilePath = System.IO.Path.Combine(DEFAULT_FILE_PATH, defaultFileName);    graph.graphName = string.Format(DEFAULT_FILE_SAVE_NAME, soFileCount);    AssetDatabase.CreateAsset(graph, defaultFilePath);    NodeSoData defaultNode = CreateDefaultNodeData(true);    graph.nodeSoDataList.Add(defaultNode);    AssetDatabase.AddObjectToAsset(defaultNode, graph);        EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(defaultNode);    AssetDatabase.SaveAssets();&#125;public static NodeSoData CreateDefaultNodeData(bool isStartNode)&#123;    NodeSoData defaultSoData = ScriptableObject.CreateInstance&lt;NodeSoData&gt;();    defaultSoData.name = &quot;node&quot;;    defaultSoData.nodeID = GraphUtility.GenerateID();    defaultSoData.nodeTitle = &quot;New Node&quot;;    defaultSoData.nodePos = new Vector2(200, 200);    //起始节点加入输出node    if (isStartNode)    &#123;        defaultSoData.nodeFullTypeName = typeof(StartNode).FullName;        StartNodeData startNodeData = new StartNodeData();        startNodeData.isStartNode = true;        defaultSoData.userData = startNodeData;        defaultSoData.AddOutputPortData();    &#125;    else    &#123;        defaultSoData.nodeFullTypeName = typeof(NodeBase).FullName;    &#125;    defaultSoData.outputPortDataList = new List&lt;PortSerializationData&gt;();    defaultSoData.intputPortDataList = new List&lt;PortSerializationData&gt;();    return defaultSoData;&#125;
 
 结果可以在菜单项创建新的节点数据，并且双击打开能看到一个开始节点。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity节点编辑器(二) -- GraphView窗口</title>
-    <url>/posts/9891abd3.html</url>
-    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
-窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
-public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
-背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
-
-GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
-创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
-拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
-
-实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity节点编辑器(五) -- 引导遮罩</title>
-    <url>/posts/d34f19cf.html</url>
-    <content><![CDATA[遮罩需求目前市面上游戏的引导，基本上都采用了在需要突出的地方高亮引导玩家，通过点击等方式去触发下一步操作。所以需求就抽象成两个：1.高亮某一块区域2.高亮区域的点击判断和通知
-高亮区域实现高亮区域有多种做法，第一种是通过继承Unity的BaseMeshEffect去自己写顶点、三角面最后形成高亮，第二种是使用Shader通过像素的判定实现。第一种比较里面的逻辑比较复杂，所以我用的是第二种。
-矩形高亮区域的C#代码实现一个矩形高亮区域需要两个数据：矩形的中心和大小。为了使用同一个材质实现合批，我使用一个继承于BaseMeshEffect的类中(Unity提供的类不熟悉的可以查一下)，在类中把这两个数据写入每个顶点中。
-顶点处理基类重写ModifyMesh方法，在其中使用抽象方法SetVertexData，传入顶点数据，并重新赋值出来。
-public abstract class MaskVertexBase : BaseMeshEffect&#123;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);&#125;
-矩形顶点类在具体的矩形类中，把中心位置，高度和宽度放入顶点的uv1信息中。
-public class RectMaskVertex : MaskVertexBase&#123;    [Header(&quot;中心位置&quot;)]    public Vector2 centerPos;    [Header(&quot;宽度&quot;)]    public float width;    [Header(&quot;高度&quot;)]    public float height;        protected override UIVertex SetVertexData(UIVertex vertex)    &#123;        vertex.uv1.x = centerPos.x;        vertex.uv1.y = centerPos.y;        vertex.uv1.z = width;        vertex.uv1.w = height;        return vertex;    &#125;&#125;
-
-高亮区域的Shader代码高亮逻辑有两步：1.在顶点着色器中获得像素的屏幕坐标位置。因为挂载的材质是在Unity的UI中所以model空间坐标直接就是屏幕坐标。2.在片元着色器中判断像素是否需要高亮。是否需要高亮则是对应的需求。如果是在一个矩形中，则需要判断这个像素坐标位置是否在其中，在则直接输出透明，反之输出源颜色。下面给出矩形的实现。
- v2f vert (appdata v)&#123;    v2f o;    o.screenPos = v.vertex.xy;    o.vertex = UnityObjectToClipPos(v.vertex);    o.uv = TRANSFORM_TEX(v.uv, _MainTex);    o.uv1 = v.uv1;    o.color = v.color;    return o;&#125;fixed4 frag (v2f i) : SV_Target&#123;    fixed4 col = tex2D(_MainTex, i.uv)*i.color;    float2 centerPos = i.uv1.xy;    float width = i.uv1.z / 2;    float height = i.uv1.w / 2;    float2 offset = i.screenPos.xy - centerPos;    col.a *= (abs(offset.x) &gt; width) || (abs(offset.y) &gt; height);         return col;&#125;
-
-高亮区域的点击判断和通知判断是否点击到了高亮区域，这个逻辑需要在C#端实现。在顶点处理基类中继承了IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler这几个接口去监听点击输入，并且抽象了一个判断是否在高亮区域内的委托，在具体的业务中添加进来。只需要在点击的时候执行委托进行判定，若判定为true则通过eventSystem.RaycastAll(eventData, raycastResult)获得当前高亮后的，所有的可点击物体，然后遍历去执行第一个GameObject的点击。下面给出完整的MaskVertexBase代码
-using System.Collections;using System.Collections.Generic;using UnityEngine;using UnityEngine.EventSystems;using UnityEngine.UI;public delegate bool PointerEventCallback(PointerEventData eventData);/// &lt;summary&gt;/// 遮罩的定点类，负责设置遮罩的顶点数据/// &lt;/summary&gt;[RequireComponent(typeof(Image))]public abstract class MaskVertexBase : BaseMeshEffect, IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler&#123;    [Header(&quot;向Shader传递的数据&quot;)]    public AdditionalCanvasShaderChannels additionalCanvasShaderChannels;    protected Canvas canvas;    protected Camera uiCamera;    protected RectTransform canvansRect;    protected RectTransform rectTransform;    [HideInInspector]    public EventSystem eventSystem;    [HideInInspector]    public PointerEventCallback raycastLocationValid;    private List&lt;RaycastResult&gt; raycastResult;    private GameObject m_lastHoverGameObject;    protected virtual void OnEnable()    &#123;        base.OnEnable();        if (canvas == null)        &#123;            canvas = transform.GetComponentInParent&lt;Canvas&gt;();            uiCamera = canvas.worldCamera;            rectTransform = transform.GetComponent&lt;RectTransform&gt;();            canvansRect = canvas.transform.GetComponent&lt;RectTransform&gt;();            raycastResult = new List&lt;RaycastResult&gt;();            AdditionalCanvasShaderChannels();        &#125;    &#125;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);    /// &lt;summary&gt;    /// 添加Canvas向Shader传递的数据    /// &lt;/summary&gt;    protected virtual void AdditionalCanvasShaderChannels()    &#123;        if (canvas == null)        &#123;            return;        &#125;        if (additionalCanvasShaderChannels == UnityEngine.AdditionalCanvasShaderChannels.None)        &#123;            return;        &#125;        if ((canvas.additionalShaderChannels &amp; additionalCanvasShaderChannels) == 0)        &#123;            canvas.additionalShaderChannels |= additionalCanvasShaderChannels;            graphic.SetVerticesDirty();        &#125;    &#125;    #region 对外方法    public void SetEventSystem(EventSystem eventSystem)    &#123;        this.eventSystem = eventSystem;    &#125;        public bool GetLocalPointByScreenPos(Vector2 screenPos, out Vector2 localPoint)    &#123;        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(rectTransform, screenPos, uiCamera, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public bool GetLocalPointByWorldPos(Vector3 worldPos, Camera watchCamera, out Vector2 localPoint)    &#123;        Vector3 screenPos = watchCamera.WorldToScreenPoint(worldPos);        if (GetLocalPointByScreenPos(screenPos, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public Camera GetCanvasWorldCamera()    &#123;        return uiCamera;    &#125;    #endregion    #region 点击实现    private void CheckAndChangeHover(GameObject newHoverGameObject, PointerEventData eventData)    &#123;        if (newHoverGameObject != m_lastHoverGameObject)        &#123;            if (m_lastHoverGameObject != null)            &#123;                ExecuteEvents.Execute(m_lastHoverGameObject, eventData, ExecuteEvents.pointerExitHandler);            &#125;            if (newHoverGameObject != null)            &#123;                ExecuteEvents.Execute(newHoverGameObject, eventData, ExecuteEvents.pointerEnterHandler);            &#125;            m_lastHoverGameObject = newHoverGameObject;        &#125;    &#125;    protected virtual GameObject PassEvent&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        raycastResult.Clear();        eventSystem.RaycastAll(eventData, raycastResult);        bool isExecute = false;        foreach (var result in raycastResult)        &#123;            if (result.gameObject == transform.gameObject)            &#123;                continue;            &#125;            isExecute = ExecuteEvents.Execute(result.gameObject, eventData, function);            return result.gameObject;        &#125;        return null;    &#125;    protected virtual GameObject CheckRaycastLocationValid&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        if (raycastLocationValid != null)        &#123;            bool isCanClick = raycastLocationValid.Invoke(eventData);            if (isCanClick)            &#123;                return PassEvent(eventData, function);            &#125;            // 判断 function 是否指向 pointerClickHandler            if (typeof(T) == typeof(IPointerClickHandler) &amp;&amp;                 function.Method == ExecuteEvents.pointerClickHandler.Method)            &#123;                MessageSystem.Instance.SendMessage(MessageDefine.MASK_CLICK);            &#125;        &#125;        return null;    &#125;    public virtual void OnPointerClick(PointerEventData eventData)    &#123;                var result = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerClickHandler);        if (result != null)        &#123;            MessageSystem.Instance.SendMessage(MessageDefine.MASK_HIGH_LINGHT_CLICK);                   &#125;    &#125;    public virtual void OnPointerEnter(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerEnterHandler);    &#125;    public virtual void OnPointerDown(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerDownHandler);    &#125;    public virtual void OnPointerUp(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerUpHandler);    &#125;    public void OnPointerExit(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerExitHandler);    &#125;    public void OnPointerMove(PointerEventData eventData)    &#123;        GameObject enterObject = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerMoveHandler);        CheckAndChangeHover(enterObject, eventData);    &#125;    #endregion#if UNITY_EDITOR    void OnValidate()    &#123;        if (graphic != null)        &#123;            graphic.SetVerticesDirty();            AdditionalCanvasShaderChannels();        &#125;    &#125;#endif&#125;
-
-遮罩预览
 ]]></content>
   </entry>
   <entry>
@@ -1333,6 +1313,26 @@ GuideCollection因为可能存在多个引导，所以又抽象出了一个Guide
 public class GuideCollection&#123;    private string m_guideName;    private List&lt;GuideHandlerBase&gt; m_guideHandlerData;    private GuideState m_guideState;    private GuideRuner m_guideRuner;    private List&lt;long&gt; m_runningNodeID;    public GuideCollection(string guideName, List&lt;GuideHandlerBase&gt; guideHandlerData, GuideRuner guideRuner)    &#123;        m_guideName = guideName;        m_guideHandlerData = guideHandlerData;        m_guideRuner = guideRuner;        m_runningNodeID = new List&lt;long&gt;();        ChangeState(GuideState.Init);    &#125;    private bool CheckHasNodeRunning()    &#123;        return m_runningNodeID.Count &gt; 0;    &#125;    public void Update()    &#123;        if (m_guideState != GuideState.Running)        &#123;            return;        &#125;        if (!CheckHasNodeRunning())        &#123;            ChangeState(GuideState.Finish);        &#125;    &#125;    #region 对外接口    public void ChangeState(GuideState guideState)    &#123;        m_guideState = guideState;        switch (guideState)        &#123;            case GuideState.None:                break;            case GuideState.Init:            &#123;                OnInitState();            &#125;                break;            case GuideState.Running:            &#123;                OnRunningState();            &#125;                break;            case GuideState.Finish:            &#123;                OnFinishState();            &#125;                break;            default:                break;        &#125;    &#125;    public void AddRunningNodeID(long nodeID)    &#123;        if (m_runningNodeID.Contains(nodeID))        &#123;            return;        &#125;        m_runningNodeID.Add(nodeID);    &#125;    public void RemoveRunningNodeID(long nodeID)    &#123;        for (int i = m_runningNodeID.Count - 1; i &gt;= 0; i--)        &#123;            if (m_runningNodeID[i] == nodeID)            &#123;                m_runningNodeID.Remove(i);                break;            &#125;        &#125;    &#125;    #endregion    protected virtual void OnInitState()    &#123;        var startNode = GuideStartNode();        RunNode(startNode.guideData.nodeID);        // startNode.ChangeState(GuideState.Init);        // foreach (var port in startNode.guideData.outputPortDataList)        // &#123;        //     foreach (var linkNodeData in port.linkData)        //     &#123;        //         RunNode(linkNodeData.linkNodeID);        //     &#125;        // &#125;            &#125;    protected virtual void OnRunningState()    &#123;    &#125;    protected virtual void OnFinishState()    &#123;        m_guideRuner.RemoveGuideCollection(m_guideName);        Debug.Log(&quot;guide over!&quot;);    &#125;    public void RunNode(long nodeID)    &#123;        var handlerBase = GetGuideNodeDataByID(nodeID);        if (handlerBase == null)        &#123;            Debug.LogError($&quot;GuideCollection:linkNode ID =&#123;nodeID&#125; is NULL!&quot;);            return;        &#125;        handlerBase.SetGuideCollection(this);        handlerBase.ChangeState(GuideState.Init);        //return guideHandler;    &#125;    private GuideHandlerBase GuideStartNode()    &#123;        if (m_guideHandlerData == null)        &#123;            return null;        &#125;        GuideHandlerBase result = null;        foreach (var guideNode in m_guideHandlerData)        &#123;            if (guideNode.guideData.typeFullName == typeof(StartNodeData).FullName)            &#123;                result = guideNode;                break;            &#125;        &#125;        return result;    &#125;    private GuideHandlerBase GetGuideNodeDataByID(long guideID)    &#123;        if (m_guideHandlerData == null || m_guideHandlerData.Count &lt;= 0)        &#123;            return null;        &#125;        foreach (var guideNode in m_guideHandlerData)        &#123;            if (guideNode.guideData.nodeID == guideID)            &#123;                return guideNode;            &#125;        &#125;        Debug.LogError($&quot;GudieHandler:GuideID=&#123;guideID&#125; is not found&quot;);        return null;    &#125;&#125;
 通过节点数据获取对应的处理脚本目前有节点数据和处理脚本，但是还有一个问题，无法将数据和对应的处理脚本一一对应起来。为了解决这个问题，我记录了一个字典，key为数据的类型，value是具体的处理脚本。在读取每个节点数据的时候，先用了NewtonJson的一个函数，统一反序列化成基类，再通过的数据中记录类名与字典的key的类型比较是否相同，从而获得对应的处理脚本。
 private List&lt;GuideHandlerBase&gt; LoadData(string guideName)&#123;    string fileName = guideName + &quot;.json&quot;;    var bytesData = Resources.Load&lt;TextAsset&gt;(guideName);    var strList = bytesData.text.Split(&quot;|&quot;).ToList();    var handlerList = DeserializeObjectAndHandler(strList);    m_guideDataDic.Add(guideName, handlerList);    return handlerList;&#125;private List&lt;GuideHandlerBase&gt; DeserializeObjectAndHandler(List&lt;string&gt; objectStrList)&#123;    if (objectStrList == null || objectStrList.Count &lt;= 0)    &#123;        return null;    &#125;    var nodeDataList = new List&lt;GuideHandlerBase&gt;();    foreach (var objectStr in objectStrList)    &#123;        // 首先尝试解析为基础数据以获取类型信息        var baseData = Newtonsoft.Json.JsonConvert.DeserializeObject&lt;NodeSerializationData&gt;(objectStr);        if (baseData == null)        &#123;            Debug.LogError(&quot;无法反序列化基础数据&quot;);            continue;        &#125;        // 根据类型全名找到对应的类型        Type targetType = null;        foreach (var typeItem in m_guideTypeMap)        &#123;            if (typeItem.Key.FullName.Equals(baseData.typeFullName))            &#123;                targetType = typeItem.Key;                break;            &#125;        &#125;        if (targetType == null)        &#123;            Debug.LogError($&quot;未找到匹配的类型: &#123;baseData.typeFullName&#125;&quot;);            continue;        &#125;        // 使用正确的类型进行反序列化        var saveData = Newtonsoft.Json.JsonConvert.DeserializeObject(objectStr, targetType);        if (saveData == null)        &#123;            Debug.LogError($&quot;无法反序列化为目标类型: &#123;targetType.FullName&#125;&quot;);            continue;        &#125;        // 创建处理器实例        if (!m_guideTypeMap.TryGetValue(targetType, out Type handlerType))        &#123;            Debug.LogError($&quot;未找到类型 &#123;targetType.FullName&#125; 对应的处理器类型&quot;);            continue;        &#125;        var handler = Activator.CreateInstance(handlerType, saveData) as GuideHandlerBase;        if (handler == null)        &#123;            Debug.LogError($&quot;无法创建处理器实例: &#123;handlerType.FullName&#125;&quot;);            continue;        &#125;        nodeDataList.Add(handler);    &#125;    return nodeDataList;&#125;]]></content>
+  </entry>
+  <entry>
+    <title>Unity节点编辑器(五) -- 引导遮罩</title>
+    <url>/posts/d34f19cf.html</url>
+    <content><![CDATA[遮罩需求目前市面上游戏的引导，基本上都采用了在需要突出的地方高亮引导玩家，通过点击等方式去触发下一步操作。所以需求就抽象成两个：1.高亮某一块区域2.高亮区域的点击判断和通知
+高亮区域实现高亮区域有多种做法，第一种是通过继承Unity的BaseMeshEffect去自己写顶点、三角面最后形成高亮，第二种是使用Shader通过像素的判定实现。第一种比较里面的逻辑比较复杂，所以我用的是第二种。
+矩形高亮区域的C#代码实现一个矩形高亮区域需要两个数据：矩形的中心和大小。为了使用同一个材质实现合批，我使用一个继承于BaseMeshEffect的类中(Unity提供的类不熟悉的可以查一下)，在类中把这两个数据写入每个顶点中。
+顶点处理基类重写ModifyMesh方法，在其中使用抽象方法SetVertexData，传入顶点数据，并重新赋值出来。
+public abstract class MaskVertexBase : BaseMeshEffect&#123;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);&#125;
+矩形顶点类在具体的矩形类中，把中心位置，高度和宽度放入顶点的uv1信息中。
+public class RectMaskVertex : MaskVertexBase&#123;    [Header(&quot;中心位置&quot;)]    public Vector2 centerPos;    [Header(&quot;宽度&quot;)]    public float width;    [Header(&quot;高度&quot;)]    public float height;        protected override UIVertex SetVertexData(UIVertex vertex)    &#123;        vertex.uv1.x = centerPos.x;        vertex.uv1.y = centerPos.y;        vertex.uv1.z = width;        vertex.uv1.w = height;        return vertex;    &#125;&#125;
+
+高亮区域的Shader代码高亮逻辑有两步：1.在顶点着色器中获得像素的屏幕坐标位置。因为挂载的材质是在Unity的UI中所以model空间坐标直接就是屏幕坐标。2.在片元着色器中判断像素是否需要高亮。是否需要高亮则是对应的需求。如果是在一个矩形中，则需要判断这个像素坐标位置是否在其中，在则直接输出透明，反之输出源颜色。下面给出矩形的实现。
+ v2f vert (appdata v)&#123;    v2f o;    o.screenPos = v.vertex.xy;    o.vertex = UnityObjectToClipPos(v.vertex);    o.uv = TRANSFORM_TEX(v.uv, _MainTex);    o.uv1 = v.uv1;    o.color = v.color;    return o;&#125;fixed4 frag (v2f i) : SV_Target&#123;    fixed4 col = tex2D(_MainTex, i.uv)*i.color;    float2 centerPos = i.uv1.xy;    float width = i.uv1.z / 2;    float height = i.uv1.w / 2;    float2 offset = i.screenPos.xy - centerPos;    col.a *= (abs(offset.x) &gt; width) || (abs(offset.y) &gt; height);         return col;&#125;
+
+高亮区域的点击判断和通知判断是否点击到了高亮区域，这个逻辑需要在C#端实现。在顶点处理基类中继承了IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler这几个接口去监听点击输入，并且抽象了一个判断是否在高亮区域内的委托，在具体的业务中添加进来。只需要在点击的时候执行委托进行判定，若判定为true则通过eventSystem.RaycastAll(eventData, raycastResult)获得当前高亮后的，所有的可点击物体，然后遍历去执行第一个GameObject的点击。下面给出完整的MaskVertexBase代码
+using System.Collections;using System.Collections.Generic;using UnityEngine;using UnityEngine.EventSystems;using UnityEngine.UI;public delegate bool PointerEventCallback(PointerEventData eventData);/// &lt;summary&gt;/// 遮罩的定点类，负责设置遮罩的顶点数据/// &lt;/summary&gt;[RequireComponent(typeof(Image))]public abstract class MaskVertexBase : BaseMeshEffect, IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler&#123;    [Header(&quot;向Shader传递的数据&quot;)]    public AdditionalCanvasShaderChannels additionalCanvasShaderChannels;    protected Canvas canvas;    protected Camera uiCamera;    protected RectTransform canvansRect;    protected RectTransform rectTransform;    [HideInInspector]    public EventSystem eventSystem;    [HideInInspector]    public PointerEventCallback raycastLocationValid;    private List&lt;RaycastResult&gt; raycastResult;    private GameObject m_lastHoverGameObject;    protected virtual void OnEnable()    &#123;        base.OnEnable();        if (canvas == null)        &#123;            canvas = transform.GetComponentInParent&lt;Canvas&gt;();            uiCamera = canvas.worldCamera;            rectTransform = transform.GetComponent&lt;RectTransform&gt;();            canvansRect = canvas.transform.GetComponent&lt;RectTransform&gt;();            raycastResult = new List&lt;RaycastResult&gt;();            AdditionalCanvasShaderChannels();        &#125;    &#125;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);    /// &lt;summary&gt;    /// 添加Canvas向Shader传递的数据    /// &lt;/summary&gt;    protected virtual void AdditionalCanvasShaderChannels()    &#123;        if (canvas == null)        &#123;            return;        &#125;        if (additionalCanvasShaderChannels == UnityEngine.AdditionalCanvasShaderChannels.None)        &#123;            return;        &#125;        if ((canvas.additionalShaderChannels &amp; additionalCanvasShaderChannels) == 0)        &#123;            canvas.additionalShaderChannels |= additionalCanvasShaderChannels;            graphic.SetVerticesDirty();        &#125;    &#125;    #region 对外方法    public void SetEventSystem(EventSystem eventSystem)    &#123;        this.eventSystem = eventSystem;    &#125;        public bool GetLocalPointByScreenPos(Vector2 screenPos, out Vector2 localPoint)    &#123;        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(rectTransform, screenPos, uiCamera, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public bool GetLocalPointByWorldPos(Vector3 worldPos, Camera watchCamera, out Vector2 localPoint)    &#123;        Vector3 screenPos = watchCamera.WorldToScreenPoint(worldPos);        if (GetLocalPointByScreenPos(screenPos, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public Camera GetCanvasWorldCamera()    &#123;        return uiCamera;    &#125;    #endregion    #region 点击实现    private void CheckAndChangeHover(GameObject newHoverGameObject, PointerEventData eventData)    &#123;        if (newHoverGameObject != m_lastHoverGameObject)        &#123;            if (m_lastHoverGameObject != null)            &#123;                ExecuteEvents.Execute(m_lastHoverGameObject, eventData, ExecuteEvents.pointerExitHandler);            &#125;            if (newHoverGameObject != null)            &#123;                ExecuteEvents.Execute(newHoverGameObject, eventData, ExecuteEvents.pointerEnterHandler);            &#125;            m_lastHoverGameObject = newHoverGameObject;        &#125;    &#125;    protected virtual GameObject PassEvent&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        raycastResult.Clear();        eventSystem.RaycastAll(eventData, raycastResult);        bool isExecute = false;        foreach (var result in raycastResult)        &#123;            if (result.gameObject == transform.gameObject)            &#123;                continue;            &#125;            isExecute = ExecuteEvents.Execute(result.gameObject, eventData, function);            return result.gameObject;        &#125;        return null;    &#125;    protected virtual GameObject CheckRaycastLocationValid&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        if (raycastLocationValid != null)        &#123;            bool isCanClick = raycastLocationValid.Invoke(eventData);            if (isCanClick)            &#123;                return PassEvent(eventData, function);            &#125;            // 判断 function 是否指向 pointerClickHandler            if (typeof(T) == typeof(IPointerClickHandler) &amp;&amp;                 function.Method == ExecuteEvents.pointerClickHandler.Method)            &#123;                MessageSystem.Instance.SendMessage(MessageDefine.MASK_CLICK);            &#125;        &#125;        return null;    &#125;    public virtual void OnPointerClick(PointerEventData eventData)    &#123;                var result = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerClickHandler);        if (result != null)        &#123;            MessageSystem.Instance.SendMessage(MessageDefine.MASK_HIGH_LINGHT_CLICK);                   &#125;    &#125;    public virtual void OnPointerEnter(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerEnterHandler);    &#125;    public virtual void OnPointerDown(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerDownHandler);    &#125;    public virtual void OnPointerUp(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerUpHandler);    &#125;    public void OnPointerExit(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerExitHandler);    &#125;    public void OnPointerMove(PointerEventData eventData)    &#123;        GameObject enterObject = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerMoveHandler);        CheckAndChangeHover(enterObject, eventData);    &#125;    #endregion#if UNITY_EDITOR    void OnValidate()    &#123;        if (graphic != null)        &#123;            graphic.SetVerticesDirty();            AdditionalCanvasShaderChannels();        &#125;    &#125;#endif&#125;
+
+遮罩预览
+]]></content>
   </entry>
   <entry>
     <title>Unity节点编辑器(四) -- 保存&amp;打开Graph数据</title>
@@ -1378,6 +1378,20 @@ Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture
 
 参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
 ]]></content>
+  </entry>
+  <entry>
+    <title>第一篇博客</title>
+    <url>/posts/ff05b5bf.html</url>
+    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
+]]></content>
+  </entry>
+  <entry>
+    <title>算法--判断点是否在多边形中(包含凹凸多边形)</title>
+    <url>/posts/ca3fa1d1.html</url>
+    <content><![CDATA[判断点是否在一个凸多边形内部，可以根据面积、叉乘的方法判断。但是包括凹多边形的时候，就得使用射线法判断。下面介绍这种算法。
+算法原理奇-偶规则（Odd-even Rule）：奇数表示在多边形内，偶数表示在多边形外从任意位置p作任意方向的一条射线，若与该射线相交的多边形边的数目为奇数，则p是多边形内部点，否则是外部点。以上图为例：从红点向任意方向发射射线(上图是向左和向右)，与图形的边的交点总和为奇数时，点在内部；为偶数时，点在外部。（上图向左有5个点，向右有3个点），所以红点在多边形的内部。所以，问题就从判断点在多边形的内部转化为了：判断点朝任意方向的射线与多边形的边的交点个数的奇、偶问题。
+如何判断射线与多边形的交点？从上图可以非常直观地看出，取出多边形中两个相邻的点P1、P2，根据两点得到直线的方程为：Y&#x3D;(y1-y2)&#x2F;(X1-X2)*（X - X1）+Y1。将待监测点P0的X0代入直线方程（如果向上打射线）,计算出X0在该射线上的Y位置，如果Y&gt;Y0则说明：该P0点在线段P1、P2的下方，交点数+1；反之则为下方。
+代码实现public static bool checkPosInPolygon(List&lt;Vector3&gt; PosList, Vector3 checkPos)&#123;    if (PosList == null || PosList.Count &lt;= 0)    &#123;        return false;    &#125;    int num = 0;    for (int i = 0; i &lt; PosList.Count; i++)    &#123;        Vector3 curPos = PosList[i] ;        Vector3 nextPos = PosList[(i + 1) % PosList.Count] ;        if (checkPos.y &gt;= Mathf.Max(curPos.y, nextPos.y) || checkPos.y &lt;= Mathf.Min(curPos.y, nextPos.y))        &#123;            continue;        &#125;        float lineSlope = (curPos.x - nextPos.x) / (curPos.y - nextPos.y);        float linePosx = (checkPos.y - curPos.y) * lineSlope + curPos.x;        if (linePosx &lt; checkPos.x || Mathf.Approximately(linePosx, checkPos.x))        &#123;            num++;        &#125;    &#125;    return (num % 2 != 0);&#125;]]></content>
   </entry>
   <entry>
     <title>ZString-Unity的0GC字符串操作</title>
@@ -1721,14 +1735,6 @@ TextMeshPro 文档
 ]]></content>
   </entry>
   <entry>
-    <title>算法--判断点是否在多边形中(包含凹凸多边形)</title>
-    <url>/posts/ca3fa1d1.html</url>
-    <content><![CDATA[判断点是否在一个凸多边形内部，可以根据面积、叉乘的方法判断。但是包括凹多边形的时候，就得使用射线法判断。下面介绍这种算法。
-算法原理奇-偶规则（Odd-even Rule）：奇数表示在多边形内，偶数表示在多边形外从任意位置p作任意方向的一条射线，若与该射线相交的多边形边的数目为奇数，则p是多边形内部点，否则是外部点。以上图为例：从红点向任意方向发射射线(上图是向左和向右)，与图形的边的交点总和为奇数时，点在内部；为偶数时，点在外部。（上图向左有5个点，向右有3个点），所以红点在多边形的内部。所以，问题就从判断点在多边形的内部转化为了：判断点朝任意方向的射线与多边形的边的交点个数的奇、偶问题。
-如何判断射线与多边形的交点？从上图可以非常直观地看出，取出多边形中两个相邻的点P1、P2，根据两点得到直线的方程为：Y&#x3D;(y1-y2)&#x2F;(X1-X2)*（X - X1）+Y1。将待监测点P0的X0代入直线方程（如果向上打射线）,计算出X0在该射线上的Y位置，如果Y&gt;Y0则说明：该P0点在线段P1、P2的下方，交点数+1；反之则为下方。
-代码实现public static bool checkPosInPolygon(List&lt;Vector3&gt; PosList, Vector3 checkPos)&#123;    if (PosList == null || PosList.Count &lt;= 0)    &#123;        return false;    &#125;    int num = 0;    for (int i = 0; i &lt; PosList.Count; i++)    &#123;        Vector3 curPos = PosList[i] ;        Vector3 nextPos = PosList[(i + 1) % PosList.Count] ;        if (checkPos.y &gt;= Mathf.Max(curPos.y, nextPos.y) || checkPos.y &lt;= Mathf.Min(curPos.y, nextPos.y))        &#123;            continue;        &#125;        float lineSlope = (curPos.x - nextPos.x) / (curPos.y - nextPos.y);        float linePosx = (checkPos.y - curPos.y) * lineSlope + curPos.x;        if (linePosx &lt; checkPos.x || Mathf.Approximately(linePosx, checkPos.x))        &#123;            num++;        &#125;    &#125;    return (num % 2 != 0);&#125;]]></content>
-  </entry>
-  <entry>
     <title>基于前缀树的红点系统设计与实现</title>
     <url>/posts/79323865.html</url>
     <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
@@ -1756,12 +1762,6 @@ public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNo
 减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
 public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
 性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
-]]></content>
-  </entry>
-  <entry>
-    <title>第一篇博客</title>
-    <url>/posts/ff05b5bf.html</url>
-    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
 ]]></content>
   </entry>
   <entry>
