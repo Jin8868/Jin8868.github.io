@@ -33,246 +33,6 @@ shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#12
 ]]></content>
   </entry>
   <entry>
-    <title>UniTask 0GC实现原理</title>
-    <url>/posts/6045236e.html</url>
-    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
-Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
-UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
-
-用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
-
-下面从源码角度拆开看。
-1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
-await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
-
-前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
-例如：
-await someUniTask;
-
-编译器大致会按下面的模式展开：
-var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
-
-而：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
-所以 UniTask 的优化也分成两部分：
-
-实现并优化 await UniTask 的 awaiter 语法糖。
-实现并优化 async UniTask 的 builder 语法糖。
-
-2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
-public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
-
-GetAwaiter() 返回的 Awaiter 是结构体：
-public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
-
-它提供 awaiter pattern 需要的成员：
-public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
-
-这些成员分别对应 await 的几个阶段：
-GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
-
-因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
-也就是说，下面这句：
-await UniTask.Yield();
-
-在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
-UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
-3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
-第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
-第二，Awaiter 内部只保存一个 UniTask 值：
-readonly UniTask task;
-
-第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
-internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
-
-这样可以避免每次 await 都创建一个新的包装委托。
-第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
-所以 await UniTask 的低分配来自几个点叠加：
-UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
-
-4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
-
-UniTask&lt;T&gt; 也是结构体：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
-
-这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
-如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
-如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
-也就是说：
-同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
-
-这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
-5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
-
-它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
-例如：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器大致会生成类似这样的状态机代码：
-var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
-
-遇到 await 时：
-builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
-
-方法正常完成：
-builder.SetResult();
-
-方法抛异常：
-builder.SetException(exception);
-
-注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
-6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
-public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
-
-它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
-它真正做的是：
-
-作为编译器 async 语法的入口。
-启动状态机。
-在第一次异步挂起时，创建或复用一个 runner。
-把 runner 的 MoveNext 注册给 awaiter。
-在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
-通过 Task 属性把最终的 UniTask 返回给调用方。
-
-关键代码在 AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里有两个重点：
-第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
-第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
-7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
-internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
-
-它的职责非常集中：
-
-保存编译器生成的状态机副本。
-提供 MoveNext 给 awaiter 作为 continuation。
-实现 IUniTaskSource，让外部 UniTask 可以 await 它。
-保存完成、异常、取消状态。
-完成后清空并回收到对象池。
-
-第一次挂起时，builder 调用：
-AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
-
-内部会先从池里取：
-if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
-
-这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
-awaiter 完成后，会调用：
-runnerPromise.MoveNext
-
-实际进入：
-void Run()&#123;    stateMachine.MoveNext();&#125;
-
-这就恢复了 async 方法后续逻辑。
-8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
-AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
-public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
-
-调用方拿到的 UniTask 内部指向这个 runner：
-UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
-
-core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
-
-当前状态。
-continuation。
-异常或取消信息。
-version token。
-
-正常完成时：
-public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
-
-异常时：
-public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
-
-调用方 await 完成后会进入：
-public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
-
-TryReturn() 会清理状态并回池：
-core.Reset();stateMachine = default;pool.TryPush(this);
-
-这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
-9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
-典型结构是：
-static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
-
-使用时：
-pool.TryPop(out var result)pool.TryPush(this)
-
-因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
-这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
-10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
-await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
-
-UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
-PlayerLoopHelper.AddAction(timing, result);
-
-YieldPromise 本身也是可池化的：
-sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
-
-在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
-public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
-
-完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
-所以在类似 UI 填充动画这样的循环中：
-while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
-
-预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
-11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
-AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
-
-因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
-async UniTaskVoid 使用的是：
-AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
-
-UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
-简单说：
-UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
-
-12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
-
-第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
-CancellationTokenSource、CreateLinkedTokenSource 会分配。
-取消时可能创建 OperationCanceledException。
-异常路径会捕获异常信息。
-闭包、lambda 捕获、LINQ、装箱仍然会分配。
-Debug.Log、字符串拼接、Unity 日志系统可能分配。
-Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
-
-因此更严谨的说法是：
-
-UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
-
-13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
-
-总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
-
-UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
-[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
-AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
-AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
-UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
-TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
-PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
-awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
-
-最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
-]]></content>
-  </entry>
-  <entry>
     <title>UniTask学习与使用</title>
     <url>/posts/4483a5b.html</url>
     <content><![CDATA[UniTask 学习文档
@@ -816,6 +576,246 @@ GetAsyncOnTriggerEnterTrigger()
 ]]></content>
   </entry>
   <entry>
+    <title>UniTask 0GC实现原理</title>
+    <url>/posts/6045236e.html</url>
+    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
+Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
+UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
+
+用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
+
+下面从源码角度拆开看。
+1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
+await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
+
+前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
+例如：
+await someUniTask;
+
+编译器大致会按下面的模式展开：
+var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
+
+而：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
+所以 UniTask 的优化也分成两部分：
+
+实现并优化 await UniTask 的 awaiter 语法糖。
+实现并优化 async UniTask 的 builder 语法糖。
+
+2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
+public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
+
+GetAwaiter() 返回的 Awaiter 是结构体：
+public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
+
+它提供 awaiter pattern 需要的成员：
+public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
+
+这些成员分别对应 await 的几个阶段：
+GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
+
+因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
+也就是说，下面这句：
+await UniTask.Yield();
+
+在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
+UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
+3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
+第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
+第二，Awaiter 内部只保存一个 UniTask 值：
+readonly UniTask task;
+
+第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
+internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
+
+这样可以避免每次 await 都创建一个新的包装委托。
+第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
+所以 await UniTask 的低分配来自几个点叠加：
+UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
+
+4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
+
+UniTask&lt;T&gt; 也是结构体：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
+
+这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
+如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
+如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
+也就是说：
+同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
+
+这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
+5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
+
+它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
+例如：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器大致会生成类似这样的状态机代码：
+var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
+
+遇到 await 时：
+builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
+
+方法正常完成：
+builder.SetResult();
+
+方法抛异常：
+builder.SetException(exception);
+
+注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
+6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
+public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
+
+它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
+它真正做的是：
+
+作为编译器 async 语法的入口。
+启动状态机。
+在第一次异步挂起时，创建或复用一个 runner。
+把 runner 的 MoveNext 注册给 awaiter。
+在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
+通过 Task 属性把最终的 UniTask 返回给调用方。
+
+关键代码在 AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里有两个重点：
+第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
+第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
+7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
+internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
+
+它的职责非常集中：
+
+保存编译器生成的状态机副本。
+提供 MoveNext 给 awaiter 作为 continuation。
+实现 IUniTaskSource，让外部 UniTask 可以 await 它。
+保存完成、异常、取消状态。
+完成后清空并回收到对象池。
+
+第一次挂起时，builder 调用：
+AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
+
+内部会先从池里取：
+if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
+
+这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
+awaiter 完成后，会调用：
+runnerPromise.MoveNext
+
+实际进入：
+void Run()&#123;    stateMachine.MoveNext();&#125;
+
+这就恢复了 async 方法后续逻辑。
+8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
+AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
+public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
+
+调用方拿到的 UniTask 内部指向这个 runner：
+UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
+
+core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
+
+当前状态。
+continuation。
+异常或取消信息。
+version token。
+
+正常完成时：
+public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
+
+异常时：
+public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
+
+调用方 await 完成后会进入：
+public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
+
+TryReturn() 会清理状态并回池：
+core.Reset();stateMachine = default;pool.TryPush(this);
+
+这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
+9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
+典型结构是：
+static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
+
+使用时：
+pool.TryPop(out var result)pool.TryPush(this)
+
+因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
+这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
+10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
+await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+
+UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
+PlayerLoopHelper.AddAction(timing, result);
+
+YieldPromise 本身也是可池化的：
+sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
+
+在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
+public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
+
+完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
+所以在类似 UI 填充动画这样的循环中：
+while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
+
+预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
+11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
+AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
+
+因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
+async UniTaskVoid 使用的是：
+AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
+
+UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
+简单说：
+UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
+
+12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
+
+第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
+CancellationTokenSource、CreateLinkedTokenSource 会分配。
+取消时可能创建 OperationCanceledException。
+异常路径会捕获异常信息。
+闭包、lambda 捕获、LINQ、装箱仍然会分配。
+Debug.Log、字符串拼接、Unity 日志系统可能分配。
+Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
+
+因此更严谨的说法是：
+
+UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
+
+13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
+
+总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
+
+UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
+[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
+AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
+AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
+UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
+TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
+PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
+awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
+
+最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
+]]></content>
+  </entry>
+  <entry>
     <title>Unity的动态图集实现</title>
     <url>/posts/71da87fc.html</url>
     <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
@@ -1113,6 +1113,22 @@ TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Un
 ]]></content>
   </entry>
   <entry>
+    <title>Unity的TMP的纹理优化</title>
+    <url>/posts/af72c7f2.html</url>
+    <content><![CDATA[上一篇文章介绍了Unity的TMP和Text，TMP在渲染时需要先一张距离纹理，这不禁让我想到一种优化策略：如果对这张纹理选择不同图像压缩方式，是不是就可以以牺牲显示效果为代价，换取内存开销。
+Unity SDF Asset结构使用AlibabaPuHuiTi-3-65-Medium.ttf文件创建一个SDF Asset，选择渲染模式为static，并使用3500常用字生成贴图，可以看到Unity生成了一张4096*4096的纹理，并且大部分面积都存了字体。Unity还把纹理贴图当成了SDF Asset结构的一部分管理起来，不允许我们直接修改图像的压缩方式。
+TMP纹理的提取不幸中的万幸，Unity把TMP的源码跟着package一起放在了本地，通过对于的编辑器界面逻辑，我找到了Unity保存纹理的过程代码。其中Save_Bitmap_FontAsset和Save_SDF_FontAsset都走向了执行的逻辑都相同，都是做了同样的三件事：1、把纹理赋值给atlasTextures字段。2、把纹理资源设置到FontAsset中。3、更新FontAsset资源的材质主帖图为当前纹理。
+我们的提取和替换逻辑：只需要从FontAsset下的atlasTexture读出对应的texture保存，然后把FontAssest下的指定为我们保存的texture，最后再把FontAsset的资源删除，就大功告成了。把相关思路灌给AI，然后AI生成了代码。下面给出核心的代码逻辑。
+导出代码在FontAsset中atlasTexture是public的所以直接读取，因为Unity默认没开纹理贴图的read&#x2F;Write，所以MakeTextureReadable把图拷贝到一个新的texutre中，并保存下来。
+private void ExportCurrentFontTexture()&#123;    if (targetFont == null || targetFont.atlasTexture == null)    &#123;        EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);        return;    &#125;    string savePath = EditorUtility.SaveFilePanel(        &quot;导出字体纹理&quot;,        Application.dataPath,        $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,        &quot;png&quot;    );    if (!string.IsNullOrEmpty(savePath))    &#123;        ExportTextureAsPNG(targetFont.atlasTexture, savePath);    &#125;&#125;private void ExportTextureAsPNG(Texture2D texture, string path)&#123;    if (texture == null) return;    Texture2D readableTexture = MakeTextureReadable(texture);    byte[] pngData = readableTexture.EncodeToPNG();    File.WriteAllBytes(path, pngData);    if (readableTexture != texture)    &#123;        DestroyImmediate(readableTexture);    &#125;    //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);    AssetDatabase.Refresh();    ConfigureTextureForSDF(path);    EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);&#125;private Texture2D MakeTextureReadable(Texture2D texture)&#123;    if (texture == null || texture.isReadable) return texture;    RenderTexture rt = RenderTexture.GetTemporary(        texture.width,        texture.height,        0,        RenderTextureFormat.ARGB32,        RenderTextureReadWrite.Linear    );    Graphics.Blit(texture, rt);    RenderTexture previous = RenderTexture.active;    RenderTexture.active = rt;    Texture2D readableTexture = new Texture2D(        texture.width,        texture.height,        TextureFormat.RGBA32,        false    );    readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);    readableTexture.Apply();    RenderTexture.active = previous;    RenderTexture.ReleaseTemporary(rt);    return readableTexture;&#125;
+替换代码替换的核心代码，非常简单，先遍历把所有的删掉，然后把输入的贴图指定回去，最后保存。
+if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)&#123;    for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)    &#123;        var texture = targetFont.atlasTextures[i];        if (texture == null)        &#123;            continue;        &#125;        AssetDatabase.RemoveObjectFromAsset(texture);        DestroyImmediate(texture);    &#125;&#125;targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;targetFont.material.mainTexture = replacementTexture;// 保存字体资产EditorUtility.SetDirty(targetFont);AssetDatabase.SaveAssets();
+
+纹理压缩验证现在在Inspector面板下，此SDF Asset的纹理贴图成功指定到保存出来的纹理。对其进行纹理格式改变，字体也同步模糊和清晰，说明修改成功！
+内存优化效果在Game视图下，ASTC6x6和Aplpha 8(原生类型)，看着差别不大，但是内存一个是16MB，一个是7.1MB，相差将近一倍。
+编辑器全部代码#if UNITY_EDITORusing UnityEngine;using UnityEditor;using TMPro;using System.IO;using System.Linq;using System.Collections.Generic;using UnityEngine.TextCore;using UnityEngine.TextCore.LowLevel;public class TMPSpriteExporterWindow : EditorWindow&#123;    private TMP_FontAsset targetFont;    private Texture2D replacementTexture;    private Texture2D replacementSDFTexture;    private Vector2 scrollPosition;    private Texture2D processedPreviewTexture;    [MenuItem(&quot;Tools/TMP/SDF字体纹理替换器&quot;)]    public static void ShowWindow()    &#123;        var window = GetWindow&lt;TMPSpriteExporterWindow&gt;(&quot;TMP SDF字体纹理替换器&quot;, true, typeof(SceneView));        window.minSize = new Vector2(450, 800);    &#125;    private void OnGUI()    &#123;        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);        EditorGUILayout.LabelField(&quot;TMP SDF字体纹理替换器&quot;, EditorStyles.boldLabel);        EditorGUILayout.HelpBox(&quot;此工具用于替换TMP SDF字体的Font Atlas纹理。注意：SDF字体需要特殊的距离场数据。&quot;, MessageType.Info);        EditorGUILayout.Space(10);        // 1. 选择SDF字体        EditorGUI.BeginChangeCheck();        targetFont = (TMP_FontAsset)EditorGUILayout.ObjectField(&quot;目标SDF字体&quot;, targetFont, typeof(TMP_FontAsset), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (targetFont != null)        &#123;            DisplayFontInfo();        &#125;        EditorGUILayout.Space(20);        // 2. 选择替换纹理        EditorGUILayout.LabelField(&quot;替换纹理设置&quot;, EditorStyles.boldLabel);        EditorGUI.BeginChangeCheck();        replacementTexture =            (Texture2D)EditorGUILayout.ObjectField(&quot;源PNG纹理&quot;, replacementTexture, typeof(Texture2D), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (replacementTexture != null)        &#123;            EditorGUILayout.HelpBox(                $&quot;纹理尺寸: &#123;replacementTexture.width&#125;x&#123;replacementTexture.height&#125; | 格式: &#123;replacementTexture.format&#125;&quot;,                MessageType.None);        &#125;        EditorGUILayout.Space(10);                // 4. 功能按钮        EditorGUILayout.BeginHorizontal();        if (GUILayout.Button(&quot;替换字体纹理&quot;, GUILayout.Height(30)))        &#123;            ReplaceSDFFontTexture();        &#125;        EditorGUILayout.EndHorizontal();        EditorGUILayout.Space(10);        if (GUILayout.Button(&quot;导出当前字体纹理&quot;, GUILayout.Height(30)))        &#123;            ExportCurrentFontTexture();        &#125;        EditorGUILayout.Space(20);        // 5. 预览区域        DrawPreviewSection();        EditorGUILayout.EndScrollView();    &#125;    private void DisplayFontInfo()    &#123;        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField($&quot;当前纹理: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);            EditorGUILayout.LabelField($&quot;字符数量: &#123;targetFont.characterTable?.Count ?? 0&#125;&quot;, EditorStyles.miniLabel);            if (targetFont.material != null)            &#123;                Shader shader = targetFont.material.shader;                bool isSDF = shader != null &amp;&amp; shader.name.Contains(&quot;SDF&quot;);                EditorGUILayout.LabelField($&quot;着色器: &#123;shader?.name&#125; &#123;(isSDF ? &quot;(SDF)&quot; : &quot;(Bitmap)&quot;)&#125;&quot;,                    EditorStyles.miniLabel);            &#125;        &#125;        else        &#123;            EditorGUILayout.HelpBox(&quot;警告：此字体没有纹理图集！&quot;, MessageType.Warning);        &#125;        EditorGUILayout.EndVertical();    &#125;    private void UpdatePreview()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);            processedPreviewTexture = null;        &#125;    &#125;    private void ReplaceSDFFontTexture()    &#123;        if (targetFont == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择目标SDF字体！&quot;, &quot;确定&quot;);            return;        &#125;        if (processedPreviewTexture == null &amp;&amp; replacementTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先生成SDF纹理或选择源纹理！&quot;, &quot;确定&quot;);            return;        &#125;        Texture2D textureToUse = processedPreviewTexture ?? replacementTexture;        if (!EditorUtility.DisplayDialog(&quot;确认替换&quot;,                $&quot;确定要替换 &#x27;&#123;targetFont.name&#125;&#x27; 的Font Atlas纹理吗？\n\n&quot; +                $&quot;新纹理: &#123;textureToUse.width&#125;x&#123;textureToUse.height&#125;\n&quot; +                $&quot;此操作会修改字体资产，请确保已备份！&quot;,                &quot;替换&quot;, &quot;取消&quot;))        &#123;            return;        &#125;        try        &#123;            EditorUtility.DisplayProgressBar(&quot;替换字体纹理&quot;, &quot;处理中...&quot;, 0.5f);            if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)            &#123;                for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)                &#123;                    var texture = targetFont.atlasTextures[i];                    if (texture == null)                    &#123;                        continue;                    &#125;                    AssetDatabase.RemoveObjectFromAsset(texture);                    DestroyImmediate(texture);                &#125;            &#125;            targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;            targetFont.material.mainTexture = replacementTexture;                        // 保存字体资产            EditorUtility.SetDirty(targetFont);            AssetDatabase.SaveAssets();            // 刷新场景            RefreshAllTMPTextComponents(targetFont);            EditorUtility.ClearProgressBar();            EditorUtility.DisplayDialog(&quot;成功&quot;,                $&quot;已成功替换SDF字体纹理！\n\n&quot; +                $&quot;已刷新所有相关文本组件。&quot;,                &quot;确定&quot;);        &#125;        catch (System.Exception e)        &#123;            EditorUtility.ClearProgressBar();            Debug.LogError($&quot;替换SDF字体纹理失败: &#123;e.Message&#125;\n&#123;e.StackTrace&#125;&quot;);            EditorUtility.DisplayDialog(&quot;错误&quot;, $&quot;替换失败: &#123;e.Message&#125;&quot;, &quot;确定&quot;);        &#125;    &#125;        private void ConfigureTextureForSDF(string texturePath)    &#123;        // 检查路径是否在Assets目录下        if (!texturePath.StartsWith(&quot;Assets/&quot;))        &#123;            // 尝试转换为相对路径            string relativePath = GetRelativeAssetPath(texturePath);            if (string.IsNullOrEmpty(relativePath))            &#123;                Debug.LogError($&quot;路径不在Assets目录下: &#123;texturePath&#125;&quot;);                EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;文件必须保存在Assets目录下才能修改导入设置&quot;, &quot;确定&quot;);                return;            &#125;            texturePath = relativePath;        &#125;               TextureImporter importer = AssetImporter.GetAtPath(texturePath) as TextureImporter;        if (importer == null)        &#123;            EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;importer为空!&quot;,&quot;OK&quot;);            return;        &#125;        // 对于SDF纹理，启用alpha通道处理        importer.textureType = TextureImporterType.Default;  // 使用单通道类型        importer.alphaSource = TextureImporterAlphaSource.FromInput;        importer.alphaIsTransparency = true;                importer.isReadable = false;        importer.wrapMode = TextureWrapMode.Clamp;        importer.filterMode = FilterMode.Bilinear;        importer.mipmapEnabled = false;        importer.sRGBTexture = false;  // 对于SDF，通常使用线性颜色空间        // 设置各平台格式        SetPlatformSettings(importer, &quot;Standalone&quot;, TextureImporterFormat.Alpha8, 4096, false);        SetPlatformSettings(importer, &quot;iPhone&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);        SetPlatformSettings(importer, &quot;Android&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);            // 应用更改        importer.SaveAndReimport();        //EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;修改成功&quot;,&quot;OK&quot;);    &#125;        // 将绝对路径转换为Assets相对路径    private string GetRelativeAssetPath(string fullPath)    &#123;        string dataPath = Application.dataPath;        if (fullPath.StartsWith(dataPath))        &#123;            return &quot;Assets&quot; + fullPath.Substring(dataPath.Length).Replace(&quot;\\&quot;, &quot;/&quot;);        &#125;        return null;    &#125;    private void SetPlatformSettings(TextureImporter importer, string platform,         TextureImporterFormat format, int maxSize, bool compressed)    &#123;        var settings = new TextureImporterPlatformSettings();        settings.name = platform;        settings.overridden = true;        settings.format = format;        settings.maxTextureSize = maxSize;        settings.textureCompression = compressed ?             TextureImporterCompression.Compressed :             TextureImporterCompression.Uncompressed;        settings.compressionQuality = 50;            importer.SetPlatformTextureSettings(settings);    &#125;        private void RefreshAllTMPTextComponents(TMP_FontAsset fontAsset)    &#123;        if (fontAsset == null) return;        int count = 0;        // 刷新场景中的文本        TMP_Text[] sceneTexts = GameObject.FindObjectsOfType&lt;TMP_Text&gt;(true);        foreach (TMP_Text text in sceneTexts)        &#123;            if (text.font == fontAsset)            &#123;                text.ForceMeshUpdate();                EditorUtility.SetDirty(text);                count++;            &#125;        &#125;        // 刷新预制件        string[] prefabGUIDs = AssetDatabase.FindAssets(&quot;t:Prefab&quot;);        foreach (string guid in prefabGUIDs)        &#123;            string path = AssetDatabase.GUIDToAssetPath(guid);            GameObject prefab = AssetDatabase.LoadAssetAtPath&lt;GameObject&gt;(path);            if (prefab != null)            &#123;                TMP_Text[] prefabTexts = prefab.GetComponentsInChildren&lt;TMP_Text&gt;(true);                bool changed = false;                foreach (TMP_Text text in prefabTexts)                &#123;                    if (text.font == fontAsset)                    &#123;                        text.ForceMeshUpdate();                        EditorUtility.SetDirty(text);                        changed = true;                        count++;                    &#125;                &#125;                if (changed)                &#123;                    PrefabUtility.SavePrefabAsset(prefab);                &#125;            &#125;        &#125;        Debug.Log($&quot;已刷新 &#123;count&#125; 个文本组件&quot;);    &#125;    private Texture2D MakeTextureReadable(Texture2D texture)    &#123;        if (texture == null || texture.isReadable) return texture;        RenderTexture rt = RenderTexture.GetTemporary(            texture.width,            texture.height,            0,            RenderTextureFormat.ARGB32,            RenderTextureReadWrite.Linear        );        Graphics.Blit(texture, rt);        RenderTexture previous = RenderTexture.active;        RenderTexture.active = rt;        Texture2D readableTexture = new Texture2D(            texture.width,            texture.height,            TextureFormat.RGBA32,            false        );        readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);        readableTexture.Apply();        RenderTexture.active = previous;        RenderTexture.ReleaseTemporary(rt);        return readableTexture;    &#125;    private void ExportCurrentFontTexture()    &#123;        if (targetFont == null || targetFont.atlasTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);            return;        &#125;        string savePath = EditorUtility.SaveFilePanel(            &quot;导出字体纹理&quot;,            Application.dataPath,            $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,            &quot;png&quot;        );        if (!string.IsNullOrEmpty(savePath))        &#123;            ExportTextureAsPNG(targetFont.atlasTexture, savePath);        &#125;    &#125;    private void ExportTextureAsPNG(Texture2D texture, string path)    &#123;        if (texture == null) return;        Texture2D readableTexture = MakeTextureReadable(texture);        byte[] pngData = readableTexture.EncodeToPNG();        File.WriteAllBytes(path, pngData);        if (readableTexture != texture)        &#123;            DestroyImmediate(readableTexture);        &#125;        //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);        AssetDatabase.Refresh();        ConfigureTextureForSDF(path);        EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);    &#125;    private void DrawPreviewSection()    &#123;        EditorGUILayout.Space(20);        EditorGUILayout.LabelField(&quot;预览&quot;, EditorStyles.boldLabel);        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont != null &amp;&amp; targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField(&quot;当前字体纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect origRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(origRect, targetFont.atlasTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);        &#125;        if (processedPreviewTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;生成的SDF纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect newRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(newRect, processedPreviewTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;processedPreviewTexture.width&#125;x&#123;processedPreviewTexture.height&#125;&quot;,                EditorStyles.miniLabel);            // 显示SDF预览            DrawSDFPreview(processedPreviewTexture);        &#125;        else if (replacementTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;源纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect srcRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(srcRect, replacementTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        // 警告信息        if (targetFont != null &amp;&amp; replacementTexture != null)        &#123;            if (targetFont.atlasTexture != null &amp;&amp;                (targetFont.atlasTexture.width != replacementTexture.width ||                 targetFont.atlasTexture.height != replacementTexture.height))            &#123;                EditorGUILayout.HelpBox(                    &quot;⚠️ 警告：纹理尺寸不匹配！\n&quot; +                    &quot;SDF字体的字符UV映射可能不正确，建议使用相同尺寸的纹理。&quot;,                    MessageType.Warning                );            &#125;        &#125;    &#125;    private void DrawSDFPreview(Texture2D sdfTexture)    &#123;        EditorGUILayout.BeginHorizontal();        // 原始预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;Alpha通道&quot;, EditorStyles.miniLabel);        Rect alphaRect = GUILayoutUtility.GetAspectRect(1f);        EditorGUI.DrawTextureAlpha(alphaRect, sdfTexture, ScaleMode.ScaleToFit);        EditorGUILayout.EndVertical();        // 着色预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;距离场预览&quot;, EditorStyles.miniLabel);        Rect colorRect = GUILayoutUtility.GetAspectRect(1f);        // 创建临时材质用于预览SDF        Material previewMat = new Material(Shader.Find(&quot;Hidden/TMP_SDFPreview&quot;));        if (previewMat != null)        &#123;            EditorGUI.DrawPreviewTexture(colorRect, sdfTexture, previewMat);            DestroyImmediate(previewMat);        &#125;        else        &#123;            EditorGUI.DrawTextureTransparent(colorRect, sdfTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        EditorGUILayout.EndHorizontal();    &#125;        private void OnDestroy()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);        &#125;    &#125;&#125;#endif]]></content>
+  </entry>
+  <entry>
     <title>Unity的TMP顶点数据优化</title>
     <url>/posts/7c9d3a21.html</url>
     <content><![CDATA[上一篇写了 Unity的TMP的纹理优化，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。
@@ -1257,22 +1273,6 @@ StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView�
 ]]></content>
   </entry>
   <entry>
-    <title>Unity的TMP的纹理优化</title>
-    <url>/posts/af72c7f2.html</url>
-    <content><![CDATA[上一篇文章介绍了Unity的TMP和Text，TMP在渲染时需要先一张距离纹理，这不禁让我想到一种优化策略：如果对这张纹理选择不同图像压缩方式，是不是就可以以牺牲显示效果为代价，换取内存开销。
-Unity SDF Asset结构使用AlibabaPuHuiTi-3-65-Medium.ttf文件创建一个SDF Asset，选择渲染模式为static，并使用3500常用字生成贴图，可以看到Unity生成了一张4096*4096的纹理，并且大部分面积都存了字体。Unity还把纹理贴图当成了SDF Asset结构的一部分管理起来，不允许我们直接修改图像的压缩方式。
-TMP纹理的提取不幸中的万幸，Unity把TMP的源码跟着package一起放在了本地，通过对于的编辑器界面逻辑，我找到了Unity保存纹理的过程代码。其中Save_Bitmap_FontAsset和Save_SDF_FontAsset都走向了执行的逻辑都相同，都是做了同样的三件事：1、把纹理赋值给atlasTextures字段。2、把纹理资源设置到FontAsset中。3、更新FontAsset资源的材质主帖图为当前纹理。
-我们的提取和替换逻辑：只需要从FontAsset下的atlasTexture读出对应的texture保存，然后把FontAssest下的指定为我们保存的texture，最后再把FontAsset的资源删除，就大功告成了。把相关思路灌给AI，然后AI生成了代码。下面给出核心的代码逻辑。
-导出代码在FontAsset中atlasTexture是public的所以直接读取，因为Unity默认没开纹理贴图的read&#x2F;Write，所以MakeTextureReadable把图拷贝到一个新的texutre中，并保存下来。
-private void ExportCurrentFontTexture()&#123;    if (targetFont == null || targetFont.atlasTexture == null)    &#123;        EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);        return;    &#125;    string savePath = EditorUtility.SaveFilePanel(        &quot;导出字体纹理&quot;,        Application.dataPath,        $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,        &quot;png&quot;    );    if (!string.IsNullOrEmpty(savePath))    &#123;        ExportTextureAsPNG(targetFont.atlasTexture, savePath);    &#125;&#125;private void ExportTextureAsPNG(Texture2D texture, string path)&#123;    if (texture == null) return;    Texture2D readableTexture = MakeTextureReadable(texture);    byte[] pngData = readableTexture.EncodeToPNG();    File.WriteAllBytes(path, pngData);    if (readableTexture != texture)    &#123;        DestroyImmediate(readableTexture);    &#125;    //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);    AssetDatabase.Refresh();    ConfigureTextureForSDF(path);    EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);&#125;private Texture2D MakeTextureReadable(Texture2D texture)&#123;    if (texture == null || texture.isReadable) return texture;    RenderTexture rt = RenderTexture.GetTemporary(        texture.width,        texture.height,        0,        RenderTextureFormat.ARGB32,        RenderTextureReadWrite.Linear    );    Graphics.Blit(texture, rt);    RenderTexture previous = RenderTexture.active;    RenderTexture.active = rt;    Texture2D readableTexture = new Texture2D(        texture.width,        texture.height,        TextureFormat.RGBA32,        false    );    readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);    readableTexture.Apply();    RenderTexture.active = previous;    RenderTexture.ReleaseTemporary(rt);    return readableTexture;&#125;
-替换代码替换的核心代码，非常简单，先遍历把所有的删掉，然后把输入的贴图指定回去，最后保存。
-if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)&#123;    for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)    &#123;        var texture = targetFont.atlasTextures[i];        if (texture == null)        &#123;            continue;        &#125;        AssetDatabase.RemoveObjectFromAsset(texture);        DestroyImmediate(texture);    &#125;&#125;targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;targetFont.material.mainTexture = replacementTexture;// 保存字体资产EditorUtility.SetDirty(targetFont);AssetDatabase.SaveAssets();
-
-纹理压缩验证现在在Inspector面板下，此SDF Asset的纹理贴图成功指定到保存出来的纹理。对其进行纹理格式改变，字体也同步模糊和清晰，说明修改成功！
-内存优化效果在Game视图下，ASTC6x6和Aplpha 8(原生类型)，看着差别不大，但是内存一个是16MB，一个是7.1MB，相差将近一倍。
-编辑器全部代码#if UNITY_EDITORusing UnityEngine;using UnityEditor;using TMPro;using System.IO;using System.Linq;using System.Collections.Generic;using UnityEngine.TextCore;using UnityEngine.TextCore.LowLevel;public class TMPSpriteExporterWindow : EditorWindow&#123;    private TMP_FontAsset targetFont;    private Texture2D replacementTexture;    private Texture2D replacementSDFTexture;    private Vector2 scrollPosition;    private Texture2D processedPreviewTexture;    [MenuItem(&quot;Tools/TMP/SDF字体纹理替换器&quot;)]    public static void ShowWindow()    &#123;        var window = GetWindow&lt;TMPSpriteExporterWindow&gt;(&quot;TMP SDF字体纹理替换器&quot;, true, typeof(SceneView));        window.minSize = new Vector2(450, 800);    &#125;    private void OnGUI()    &#123;        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);        EditorGUILayout.LabelField(&quot;TMP SDF字体纹理替换器&quot;, EditorStyles.boldLabel);        EditorGUILayout.HelpBox(&quot;此工具用于替换TMP SDF字体的Font Atlas纹理。注意：SDF字体需要特殊的距离场数据。&quot;, MessageType.Info);        EditorGUILayout.Space(10);        // 1. 选择SDF字体        EditorGUI.BeginChangeCheck();        targetFont = (TMP_FontAsset)EditorGUILayout.ObjectField(&quot;目标SDF字体&quot;, targetFont, typeof(TMP_FontAsset), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (targetFont != null)        &#123;            DisplayFontInfo();        &#125;        EditorGUILayout.Space(20);        // 2. 选择替换纹理        EditorGUILayout.LabelField(&quot;替换纹理设置&quot;, EditorStyles.boldLabel);        EditorGUI.BeginChangeCheck();        replacementTexture =            (Texture2D)EditorGUILayout.ObjectField(&quot;源PNG纹理&quot;, replacementTexture, typeof(Texture2D), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (replacementTexture != null)        &#123;            EditorGUILayout.HelpBox(                $&quot;纹理尺寸: &#123;replacementTexture.width&#125;x&#123;replacementTexture.height&#125; | 格式: &#123;replacementTexture.format&#125;&quot;,                MessageType.None);        &#125;        EditorGUILayout.Space(10);                // 4. 功能按钮        EditorGUILayout.BeginHorizontal();        if (GUILayout.Button(&quot;替换字体纹理&quot;, GUILayout.Height(30)))        &#123;            ReplaceSDFFontTexture();        &#125;        EditorGUILayout.EndHorizontal();        EditorGUILayout.Space(10);        if (GUILayout.Button(&quot;导出当前字体纹理&quot;, GUILayout.Height(30)))        &#123;            ExportCurrentFontTexture();        &#125;        EditorGUILayout.Space(20);        // 5. 预览区域        DrawPreviewSection();        EditorGUILayout.EndScrollView();    &#125;    private void DisplayFontInfo()    &#123;        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField($&quot;当前纹理: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);            EditorGUILayout.LabelField($&quot;字符数量: &#123;targetFont.characterTable?.Count ?? 0&#125;&quot;, EditorStyles.miniLabel);            if (targetFont.material != null)            &#123;                Shader shader = targetFont.material.shader;                bool isSDF = shader != null &amp;&amp; shader.name.Contains(&quot;SDF&quot;);                EditorGUILayout.LabelField($&quot;着色器: &#123;shader?.name&#125; &#123;(isSDF ? &quot;(SDF)&quot; : &quot;(Bitmap)&quot;)&#125;&quot;,                    EditorStyles.miniLabel);            &#125;        &#125;        else        &#123;            EditorGUILayout.HelpBox(&quot;警告：此字体没有纹理图集！&quot;, MessageType.Warning);        &#125;        EditorGUILayout.EndVertical();    &#125;    private void UpdatePreview()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);            processedPreviewTexture = null;        &#125;    &#125;    private void ReplaceSDFFontTexture()    &#123;        if (targetFont == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择目标SDF字体！&quot;, &quot;确定&quot;);            return;        &#125;        if (processedPreviewTexture == null &amp;&amp; replacementTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先生成SDF纹理或选择源纹理！&quot;, &quot;确定&quot;);            return;        &#125;        Texture2D textureToUse = processedPreviewTexture ?? replacementTexture;        if (!EditorUtility.DisplayDialog(&quot;确认替换&quot;,                $&quot;确定要替换 &#x27;&#123;targetFont.name&#125;&#x27; 的Font Atlas纹理吗？\n\n&quot; +                $&quot;新纹理: &#123;textureToUse.width&#125;x&#123;textureToUse.height&#125;\n&quot; +                $&quot;此操作会修改字体资产，请确保已备份！&quot;,                &quot;替换&quot;, &quot;取消&quot;))        &#123;            return;        &#125;        try        &#123;            EditorUtility.DisplayProgressBar(&quot;替换字体纹理&quot;, &quot;处理中...&quot;, 0.5f);            if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)            &#123;                for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)                &#123;                    var texture = targetFont.atlasTextures[i];                    if (texture == null)                    &#123;                        continue;                    &#125;                    AssetDatabase.RemoveObjectFromAsset(texture);                    DestroyImmediate(texture);                &#125;            &#125;            targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;            targetFont.material.mainTexture = replacementTexture;                        // 保存字体资产            EditorUtility.SetDirty(targetFont);            AssetDatabase.SaveAssets();            // 刷新场景            RefreshAllTMPTextComponents(targetFont);            EditorUtility.ClearProgressBar();            EditorUtility.DisplayDialog(&quot;成功&quot;,                $&quot;已成功替换SDF字体纹理！\n\n&quot; +                $&quot;已刷新所有相关文本组件。&quot;,                &quot;确定&quot;);        &#125;        catch (System.Exception e)        &#123;            EditorUtility.ClearProgressBar();            Debug.LogError($&quot;替换SDF字体纹理失败: &#123;e.Message&#125;\n&#123;e.StackTrace&#125;&quot;);            EditorUtility.DisplayDialog(&quot;错误&quot;, $&quot;替换失败: &#123;e.Message&#125;&quot;, &quot;确定&quot;);        &#125;    &#125;        private void ConfigureTextureForSDF(string texturePath)    &#123;        // 检查路径是否在Assets目录下        if (!texturePath.StartsWith(&quot;Assets/&quot;))        &#123;            // 尝试转换为相对路径            string relativePath = GetRelativeAssetPath(texturePath);            if (string.IsNullOrEmpty(relativePath))            &#123;                Debug.LogError($&quot;路径不在Assets目录下: &#123;texturePath&#125;&quot;);                EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;文件必须保存在Assets目录下才能修改导入设置&quot;, &quot;确定&quot;);                return;            &#125;            texturePath = relativePath;        &#125;               TextureImporter importer = AssetImporter.GetAtPath(texturePath) as TextureImporter;        if (importer == null)        &#123;            EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;importer为空!&quot;,&quot;OK&quot;);            return;        &#125;        // 对于SDF纹理，启用alpha通道处理        importer.textureType = TextureImporterType.Default;  // 使用单通道类型        importer.alphaSource = TextureImporterAlphaSource.FromInput;        importer.alphaIsTransparency = true;                importer.isReadable = false;        importer.wrapMode = TextureWrapMode.Clamp;        importer.filterMode = FilterMode.Bilinear;        importer.mipmapEnabled = false;        importer.sRGBTexture = false;  // 对于SDF，通常使用线性颜色空间        // 设置各平台格式        SetPlatformSettings(importer, &quot;Standalone&quot;, TextureImporterFormat.Alpha8, 4096, false);        SetPlatformSettings(importer, &quot;iPhone&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);        SetPlatformSettings(importer, &quot;Android&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);            // 应用更改        importer.SaveAndReimport();        //EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;修改成功&quot;,&quot;OK&quot;);    &#125;        // 将绝对路径转换为Assets相对路径    private string GetRelativeAssetPath(string fullPath)    &#123;        string dataPath = Application.dataPath;        if (fullPath.StartsWith(dataPath))        &#123;            return &quot;Assets&quot; + fullPath.Substring(dataPath.Length).Replace(&quot;\\&quot;, &quot;/&quot;);        &#125;        return null;    &#125;    private void SetPlatformSettings(TextureImporter importer, string platform,         TextureImporterFormat format, int maxSize, bool compressed)    &#123;        var settings = new TextureImporterPlatformSettings();        settings.name = platform;        settings.overridden = true;        settings.format = format;        settings.maxTextureSize = maxSize;        settings.textureCompression = compressed ?             TextureImporterCompression.Compressed :             TextureImporterCompression.Uncompressed;        settings.compressionQuality = 50;            importer.SetPlatformTextureSettings(settings);    &#125;        private void RefreshAllTMPTextComponents(TMP_FontAsset fontAsset)    &#123;        if (fontAsset == null) return;        int count = 0;        // 刷新场景中的文本        TMP_Text[] sceneTexts = GameObject.FindObjectsOfType&lt;TMP_Text&gt;(true);        foreach (TMP_Text text in sceneTexts)        &#123;            if (text.font == fontAsset)            &#123;                text.ForceMeshUpdate();                EditorUtility.SetDirty(text);                count++;            &#125;        &#125;        // 刷新预制件        string[] prefabGUIDs = AssetDatabase.FindAssets(&quot;t:Prefab&quot;);        foreach (string guid in prefabGUIDs)        &#123;            string path = AssetDatabase.GUIDToAssetPath(guid);            GameObject prefab = AssetDatabase.LoadAssetAtPath&lt;GameObject&gt;(path);            if (prefab != null)            &#123;                TMP_Text[] prefabTexts = prefab.GetComponentsInChildren&lt;TMP_Text&gt;(true);                bool changed = false;                foreach (TMP_Text text in prefabTexts)                &#123;                    if (text.font == fontAsset)                    &#123;                        text.ForceMeshUpdate();                        EditorUtility.SetDirty(text);                        changed = true;                        count++;                    &#125;                &#125;                if (changed)                &#123;                    PrefabUtility.SavePrefabAsset(prefab);                &#125;            &#125;        &#125;        Debug.Log($&quot;已刷新 &#123;count&#125; 个文本组件&quot;);    &#125;    private Texture2D MakeTextureReadable(Texture2D texture)    &#123;        if (texture == null || texture.isReadable) return texture;        RenderTexture rt = RenderTexture.GetTemporary(            texture.width,            texture.height,            0,            RenderTextureFormat.ARGB32,            RenderTextureReadWrite.Linear        );        Graphics.Blit(texture, rt);        RenderTexture previous = RenderTexture.active;        RenderTexture.active = rt;        Texture2D readableTexture = new Texture2D(            texture.width,            texture.height,            TextureFormat.RGBA32,            false        );        readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);        readableTexture.Apply();        RenderTexture.active = previous;        RenderTexture.ReleaseTemporary(rt);        return readableTexture;    &#125;    private void ExportCurrentFontTexture()    &#123;        if (targetFont == null || targetFont.atlasTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);            return;        &#125;        string savePath = EditorUtility.SaveFilePanel(            &quot;导出字体纹理&quot;,            Application.dataPath,            $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,            &quot;png&quot;        );        if (!string.IsNullOrEmpty(savePath))        &#123;            ExportTextureAsPNG(targetFont.atlasTexture, savePath);        &#125;    &#125;    private void ExportTextureAsPNG(Texture2D texture, string path)    &#123;        if (texture == null) return;        Texture2D readableTexture = MakeTextureReadable(texture);        byte[] pngData = readableTexture.EncodeToPNG();        File.WriteAllBytes(path, pngData);        if (readableTexture != texture)        &#123;            DestroyImmediate(readableTexture);        &#125;        //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);        AssetDatabase.Refresh();        ConfigureTextureForSDF(path);        EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);    &#125;    private void DrawPreviewSection()    &#123;        EditorGUILayout.Space(20);        EditorGUILayout.LabelField(&quot;预览&quot;, EditorStyles.boldLabel);        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont != null &amp;&amp; targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField(&quot;当前字体纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect origRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(origRect, targetFont.atlasTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);        &#125;        if (processedPreviewTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;生成的SDF纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect newRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(newRect, processedPreviewTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;processedPreviewTexture.width&#125;x&#123;processedPreviewTexture.height&#125;&quot;,                EditorStyles.miniLabel);            // 显示SDF预览            DrawSDFPreview(processedPreviewTexture);        &#125;        else if (replacementTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;源纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect srcRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(srcRect, replacementTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        // 警告信息        if (targetFont != null &amp;&amp; replacementTexture != null)        &#123;            if (targetFont.atlasTexture != null &amp;&amp;                (targetFont.atlasTexture.width != replacementTexture.width ||                 targetFont.atlasTexture.height != replacementTexture.height))            &#123;                EditorGUILayout.HelpBox(                    &quot;⚠️ 警告：纹理尺寸不匹配！\n&quot; +                    &quot;SDF字体的字符UV映射可能不正确，建议使用相同尺寸的纹理。&quot;,                    MessageType.Warning                );            &#125;        &#125;    &#125;    private void DrawSDFPreview(Texture2D sdfTexture)    &#123;        EditorGUILayout.BeginHorizontal();        // 原始预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;Alpha通道&quot;, EditorStyles.miniLabel);        Rect alphaRect = GUILayoutUtility.GetAspectRect(1f);        EditorGUI.DrawTextureAlpha(alphaRect, sdfTexture, ScaleMode.ScaleToFit);        EditorGUILayout.EndVertical();        // 着色预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;距离场预览&quot;, EditorStyles.miniLabel);        Rect colorRect = GUILayoutUtility.GetAspectRect(1f);        // 创建临时材质用于预览SDF        Material previewMat = new Material(Shader.Find(&quot;Hidden/TMP_SDFPreview&quot;));        if (previewMat != null)        &#123;            EditorGUI.DrawPreviewTexture(colorRect, sdfTexture, previewMat);            DestroyImmediate(previewMat);        &#125;        else        &#123;            EditorGUI.DrawTextureTransparent(colorRect, sdfTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        EditorGUILayout.EndHorizontal();    &#125;        private void OnDestroy()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);        &#125;    &#125;&#125;#endif]]></content>
-  </entry>
-  <entry>
     <title>Unity节点编辑器(二) -- GraphView窗口</title>
     <url>/posts/9891abd3.html</url>
     <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
@@ -1377,36 +1377,6 @@ Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的�
 Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
 
 参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
-]]></content>
-  </entry>
-  <entry>
-    <title>基于前缀树的红点系统设计与实现</title>
-    <url>/posts/79323865.html</url>
-    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
-效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
-前缀树介绍
-前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
-
-红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
-public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
-
-节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
-增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
-public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
-减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
-public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
-数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
-public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
-刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
-public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
-红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
-单例这里我使用了单例模式，类中维护一个红点根节点。
-public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
-添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
-public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
-减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
-public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
-性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
 ]]></content>
   </entry>
   <entry>
@@ -1751,18 +1721,48 @@ TextMeshPro 文档
 ]]></content>
   </entry>
   <entry>
-    <title>第一篇博客</title>
-    <url>/posts/ff05b5bf.html</url>
-    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
-]]></content>
-  </entry>
-  <entry>
     <title>算法--判断点是否在多边形中(包含凹凸多边形)</title>
     <url>/posts/ca3fa1d1.html</url>
     <content><![CDATA[判断点是否在一个凸多边形内部，可以根据面积、叉乘的方法判断。但是包括凹多边形的时候，就得使用射线法判断。下面介绍这种算法。
 算法原理奇-偶规则（Odd-even Rule）：奇数表示在多边形内，偶数表示在多边形外从任意位置p作任意方向的一条射线，若与该射线相交的多边形边的数目为奇数，则p是多边形内部点，否则是外部点。以上图为例：从红点向任意方向发射射线(上图是向左和向右)，与图形的边的交点总和为奇数时，点在内部；为偶数时，点在外部。（上图向左有5个点，向右有3个点），所以红点在多边形的内部。所以，问题就从判断点在多边形的内部转化为了：判断点朝任意方向的射线与多边形的边的交点个数的奇、偶问题。
 如何判断射线与多边形的交点？从上图可以非常直观地看出，取出多边形中两个相邻的点P1、P2，根据两点得到直线的方程为：Y&#x3D;(y1-y2)&#x2F;(X1-X2)*（X - X1）+Y1。将待监测点P0的X0代入直线方程（如果向上打射线）,计算出X0在该射线上的Y位置，如果Y&gt;Y0则说明：该P0点在线段P1、P2的下方，交点数+1；反之则为下方。
 代码实现public static bool checkPosInPolygon(List&lt;Vector3&gt; PosList, Vector3 checkPos)&#123;    if (PosList == null || PosList.Count &lt;= 0)    &#123;        return false;    &#125;    int num = 0;    for (int i = 0; i &lt; PosList.Count; i++)    &#123;        Vector3 curPos = PosList[i] ;        Vector3 nextPos = PosList[(i + 1) % PosList.Count] ;        if (checkPos.y &gt;= Mathf.Max(curPos.y, nextPos.y) || checkPos.y &lt;= Mathf.Min(curPos.y, nextPos.y))        &#123;            continue;        &#125;        float lineSlope = (curPos.x - nextPos.x) / (curPos.y - nextPos.y);        float linePosx = (checkPos.y - curPos.y) * lineSlope + curPos.x;        if (linePosx &lt; checkPos.x || Mathf.Approximately(linePosx, checkPos.x))        &#123;            num++;        &#125;    &#125;    return (num % 2 != 0);&#125;]]></content>
+  </entry>
+  <entry>
+    <title>基于前缀树的红点系统设计与实现</title>
+    <url>/posts/79323865.html</url>
+    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
+效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
+前缀树介绍
+前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
+
+红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
+public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
+
+节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
+增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
+public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
+减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
+public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
+数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
+public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
+刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
+public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
+红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
+单例这里我使用了单例模式，类中维护一个红点根节点。
+public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
+添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
+public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
+减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
+public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
+性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
+]]></content>
+  </entry>
+  <entry>
+    <title>第一篇博客</title>
+    <url>/posts/ff05b5bf.html</url>
+    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
+]]></content>
   </entry>
   <entry>
     <title>通用节点编辑器01-xNode对比</title>
