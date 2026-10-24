@@ -1,6 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
+    <title>UI背景模糊的两种实现方法</title>
+    <url>/posts/8434956c.html</url>
+    <content><![CDATA[原理实现模糊的原理比较简单：一个像素本身的颜色通过某种算法，最终计算为周围颜色的一个均值或权重值，这样看起来的图就是模糊的了。通过计算均值颜色的算法选择不同，就产生了不同效果、不同效率的模糊。具体实现算法可以看左神的这篇文章：高品质后处理：十种图像模糊算法的总结与实现，里面把所有的模糊算法的数学原理和效果都列举完了，言简意赅，字字珠玑。下面介绍我在实际工程中的实现UI背景模糊两种实现方法。
+因为需要计算周围颜色的值，所以我们首先需要抓取到当前渲染的画面。目前我知道的抓取画面有两种方法：1、GrabPss。2、屏幕后处理。所以我这两把这两种方式分成了两种方法。
+方法一：GrabPassGrabPass是Unity的内置渲染管线中一个特殊的pass，可以在shader中将当前帧抓取到一张纹理贴图中。我的实现中获取了两次，分别做了垂直和水平方向的模糊处理。效果如下：通过调整Image位置和大小实现局部模糊：
+shader代码Shader &quot;FT/Blur/Back&quot;&#123;	Properties	&#123;		_MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;		_Color (&quot;Main Color&quot;, Color) = (1,1,1,1)        _Size (&quot;Size&quot;, Range(0, 20)) = 1	&#125;	Category &#123;            // We must be transparent, so other objects are drawn before this one.          Tags &#123; 			&quot;Queue&quot;=&quot;Transparent&quot; 			&quot;IgnoreProjector&quot;=&quot;True&quot; 			&quot;RenderType&quot;=&quot;Transparent&quot;			&quot;PreviewType&quot; = &quot;Plane&quot;			&quot;CanUseSpriteAtlas&quot; = &quot;True&quot;		&#125;              SubShader &#123;                // Horizontal blur              GrabPass 			&#123;                                      Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                  Name &quot;BackBlurHor&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord : TEXCOORD0;					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;					float4 color    : COLOR;                &#125;;                  v2f vert (appdata_t v) &#123;                      v2f o;                     o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;			    float4 _MainTex_TexelSize;                float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;                    kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;					return tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x + _GrabTexture_TexelSize.x * kernel * _Size, i.uvgrab.y, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                half4 frag( v2f i ) : COLOR &#123;                   	half4 sum = half4(0,0,0,0);                    sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);                    float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;  			            // Vertical blur              GrabPass &#123;                                          Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                  Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                Name &quot;BackBlurVer&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord: TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    v2f vert (appdata_t v) &#123;                      v2f o;                      o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;                  float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;					kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;                         return tex2Dproj( _GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x, i.uvgrab.y + _GrabTexture_TexelSize.y * kernel * _Size, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                  half4 frag( v2f i ) : COLOR				&#123;                    half4 sum = half4(0,0,0,0);                      sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);					float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;        &#125;	&#125;&#125;
+
+方法二：屏幕后处理Unity通过给相机添加脚本并重写OnRenderImage方法，可以拿到当前渲染画面的纹理，通过对改变此纹理可以实现各种后处理效果。这里我使用了双重模糊算法，通过2倍升&#x2F;降分辨率从而优化每帧传递给GPU的带宽和计算，并且因为先降低分辨率再放大本身就会产生模糊，所以双重模糊使用比较少的迭代次数就能获得其他方法比较高迭代次数的效果。效果如下：
+C#代码using UnityEngine;[ExecuteInEditMode][RequireComponent(typeof(Camera))]public class SimpleDualBlur : MonoBehaviour&#123;    [Range(0, 8)] public int iterations = 4;        public Shader blurShader;    private Material blurMaterial;    private Material BlurMaterial    &#123;        get        &#123;            if (blurMaterial == null)            &#123;                blurMaterial = new Material(blurShader);                blurMaterial.hideFlags = HideFlags.DontSave;            &#125;            return blurMaterial;        &#125;    &#125;    void OnDisable()    &#123;        if (blurMaterial)            DestroyImmediate(blurMaterial);    &#125;    void OnRenderImage(RenderTexture source, RenderTexture destination)    &#123;        if (BlurMaterial == null || iterations &lt;= 0)        &#123;            Graphics.Blit(source, destination);            return;        &#125;        int width = source.width;        int height = source.height;        // 第1个临时纹理        RenderTexture rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);        RenderTexture rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);        // 第1次下采样        Graphics.Blit(source, rt1);                // 双重模糊循环        // 下采样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 上样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = width * 2;            height = height * 2;            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = width * 2;            height = height * 2;            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 最终输出        Graphics.Blit(rt1, destination);        RenderTexture.ReleaseTemporary(rt1);        RenderTexture.ReleaseTemporary(rt2);    &#125;&#125;
+shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#123;        _MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;    &#125;        SubShader    &#123;        Cull Off        ZWrite Off        ZTest Always                // Pass 0: 下采样Pass (5点采样)        Pass        &#123;            Name &quot;DOWNSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_downsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_downsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                float2 offset = texelSize * 2.0; // 2倍下采样                                // 5点采样：中心 + 4个角                fixed4 col = tex2D(_MainTex, i.uv) * 0.6;              // 中心                col += tex2D(_MainTex, i.uv + float2(-offset.x, -offset.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(offset.x, -offset.y)) * 0.1;   // 右上                col += tex2D(_MainTex, i.uv + float2(-offset.x, offset.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(offset.x, offset.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;                // Pass 1: 上采样Pass (9点采样)        Pass        &#123;            Name &quot;UPSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_upsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_upsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                                // 9点采样：中心 + 周围8个点                fixed4 col = tex2D(_MainTex, i.uv) * 0.2;  // 中心 (1/9)                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, -texelSize.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(0.0, -texelSize.y)) * 0.1;           // 上                col += tex2D(_MainTex, i.uv + float2(texelSize.x, -texelSize.y)) * 0.1;   // 右上                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, 0.0)) * 0.1;           // 左                col += tex2D(_MainTex, i.uv + float2(texelSize.x, 0.0)) * 0.1;            // 右                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, texelSize.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(0.0, texelSize.y)) * 0.1;            // 下                col += tex2D(_MainTex, i.uv + float2(texelSize.x, texelSize.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;    &#125;    FallBack Off&#125;
+
+
+方法对比与性能分析通用性：GrabPass只适用于Unity的内置渲染管线，剩下的URP、HDRP、SRP统统都不支持；屏幕后处理则都通用，只需要实现对应的接口即可。需求实现：GrabPass因为生成了材质挂载到Image中，所以可以非常简单的通过调整Image的大小和位置，实现UI局部模糊；屏幕后处理则只能支持全屏。性能消耗：GrabPass在Unity的官方文档中明确指出：“会显著增加CPU和GPU帧时间。除了快速原型制作之外，您通常应该避免使用此命令，并尝试通过其他方式实现您的效果”。而这里使用材质挂载的方式，一个材质就两个pass，所以在多个材质的情况下性能会有严重的问题；对于屏幕后处理只会对渲染管线最后的画面做一次处理，通过双重模糊算法降低与GPU交互数据的带宽，性能较好。
+参考资料[1].【Unity渲染——屏幕后处理】Cg代码实现多种模糊算法
+]]></content>
+  </entry>
+  <entry>
     <title>C#匿名函数与闭包</title>
     <url>/posts/278e5dd7.html</url>
     <content><![CDATA[起因最近看到了一段C#程序，一开始就简单的以为只是一个for循环的0~9的打印，但是深入了解之后发现我错了，而且对其中的原理相知甚少。代码如下：
@@ -253,272 +270,6 @@ PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等�
 awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
 
 最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
-]]></content>
-  </entry>
-  <entry>
-    <title>UI背景模糊的两种实现方法</title>
-    <url>/posts/8434956c.html</url>
-    <content><![CDATA[原理实现模糊的原理比较简单：一个像素本身的颜色通过某种算法，最终计算为周围颜色的一个均值或权重值，这样看起来的图就是模糊的了。通过计算均值颜色的算法选择不同，就产生了不同效果、不同效率的模糊。具体实现算法可以看左神的这篇文章：高品质后处理：十种图像模糊算法的总结与实现，里面把所有的模糊算法的数学原理和效果都列举完了，言简意赅，字字珠玑。下面介绍我在实际工程中的实现UI背景模糊两种实现方法。
-因为需要计算周围颜色的值，所以我们首先需要抓取到当前渲染的画面。目前我知道的抓取画面有两种方法：1、GrabPss。2、屏幕后处理。所以我这两把这两种方式分成了两种方法。
-方法一：GrabPassGrabPass是Unity的内置渲染管线中一个特殊的pass，可以在shader中将当前帧抓取到一张纹理贴图中。我的实现中获取了两次，分别做了垂直和水平方向的模糊处理。效果如下：通过调整Image位置和大小实现局部模糊：
-shader代码Shader &quot;FT/Blur/Back&quot;&#123;	Properties	&#123;		_MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;		_Color (&quot;Main Color&quot;, Color) = (1,1,1,1)        _Size (&quot;Size&quot;, Range(0, 20)) = 1	&#125;	Category &#123;            // We must be transparent, so other objects are drawn before this one.          Tags &#123; 			&quot;Queue&quot;=&quot;Transparent&quot; 			&quot;IgnoreProjector&quot;=&quot;True&quot; 			&quot;RenderType&quot;=&quot;Transparent&quot;			&quot;PreviewType&quot; = &quot;Plane&quot;			&quot;CanUseSpriteAtlas&quot; = &quot;True&quot;		&#125;              SubShader &#123;                // Horizontal blur              GrabPass 			&#123;                                      Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                  Name &quot;BackBlurHor&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord : TEXCOORD0;					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;					float4 color    : COLOR;                &#125;;                  v2f vert (appdata_t v) &#123;                      v2f o;                     o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;			    float4 _MainTex_TexelSize;                float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;                    kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;					return tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x + _GrabTexture_TexelSize.x * kernel * _Size, i.uvgrab.y, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                half4 frag( v2f i ) : COLOR &#123;                   	half4 sum = half4(0,0,0,0);                    sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);                    float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;  			            // Vertical blur              GrabPass &#123;                                          Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                  Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                Name &quot;BackBlurVer&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord: TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    v2f vert (appdata_t v) &#123;                      v2f o;                      o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;                  float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;					kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;                         return tex2Dproj( _GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x, i.uvgrab.y + _GrabTexture_TexelSize.y * kernel * _Size, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                  half4 frag( v2f i ) : COLOR				&#123;                    half4 sum = half4(0,0,0,0);                      sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);					float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;        &#125;	&#125;&#125;
-
-方法二：屏幕后处理Unity通过给相机添加脚本并重写OnRenderImage方法，可以拿到当前渲染画面的纹理，通过对改变此纹理可以实现各种后处理效果。这里我使用了双重模糊算法，通过2倍升&#x2F;降分辨率从而优化每帧传递给GPU的带宽和计算，并且因为先降低分辨率再放大本身就会产生模糊，所以双重模糊使用比较少的迭代次数就能获得其他方法比较高迭代次数的效果。效果如下：
-C#代码using UnityEngine;[ExecuteInEditMode][RequireComponent(typeof(Camera))]public class SimpleDualBlur : MonoBehaviour&#123;    [Range(0, 8)] public int iterations = 4;        public Shader blurShader;    private Material blurMaterial;    private Material BlurMaterial    &#123;        get        &#123;            if (blurMaterial == null)            &#123;                blurMaterial = new Material(blurShader);                blurMaterial.hideFlags = HideFlags.DontSave;            &#125;            return blurMaterial;        &#125;    &#125;    void OnDisable()    &#123;        if (blurMaterial)            DestroyImmediate(blurMaterial);    &#125;    void OnRenderImage(RenderTexture source, RenderTexture destination)    &#123;        if (BlurMaterial == null || iterations &lt;= 0)        &#123;            Graphics.Blit(source, destination);            return;        &#125;        int width = source.width;        int height = source.height;        // 第1个临时纹理        RenderTexture rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);        RenderTexture rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);        // 第1次下采样        Graphics.Blit(source, rt1);                // 双重模糊循环        // 下采样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 上样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = width * 2;            height = height * 2;            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = width * 2;            height = height * 2;            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 最终输出        Graphics.Blit(rt1, destination);        RenderTexture.ReleaseTemporary(rt1);        RenderTexture.ReleaseTemporary(rt2);    &#125;&#125;
-shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#123;        _MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;    &#125;        SubShader    &#123;        Cull Off        ZWrite Off        ZTest Always                // Pass 0: 下采样Pass (5点采样)        Pass        &#123;            Name &quot;DOWNSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_downsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_downsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                float2 offset = texelSize * 2.0; // 2倍下采样                                // 5点采样：中心 + 4个角                fixed4 col = tex2D(_MainTex, i.uv) * 0.6;              // 中心                col += tex2D(_MainTex, i.uv + float2(-offset.x, -offset.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(offset.x, -offset.y)) * 0.1;   // 右上                col += tex2D(_MainTex, i.uv + float2(-offset.x, offset.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(offset.x, offset.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;                // Pass 1: 上采样Pass (9点采样)        Pass        &#123;            Name &quot;UPSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_upsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_upsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                                // 9点采样：中心 + 周围8个点                fixed4 col = tex2D(_MainTex, i.uv) * 0.2;  // 中心 (1/9)                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, -texelSize.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(0.0, -texelSize.y)) * 0.1;           // 上                col += tex2D(_MainTex, i.uv + float2(texelSize.x, -texelSize.y)) * 0.1;   // 右上                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, 0.0)) * 0.1;           // 左                col += tex2D(_MainTex, i.uv + float2(texelSize.x, 0.0)) * 0.1;            // 右                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, texelSize.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(0.0, texelSize.y)) * 0.1;            // 下                col += tex2D(_MainTex, i.uv + float2(texelSize.x, texelSize.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;    &#125;    FallBack Off&#125;
-
-
-方法对比与性能分析通用性：GrabPass只适用于Unity的内置渲染管线，剩下的URP、HDRP、SRP统统都不支持；屏幕后处理则都通用，只需要实现对应的接口即可。需求实现：GrabPass因为生成了材质挂载到Image中，所以可以非常简单的通过调整Image的大小和位置，实现UI局部模糊；屏幕后处理则只能支持全屏。性能消耗：GrabPass在Unity的官方文档中明确指出：“会显著增加CPU和GPU帧时间。除了快速原型制作之外，您通常应该避免使用此命令，并尝试通过其他方式实现您的效果”。而这里使用材质挂载的方式，一个材质就两个pass，所以在多个材质的情况下性能会有严重的问题；对于屏幕后处理只会对渲染管线最后的画面做一次处理，通过双重模糊算法降低与GPU交互数据的带宽，性能较好。
-参考资料[1].【Unity渲染——屏幕后处理】Cg代码实现多种模糊算法
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity-AssetBundle加载与卸载</title>
-    <url>/posts/38e927b7.html</url>
-    <content><![CDATA[AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。
-下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。
-一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。
-但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。
-这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一定会销毁此前加载的对象。
-二、管理目标：明确谁在使用，什么时候能释放这个场景需要解决的，不只是让内存下降，还包括保证资源在使用期间有效，以及避免下次打开界面时无意间再加载一份。
-具体可以归纳为三个目标：
-
-使用期间保持有效。 界面实例、对象池或其他系统仍在引用资源时，不能提前销毁资源。
-重复进入时可复用。 同一份逻辑资源仍然存活时，应有明确的复用或释放策略。
-退出后能够验证。 能够确认引用已经解除、对象得到回收，而不只是观察进程内存有没有立刻下降。
-
-要做到这些，需要先分清各个 API 实际处理的是哪一部分。
-三、处理过程：把加载、使用和回收串起来1. 先确定内存在哪里以本地 AB 包为例，加载过程及各部分的关系如下：
-
-    flowchart TD
-    D[&quot;磁盘：AB 文件&quot;]
-    B[&quot;Native：包管理结构与读取缓冲&quot;]
-    R[&quot;Native：资源对象与所需 CPU 数据&quot;]
-    MB[&quot;Managed：AssetBundle 包装&quot;]
-    MR[&quot;Managed：Texture2D、Mesh 等包装&quot;]
-    G[&quot;GPU：纹理、顶点与索引缓冲&quot;]
-
-    D --&gt;|LoadFromFile| B
-    MB -.-&gt;|引用底层包对象| B
-    B --&gt;|LoadAsset：从文件读取所需数据| R
-    MR -.-&gt;|引用底层资源对象| R
-    R --&gt;|图形数据上传| G
-  
-
-
-磁盘到 Native： LoadFromFile 建立包的访问入口；LoadAsset 再读取所需资源，创建 Native 对象及数据。打开包不等于全部资源都已加载。
-Managed 是脚本访问入口： 加载接口向 C# 提供相应包装对象；图中虚线表示引用关系，像素、顶点等大块数据不必经过托管堆再上传。
-需要 GPU 使用的数据才上传： 例如纹理像素、Mesh 顶点和索引。上传可能发生在加载期间或分帧进行，并非统一等到首次渲染；CPU 副本是否保留取决于 Read&#x2F;Write 等设置。[2][3]
-
-清理时也要分别处理：资源卸载负责 Native 对象及相关 GPU 资源，GC 负责不可达的托管包装和业务对象。 图中表示逻辑归属，统一内存设备上的 CPU 与 GPU 可能共享物理内存。
-2. 将打开包和加载资源分开处理先看两种常见的加载方式：
-// 先将整个文件读入托管数组，再交给 Unity。byte[] data = File.ReadAllBytes(path);AssetBundle memoryBundle = AssetBundle.LoadFromMemory(data);// 让 Unity 直接从文件加载。AssetBundle fileBundle = AssetBundle.LoadFromFile(path);
-
-使用第一种方式时，byte[] 本身就会占用一份托管内存，Unity 侧还需要加载包所需的内存。加载期间，两部分占用可能同时存在。实际峰值还受压缩格式和引擎实现影响，不能简单固定为“文件大小的两倍”。
-如果包已经在本地，通常优先使用 LoadFromFile 或 LoadFromFileAsync，省去先读取整个托管数组的过程。
-前文已经解释了包的按需读取与解压机制，这里只保留一个与内存管理有关的区别：LoadFromFile 返回的是包的访问入口，LoadAsset 返回的是具体资源对象。打开包不代表包内所有资源都已加载；卸载入口，也不必然销毁已经加载的对象。[1]
-3. 确认资源对象和 GPU 数据的加载过程Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(    &quot;assets/game/textures/warrior_diffuse.png&quot;);
-
-调用 LoadAsset 后，Unity 会创建对应的底层资源对象，并向 C# 返回 Texture2D 包装对象。下文默认相关依赖包已经准备好，依赖解析过程沿用前文，不再展开。
-纹理和 Mesh 还涉及 GPU 数据的上传。这里容易产生一个误解：认为 LoadAsset 只准备 CPU 数据，直到第一次渲染时才上传显存。
-实际并没有这样统一的时间界限。Unity 有同步和异步上传管线，数据可能在加载过程中就上传到 GPU，也可能通过缓冲区分帧传输。具体行为取决于资源设置、加载路径及平台，不能仅凭“还没有渲染过”判断显存占用。[2]
-Mesh.UploadMeshData(true) 可以提交 Mesh 数据，并释放脚本读取所需的 CPU 数据副本；这里释放的是 Native 侧的 CPU 数据，不是 C# 包装，GPU 数据仍然保留。它主要用于明确管理 Mesh 数据，并不是加载 AB 资源时必须补上的步骤。
-Read&#x2F;Write 保留的是什么纹理开启 Read/Write Enabled 后，Unity 会保留可供 CPU 访问的像素数据，以支持 GetPixels 等操作。这份数据会增加常驻内存开销。[3]
-如果纹理只用于渲染，通常应关闭该选项；如果运行时确实需要读取或修改像素，则需要保留。UI 图集、大尺寸贴图尤其值得检查。
-关闭 Read&#x2F;Write 能减少 CPU 副本的占用，但不宜把收益一概写成“总内存减半”。纹理格式、MipMap、流送设置、平台，以及对象自身的开销都会影响最终结果。
-4. 根据使用情况选择卸载方式bundle.Unload(unloadAllLoadedObjects: true);// 或bundle.Unload(unloadAllLoadedObjects: false);
-
-两种调用都会卸载包本身，使这个 AssetBundle 无法继续用于加载资源。区别在于，是否同时销毁此前从包中加载出来的对象。[4]
-Unload(true)：包和已加载资源一起卸载Unload(true) 会释放包自身的 Native 管理数据，并销毁属于这个包的已加载资源对象，释放它们的 Native 数据；纹理、Mesh 等对象对应的 GPU 资源也会进入图形系统的释放流程，即使场景中的其他对象仍在引用它们。
-这里的销毁主要针对引擎对象，不意味着 C# 托管包装已经被回收。包装对象仍由 GC 管理；只要业务代码还持有引用，它就可能继续占用托管堆空间。GPU 资源的实际释放也可能等待渲染任务或驱动处理完成。
-例如，从包里加载 Prefab 后调用 Instantiate，场景中的实例通常还在，但它引用的共享 Mesh、材质、纹理可能已被卸载，导致模型无法正常显示。粉红色通常指向 Shader 缺失、错误或不受支持，不能直接归因于“少了一张纹理”。
-底层对象销毁后，已有的 C# 变量不会自动被重新赋值。Unity 重载了 ==，会将底层对象已经失效的包装对象判为空：[5]
-Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(assetName);bundle.Unload(true);Debug.Log(texture == null);                 // trueDebug.Log(ReferenceEquals(texture, null));  // false：托管引用仍存在
-
-这也是判断 Unity 对象时，== null 与普通 C# 引用判空可能不一致的原因。对象失效后，访问需要底层对象的成员可能报错，并不意味着每次访问都会导致程序崩溃。
-Unload(false)：卸载包，保留已加载资源Unload(false) 释放的是包自身的 Native 管理数据和相关读取资源。已加载纹理、Mesh、材质的 Native 对象与数据，以及它们对应的 GPU 资源仍然保留，可以继续使用。
-它不会直接回收 AssetBundle、Texture2D 等 C# 包装，也不会释放调用方传给 LoadFromMemory 的托管 byte[]。这些托管对象都需要在不再可达后，由 GC 回收。
-但这些资源也不再由原来的包实例管理。后续重新打开同一个包，不会自动把旧资源重新关联回来。
-5. 处理重复加载留下的副本下面这段代码就可能产生两个独立的纹理对象：
-AssetBundle bundleA = AssetBundle.LoadFromFile(path);Texture2D textureA = bundleA.LoadAsset&lt;Texture2D&gt;(assetName);bundleA.Unload(false);AssetBundle bundleB = AssetBundle.LoadFromFile(path);Texture2D textureB = bundleB.LoadAsset&lt;Texture2D&gt;(assetName);
-
-第一次卸载时，textureA 被保留下来。第二次加载时，Unity 不会因为磁盘上的资源路径相同，就自动复用这份旧对象，而是可能创建新的 textureB。[1]
-如果旧纹理仍被 UI、材质、静态字段或资源缓存引用，两份对象就会同时存在。继续反复执行这个流程，资源占用便可能逐轮增加。
-不过，重复副本不一定就是永久泄漏。能否回收，要看资源是否还有使用者，以及是否执行了合适的卸载操作：
-
-对不再需要、且符合 API 限制的单个资源，可以使用 Resources.UnloadAsset。该接口不适用于 GameObject 或 Component。[6]
-清除相关引用后，可以在合适的时机调用 Resources.UnloadUnusedAssets()，清理 Unity 判断为未使用的资源。它有全局检查成本，通常安排在加载界面等能够接受开销的位置。
-
-重新加载包，再对新包调用 Unload(true)，并不能顺带销毁上一次 Unload(false) 留下的旧资源。
-6. 使用 UnloadUnusedAssets 做阶段性清理前面提到，Unload(false) 会留下已加载的资源。等使用者退出后，可以通过 Resources.UnloadUnusedAssets() 清理其中不再使用的部分。它也能处理其他加载路径留下的未使用资源，并不局限于 AB 包。
-这个接口清理的重点是未使用资源的 Native 对象及其数据，并让相应 GPU 资源进入释放流程。 它与 C# GC 是不同的回收机制：即使具体版本的执行过程中伴随托管 GC，也不能据此认为所有托管包装、数组和缓存容器都已回收。仍然可达的托管对象依然会保留。[8]
-“未使用”由谁判断这个接口不接收包名或资源列表。Unity 会检查 GameObject 层级、脚本组件及静态变量中的引用，判断哪些资源仍然可达。[7]
-从行为上，可以把这次清理理解成三个步骤：
-
-查找仍在使用的资源。 从上述引用入口出发，沿对象之间的引用关系，确定需要保留的资源。
-识别未使用资源。 将没有被这些引用关系保留的资源列入清理范围；它不是只检查刚关闭的界面或刚卸载的包。
-卸载资源。 销毁符合条件的 Native 资源对象、释放相关数据，并让对应 GPU 资源进入释放流程。
-
-这是便于理解的概括，并非对引擎内部具体算法和线程分工的保证。开销不仅来自最终释放了多少资源，也来自查找、遍历引用关系以及销毁对象的过程。 即使最后只回收少量内存，也可能已经付出了明显的检查成本。
-因此，界面关闭了，不代表界面用过的纹理就能回收。隐藏的 UI、对象池中的角色、静态字典里的资源缓存，都可能继续持有引用。调用这个接口不会替你清空这些缓存。
-还有一个细节：它不会像 C# GC 那样检查脚本执行栈。 仅被普通方法局部变量引用的资源，不能据此保证保留。需要跨越清理过程继续使用的资源，应由明确的持有者保存，例如存活组件的字段；协程局部变量可能被编译成状态机字段，也不宜一概当作普通栈变量理解。[7]
-各接口到底清理哪一层内存
-
-
-操作
-Native 内存
-GPU 内存
-Managed 托管内存
-
-
-
-bundle.Unload(false)
-释放包自身的管理数据和读取资源；保留已加载资源的 Native 数据
-保留已加载资源的 GPU 数据
-不直接回收包装或输入数组；不再可达后由 GC 回收
-
-
-bundle.Unload(true)
-释放包自身及属于它的已加载资源的 Native 数据
-对应资源进入释放流程
-不直接回收仍被持有的 C# 包装；不再可达后由 GC 回收
-
-
-Resources.UnloadAsset(asset)
-卸载指定资源的 Native 对象和数据，受资源类型限制
-对应资源进入释放流程
-不直接回收仍被持有的包装；不再可达后由 GC 回收
-
-
-Resources.UnloadUnusedAssets()
-清理 Unity 判断为未使用的资源的 Native 对象和数据
-被清理资源对应的 GPU 数据进入释放流程
-不能保证包装和业务对象立即回收；其托管内存仍取决于 GC 可达性及回收时机
-
-
-Object.Destroy(instance)
-按销毁规则释放指定实例及相关引擎对象；通常延迟执行，不会自动卸载共享纹理、材质等资源
-不会仅因销毁一个场景实例就释放其引用的共享资源
-C# 包装及脚本的托管部分在不再可达后由 GC 回收
-
-
-GC.Collect()
-不直接卸载 Unity 资源的 Native 对象
-不直接释放
-触发托管 GC，回收符合条件的不可达对象
-
-
-reference = null &#x2F; cache.Clear()
-不直接释放
-不直接释放
-解除引用；不立即回收对象，清空集合通常也保留其容量
-
-
-表中的 GPU 释放指生命周期上的释放请求，不保证调用返回时驱动已归还物理显存；没有 GPU 数据的资源自然不涉及这一列。上述卸载操作也不会删除磁盘上的 AB 文件或下载缓存。
-例如，LoadFromMemory(data) 使用的 data 是托管数组。卸载包负责释放 Unity 侧的包数据；调用方不再持有 data 后，数组才具备被 GC 回收的条件。这是两笔独立的内存，不能只调用一次 Unload 就认为全部清完。
-因此，清理通常分成两个责任：先按资源生命周期释放 Native 对象及相关 GPU 资源，再解除不需要的托管持有关系，让 GC 回收包装和业务对象。解除引用可以先做，但解除引用本身不等于已经释放 Native 或 GPU 数据。
-将清理安排在场景切换的 Loading 阶段UnloadUnusedAssets() 属于开销可能较大的集中清理操作，建议安排在场景切换的 Loading 界面中执行。 它虽然返回 AsyncOperation，但不意味着所有工作都在后台执行，也不保证每帧的耗时足够小。在正常游玩、镜头运动或 UI 动画期间调用，可能让主线程超过单帧预算，造成掉帧或明显卡顿。
-推荐顺序是：先显示 Loading 界面并让它至少完成一帧显示，再卸载旧场景或销毁旧实例、清除不需要的缓存引用，等待销毁完成后执行清理，最后继续新场景的加载流程。若新旧场景共享资源，应先确定需要保留的资源由常驻持有者引用，避免刚清理完又重新加载。
-Loading 界面用于承接这段等待，并不能消除清理成本；其中的转圈动画或进度条也可能短暂停顿。不要在每次 Release、关闭小弹窗或每隔几秒时调用，实际耗时应在目标设备上通过 Profiler 确认。
-下面保留界面退出的简化示例：假设包已通过 Unload(false) 卸载，调用前 Loading 界面已经显示，且负责执行协程的组件在清理期间保持存活。
-using System.Collections;using UnityEngine;public sealed class PanelResourceOwner : MonoBehaviour&#123;    private GameObject panelInstance;    private Texture2D cachedTexture;    public IEnumerator CloseAndCleanup()    &#123;        if (panelInstance != null)            Destroy(panelInstance);        panelInstance = null;        cachedTexture = null;        // 其他缓存、材质或组件若仍引用资源，也需要先解除持有。        // Destroy 延迟执行，留出时间让实例完成销毁。        yield return null;        // 在 Loading 阶段等待集中清理完成；异步接口仍可能产生耗时峰值。        yield return Resources.UnloadUnusedAssets();    &#125;&#125;
-
-示例中的 Destroy 负责结束界面实例的 Native 生命周期，字段设为 null 负责解除托管引用，UnloadUnusedAssets() 则清理已无使用者的资源 Native 数据及相关 GPU 资源。三步处理的是不同的对象或存储部分。
-这里没有紧接着调用 GC.Collect()。是否主动触发托管 GC，需要根据项目的托管分配和卡顿情况单独判断，并不是资源清理的固定步骤。
-清理完成后，再结束 Loading 阶段、恢复正常交互。是否在每次场景切换都执行，应结合内存峰值与目标设备耗时决定，避免没有回收收益的频繁扫描。
-7. 将持有关系落实到管理器工程上常见的做法，是统一管理包及其依赖，复用已打开的包，在确认没有使用者后调用 Unload(true)。
-下面只展示包层计数的基本逻辑：
-using System;using System.Collections.Generic;using UnityEngine;public sealed class BundleRefCounter&#123;    private sealed class Entry    &#123;        public AssetBundle Bundle;        public int RefCount;    &#125;    private readonly Dictionary&lt;string, Entry&gt; entries =        new Dictionary&lt;string, Entry&gt;();    // 在 Unity 主线程调用。bundleId 由调用方统一，避免路径别名。    public AssetBundle Acquire(string bundleId, string path)    &#123;        if (entries.TryGetValue(bundleId, out Entry entry))        &#123;            entry.RefCount++;            return entry.Bundle;        &#125;        AssetBundle bundle = AssetBundle.LoadFromFile(path);        if (bundle == null)            throw new InvalidOperationException($&quot;加载 AB 包失败：&#123;path&#125;&quot;);        entries.Add(bundleId, new Entry        &#123;            Bundle = bundle,            RefCount = 1        &#125;);        return bundle;    &#125;    public void Release(string bundleId)    &#123;        if (!entries.TryGetValue(bundleId, out Entry entry))            throw new InvalidOperationException($&quot;未持有 AB 包：&#123;bundleId&#125;&quot;);        entry.RefCount--;        if (entry.RefCount &gt; 0)            return;        entry.Bundle.Unload(true);        entries.Remove(bundleId);    &#125;&#125;
-
-这段代码本身并不知道场景里还有谁在使用纹理。计数是否可靠，取决于调用方是否遵守约定：一次 Acquire 所代表的持有期，必须覆盖相关资源的整个使用期。
-例如，加载 Prefab 并生成角色后，不能因为“加载结束了”就立即 Release。角色实例、对象池或缓存仍可能引用包里的共享资源，必须等这些使用者都退出后再归还持有权。调用 Destroy 的对象也可能要到帧末才真正销毁，释放顺序需要考虑这一点。
-实际管理器还需要处理几个问题：
-
-依赖包的持有关系。 依赖链沿用前文的加载流程；这里还需要让每个使用者持有相应依赖，直到使用结束，防止共享材质、Shader 或纹理被提前卸载。
-异步请求合并。 多个请求同时加载同一个包时，应共享进行中的任务；加载失败或取消时，要正确回滚计数。
-资源缓存与包状态一致。 缓存中的资源不能在所属包已经 Unload(true) 后继续被当作有效对象返回。
-
-引用计数不是唯一方案。生命周期边界清晰的项目，也可以在关卡退出后统一卸载该关卡独占的包。无论采用哪种方式，最终都需要能回答同一个问题：这个包里的资源，现在还有谁在用？
-四、结果验证：确认副本不再累积，使用中的资源仍有效管理策略调整后，需要验证的是资源生命周期是否符合预期，而不只是某一帧的进程内存数值。
-对于角色预览界面，可以在目标设备的 Player 中，记录打开前、打开后、关闭清理后的 Memory Profiler 快照，再重复若干次相同操作。
-
-
-
-验证场景
-应观察到的结果
-
-
-
-同时存在多个使用者
-释放其中一个后，其余对象仍能正常显示，共享资源保持有效
-
-
-最后一个使用者退出
-确认销毁完成、缓存清除后，相关资源能够按策略卸载
-
-
-反复打开和关闭界面
-同名纹理、Mesh、材质的实例数不持续逐轮增加；允许策略明确的缓存保留
-
-
-执行 UnloadUnusedAssets()
-未使用资源得到清理，仍被有效使用者持有的资源保留
-
-
-主包释放、其他对象仍使用依赖包
-共享依赖保持有效，直到最后一个持有者退出
-
-
-这里列出的是验证标准，并非项目实测数据。具体节省多少内存、清理耗时多长，需要结合资源规模、Unity 版本与目标设备测量。
-验证时也应分开看 Native 资源数量与占用、Managed 包装及业务容器的占用，以及图形内存。Native 资源已释放但包装仍被静态集合引用，和包装已经回收但共享资源仍在使用，是两种不同情况。
-如果资源实例数仍然上涨，优先检查重复加载与旧缓存；如果资源无法回收，检查对象池、静态字段和存活组件的引用。如果对象数量已经恢复，而进程内存没有立即下降，再分析 Unity 分配器保留内存、尚未回收的托管包装，以及 GPU 侧延迟释放等因素。
-回到最初的预览界面：打开包、加载 Prefab、创建角色、销毁角色、卸载资源，是需要衔接的几个步骤。明确每一步的持有者和结束条件，才能同时避免提前卸载与重复副本。Unload(true)、Unload(false) 和 UnloadUnusedAssets() 也就各自有了明确的使用位置。
-参考资料
-前文：Unity-AssetBundle结构解析
-
-以下链接以 Unity 2022.3 文档为主。不同版本和平台的底层实现可能有所变化，具体占用与耗时应以目标设备实测为准。
-
-Using AssetBundles Natively
-
-Loading texture and mesh data
-
-Texture.isReadable
-
-AssetBundle.Unload
-
-UnityEngine.Object.operator &#x3D;&#x3D;
-
-Resources.UnloadAsset
-
-Resources.UnloadUnusedAssets
-
-Managed memory：GC 与 Native 资源回收的区别
-
-
-]]></content>
-      <tags>
-        <tag>Unity-AssetBunde</tag>
-      </tags>
-  </entry>
-  <entry>
-    <title>Unity的动态图集实现</title>
-    <url>/posts/71da87fc.html</url>
-    <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
-性能优化测试效果未使用动态图集，2张图4个Draw Call。使用动态图集，2张图3个Drwa Call，图越多解决越多。
-动态图集原理动态图集的核心原理为：在运行时维护一张较大的纹理区域，在运行时动态地往纹理区域内添加或移除，现实上直接把纹理区域指定给RawIamge的texture然后设置其UV Rect即可。由于同时渲染的icon数量往往远远小于实际icon的资源数量，因此通常一张1024或者2048大小的动态图集即可以满足大多数的游戏需求。该方法的好处在于，内存在可控范围，并且icon可以共享纹理从而省draw call。下面详细介绍动态图集实现的技术细节。
-二维装箱算法因为放入的每张图片大小不一，所以高效的寻找图片在纹理区域中的位置，从而打到最大空间利用，是动态图集实现最为核心的问题。对于区域的增删查改，可以抽象成一个二维空间装箱操作，算法上有比较多的实现，有兴趣的可以了解这篇文章概述二维空间uv装箱算法：Shelf、Guillotine、MAXRECTS、Skyline。目前的几个算法都是在不重叠的前提下，尽可能大地利用空间，这是一个NP-hard问题，因此没有有效的算法可以解决所有情况。我这里选用的就是Max-Rect的BSSF最短边匹配优先。
-public IntRect Insert(int w, int h)&#123;    // 1. 找最佳空闲区域（最短边匹配优先 BSSF）    int bestIdx = -1;    int bestShort = int.MaxValue;    for (int i = 0; i &lt; m_freeRects.Count; i++)    &#123;        var free = m_freeRects[i];        if (w &lt;= free.width &amp;&amp; h &lt;= free.height)        &#123;            int leftover = Mathf.Min(free.width - w, free.height - h);            if (leftover &lt; bestShort)            &#123;                bestShort = leftover;                bestIdx = i;            &#125;        &#125;    &#125;    if (bestIdx &lt; 0) return null;    // 2. 放置    var best = m_freeRects[bestIdx];    var placed = new IntRect(best.x, best.y, w, h);    // 3. 裁剪所有重叠的空闲矩形    for (int i = m_freeRects.Count - 1; i &gt;= 0; i--)    &#123;        if (Overlaps(placed, m_freeRects[i]))        &#123;            SplitFreeRect(m_freeRects[i], placed);            m_freeRects.RemoveAt(i);        &#125;    &#125;    // 4. 去除冗余    RemoveRedundant();    return placed;&#125;/// &lt;summary&gt;/// 回收（释放）一个已放置的矩形区域，使其重新可用/// &lt;/summary&gt;/// &lt;param name=&quot;rect&quot;&gt;之前 Insert 返回的矩形&lt;/param&gt;public void Recycle(IntRect rect)&#123;    if (rect == null) return;    // 1. 边界校验    if (rect.x &lt; 0 || rect.y &lt; 0 || rect.right &gt; m_width || rect.top &gt; m_height)        return;    if (rect.width &lt;= 0 || rect.height &lt;= 0)        return;    // 2. 将释放区域加入空闲列表    m_freeRects.Add(new IntRect(rect.x, rect.y, rect.width, rect.height));    // 3. 合并空闲矩形    MergeFreeRects();    // 4. 去除冗余    RemoveRedundant();&#125;
-
-图片拷贝的API选择通过装箱算法知道了图片的位置和区域，第二个问题就是如何高效地把图片拷贝到对于的纹理中。在Unity中纹理的拷贝有两种方式：Graphics.CopyTexture和Texture.Get&#x2F;SetPixels
-Graphics.CopyTexture优点：1.首先第一个就是它是从GPU的显存到显存的直接拷贝，效率非常高。2.不需要勾选texture的read&#x2F;write enabled。由于是直接的显存拷贝，因此并不需要在系统内存里再存储一份texture数据。缺点：1.底层调用OpenGL接口glCopyImageSubData。该接口要求OpenGL4.3以上或者GL ES3.2以上才能支持。
-Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如下图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
-因为Texture.Get&#x2F;SetPixels有诸多的性能问题，Graphics.CopyTexture仅有一个支持API版本问题，并且对应的OpenGL4.3和GL ES3.2，为别IOS8（Iphone 5S）和Android 7.0(2016年发布)。已经是10年前的机型了，所以这里我直接选择了Graphics.CopyTexture。
-动态图集初始大小和区域满后的处理图集的初始大小可能纠结的只有初始太大，导致利用率低，这个根据项目实际使用情况分配就行了，建议初始大小设置成1024*1024。但是一张图如果放满了就有两种处理办法：纹理扩容和多张纹理。下面分类讨论这两种实现。
-纹理扩容图片扩容需要做3件事：1、开辟一张更大的纹理，把原纹理拷贝到大纹理中。2、更新所有图片的UV区域信息。3、更新场景中存在的所有RawIamge组件的UV Rect信息。这个方案的第二、第三步都是O(n)级别的复杂度，并且随着纹理的扩大n也越大，越扩容性能消耗越大。
-多张纹理多张纹理则是新建一张大小一致的纹理，这种做法不需要更新图片UV区域。在代码层面就要维护一个图片数组，每次有新图要加入时从数组中遍历得到一个空闲的纹理加入。同时因为提供的纹理不同，所以会多一些Draw Call的开销。
-综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
-代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
-项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
 ]]></content>
   </entry>
   <entry>
@@ -1065,6 +816,554 @@ GetAsyncOnTriggerEnterTrigger()
 ]]></content>
   </entry>
   <entry>
+    <title>Unity-AssetBundle分包策略</title>
+    <url>/posts/9b7c4e21.html</url>
+    <content><![CDATA[AssetBundle 分包策略：哪些资源应该放进同一个包前两篇《Unity-AssetBundle结构解析》和《Unity-AssetBundle加载与卸载》，分别讨论了 AB 文件内部的组织方式，以及资源加载后由谁持有、什么时候释放。
+这一篇讨论构建时的问题：哪些资源应该放进同一个包？
+一般项目会先按资源类型划分文件夹，把动画、纹理、预制体、材质、配置和字体分别存放，方便查找和日常管理：
+Assets/Res/├── Animations/├── Textures/├── Prefabs/├── Materials/├── Configs/└── Fonts/
+
+如果直接把每个类型文件夹打成一个包，打包规则会很简单：Animations 对应一个动画包，Textures 对应一个纹理包，Prefabs 对应一个预制体包。
+但随着项目资源增加，这些包也会越来越大。角色、战斗、场景和界面的纹理都可能进入同一个纹理包，各个玩法的预制体也可能进入同一个预制体包。文件夹按类型整理得很清楚，包内却混合了使用范围完全不同的资源。 这种直接按类型目录打包的方式，就会带来大包的问题。
+一、大、小包的问题1. 大包的问题：下载、更新和生命周期相互牵连以整个 Textures 目录打成一个包为例，原本分别用于角色、战斗、场景和界面的纹理被绑在了一起，下载、更新和整包回收也因此相互牵连。
+在常见的“下载完整文件、校验、落盘后加载”的流程里，首次进入一场战斗前，需要先准备相关包。如果当前角色的贴图位于全项目的纹理大包中，用户可能为了这一小部分资源下载整个大包，首次进入的等待就被无关内容拉长了。
+更新也存在类似问题。在以完整 Bundle 为更新单位、没有二进制差分的方案中，只要包内容发生变化，客户端通常就需要下载新版本整包。 如果经常替换的活动图片与长期稳定的场景贴图都在纹理包中，仅修改一张活动图片，就可能让玩家把场景贴图所在的大文件一起重新下载。改动小，下载量却很大。
+这里要区分“重新构建”与“产生新下载”：执行了构建，并不代表所有输出文件都变化；客户端下载哪些文件，取决于清单、文件标识和内容校验规则。依赖包变化是否进一步影响引用它的包，也要检查具体构建管线的产物，不能一概而论。
+生命周期的牵连则发生在运行时。如果常驻界面的纹理与某个关卡的独占贴图都在纹理包中，关卡退出以后，界面仍然在使用该包。采用整包引用计数和 Unload(true) 回收策略时，就无法安全地把这个包整体卸载。此前已加载、且没有被其他机制回收的关卡贴图，可能因此保留得更久。包被各处依赖，整包回收就要等到最后一个使用者退出。
+但不能把这种情况简化成“大包一打开，所有资源都进入内存，而且全部无法释放”。上一篇已经说明：
+
+打开包与加载具体资源是两步，包内未使用的资源不一定被实例化。
+LZ4 支持按块解压；LZMA 的解压行为不同，首次加载成本还取决于加载 API 和缓存状态。
+包管理数据、已加载的 Native 资源和 GPU 数据有不同的生命周期。
+Unload(false) 可以保留已加载资源并卸载包，但后续复用和回收需要另外管理。
+
+因此，大包的主要风险是准备成本扩大，以及下载、更新和整包回收的边界过粗，并非文件体积直接等于常驻内存。
+2. 碎包的问题：固定开销被重复支付既然一个类型目录打一个包太大，那把目录里的每个资源分别打包呢？这就走向了另一个极端：每张图片、每个材质、每个动画都独立成包。
+此时，加载一个角色就需要准备多个包，一场包含多种角色、怪物和技能特效的战斗，可能需要打开几十甚至上百个包。每个包都有文件访问、读取管理数据和维护状态的成本；远端缓存未命中时，还会增加请求、校验和调度工作。大量小包也会扩大清单、依赖图和加载管理器的维护规模。
+异步加载、缓存和并发请求能够缓解等待，但不能消除这些固定开销。另一方面，包多也不代表每个包都一定触发一次物理磁盘随机读取，实际行为还受操作系统缓存、存储介质和加载实现影响。
+这些资源如果每次都一起加载，拆分就未必减少实际下载或内存占用，却实实在在增加了访问次数。大包的问题是为少量需求付出过多成本，小包的问题是为同一批需求反复支付固定开销。
+二、设计目标：控制牵连范围，也控制访问开销大包与小包的缺点正好形成矛盾：合并能减少包数量，却扩大了下载、更新和整包回收的牵连范围；拆分能缩小这些范围，却增加了访问与管理开销。 因此，分包不能只追求包少，也不能只追求包小。
+需要达到的目标可以归纳为四点：
+
+首次加载少等待。 进入一个关卡或加载一个角色时，尽量只准备当前需要的内容，避免被无关资源拖慢。
+结束使用后能释放。 尽量避免常驻资源与临时资源共包，让关卡、角色等独占资源有清晰的整包回收边界。
+小改动少下载。 高频更新的配置或活动资源发生变化时，尽量不牵连大块稳定内容。
+一次使用少开包。 总是一起使用的小资源适当合并，减少重复的文件访问、校验和加载调度开销。
+
+前面三点要求缩小包的牵连范围，第四点又要求避免拆得过碎。接下来就需要寻找合适的资源边界，让拆分与合并分别服务于这些目标。
+三、设计思路：按使用、释放和更新范围确定边界要同时满足这些目标，首先要判断资源之间的关系，而不只是比较文件大小：
+
+
+
+判断维度
+需要回答的问题
+对包边界的影响
+
+
+
+使用时机
+是否经常在同一次操作中被使用？
+经常一起使用的资源，适合先归为一组
+
+
+释放时机
+是否由相同业务持有，并在相近时机结束使用？
+生命周期相近，便于整包回收
+
+
+更新节奏
+是否通常随同一功能或活动一起变化？
+高频变化内容应与稳定内容隔离
+
+
+共享范围
+是某个功能独占，还是多个功能共同依赖？
+共享资源需要明确归属和使用者
+
+
+一个实用的起点是：同一功能内，经常一起加载、一起结束使用、一起更新的资源，优先放进同一个包。
+这几个条件可能冲突。例如，某个玩法的配置与战斗场景总是一起使用，但活动参数经常调整，场景模型和贴图却长期稳定。此时就值得为了缩小更新范围，将活动配置与场景资源分开，再用测量确认新增包的成本是否可接受。
+据此，可以形成一套基本思路：以功能和使用范围作为初始分组，按生命周期划清释放边界，按更新频率隔离变化内容，再合并其中总是一起使用的小资源。共享依赖则单独检查，防止它把已经拆开的内容重新绑成一个大包。
+四、分包方案：在类型目录下确定合理的包边界开头的类型目录可以继续保留，用于资源查找和日常管理。资源较多时，也可以在类型目录下按用途细分，例如 Textures/Characters、Textures/Levels。
+需要调整的是直接按整个类型目录打包的规则。文件夹分类不要求与 AB 包一一对应。 同一类型的资源可以分到不同包，不同类型的资源也可以因为属于同一功能而放进同一个包。具体边界再结合使用范围、更新频率和释放时机判断。
+1. 按功能分组，减少无关内容的加载与保留为了缩小首次准备的资源范围，并让独占资源能随功能退出而释放，可以先按角色、关卡、玩法等使用范围分组。
+例如，角色独占资源、关卡独占资源和基础配置可以分别归组：
+角色独占资源├── Prefabs/Characters/Knight 中的预制体与模型├── Textures/Characters/Knight 中的贴图└── Animations/Characters/Knight 中的动画关卡独占资源├── Prefabs/Levels/Forest 中的场景物件└── Textures/Levels/Forest 中的环境贴图配置资源├── Configs/Core 中的基础配置└── Configs/Activities 中的活动配置
+
+骑士专用的 Prefab、Mesh、材质、贴图和基础动画，先归入 character.knight.bundle；森林关卡独占的场景资源归入 level.forest.bundle。这些是初始分组，最终归属由打包配置表达，不必强制一个文件夹对应一个包。
+“一个角色或一个关卡先作为一组”适合用作起点，但还要考虑实际行为：
+
+角色的基础模型、专用材质和必用动画，通常适合共包。
+可选皮肤、特殊形态和很少触发的大型技能特效，可以独立，避免加载角色就必须准备全部内容。
+多个关卡共同使用的怪物和战斗特效，应另行处理共享归属。
+大场景可以按进入区域拆分，避免为了出生点附近的内容准备整个地图。
+配置可按基础系统、战斗玩法和活动划分，但若运行时始终一次读取全部配置，也没有必要仅因表多就拆成大量小包。
+
+独立界面也可以采用相同的判断方式。分组应跟随真实的使用与释放范围，而不只是资源类型或文件数量。
+2. 按更新频率拆分，避免小改动牵连大资源为了减少小改动带来的下载量，活动资源适合与稳定资源隔离，还应该避免不同活动之间互相牵连。
+例如，一个限时战斗活动可以进一步分为：
+
+
+
+包
+主要内容
+拆分依据
+
+
+
+activity.autumn.config.bundle
+关卡参数、奖励和活动规则配置
+调整频繁，适合独立更新
+
+
+activity.autumn.level.bundle
+活动场景模型和环境贴图
+内容相对稳定，进入关卡时使用
+
+
+activity.autumn.boss.bundle
+首领模型、动画和专用特效
+进入首领战时才需要
+
+
+这也不是要求每个活动固定拆成三个包。如果活动很小，所有内容都随版本一起替换，合并成一个活动包可能更合适。
+同样，活动配置与基础配置也不一定适合共包：两者虽然都是配置，更新节奏和使用范围却可能不同。如果配置输出为 AB 包内的 TextAsset 或 ScriptableObject，可以采用这样的拆分；如果使用独立配置文件，则应在对应的文件更新策略中处理。
+字体通常比活动资源稳定，适合独立管理，但新增语言、字形或修改字体图集时，它仍然可能更新。分包应依据实际变更记录，而不是假定某一类型永远不变。
+3. 检查共享依赖，避免重复与不必要的牵连只分配入口 Prefab 的包名，还不足以确定最终内容。需要继续检查它们引用的材质、纹理、字体和 Shader。
+在原生 AssetBundle 构建中，如果两个包引用同一个资源，而该资源没有明确分配到独立包，它可能作为隐式依赖被分别包含，导致重复打包。不同框架可能自动提取共享依赖，最终仍应以构建报告为准。[2]
+例如，两个关卡都会出现骑士与哥布林，而它们的材质又依赖同一份 Shader 资源，可以明确整理为：
+
+    flowchart TD
+    Forest[&quot;森林关卡包&quot;] --&gt; Knight[&quot;骑士包&quot;]
+    Dungeon[&quot;地牢关卡包&quot;] --&gt; Knight
+    Forest --&gt; Goblin[&quot;哥布林包&quot;]
+    Dungeon --&gt; Goblin
+    Knight --&gt; Shader[&quot;共享 Shader 包&quot;]
+    Goblin --&gt; Shader
+  
+
+图中的箭头表示构建后确认的序列化依赖关系。如果角色由刷怪配置中的地址指定，再在运行时单独加载，它属于业务加载关系，需要另外记录，不能指望构建清单自动发现。
+共享资源提取也有代价。把一切都提取到一个 shared.bundle，可能重新形成“任何模块都依赖，退出任何模块都无法整包卸载”的大包。
+因此，共享包还要按用途和生命周期划分。例如，常用字体、基础 UI 组件、战斗共享特效，可以属于不同的共享包。不要因为都被多个地方使用，就把它们放在一起。
+可以采用这样的判断顺序：
+
+只有一个功能使用的资源，优先跟随该功能。
+多个功能使用、体积明显或对象身份需要一致的资源，优先明确共享归属。
+很小、稳定且互不同时使用的资源，可评估允许少量重复，换取更少的跨包依赖。
+允许重复必须是有记录的取舍，并核查下载体积和运行时副本，不能由隐式依赖偶然决定。
+
+尤其要避免让地牢关卡依赖森林关卡包，只为了取得一个共用怪物。应将怪物移到合理的共享范围，而不是把森林关卡整个变成地牢的依赖。
+依赖方向也应尽量清晰：业务包依赖共享包，共享包不反过来依赖具体业务。发现循环依赖时，要检查是否可以重新归属资源、提取共同部分，或合并本来就无法独立使用的内容。
+4. 图集先按使用范围组织，再决定包归属图集不能仅凭“都是小图标”就合并成一个全局大图集。
+图集中的 Sprite 会共享底层纹理页。加载某个 Sprite 时，通常也需要它对应的图集页，因此图集会让原本独立的小图在加载和内存占用上产生关联。一个 SpriteAtlas 也可能包含多张纹理页，不能一律理解为“一张图用了，整个 Atlas 所有页都必然加载”。
+可以先按用途组织：背包常用图标一组、商城专用图标一组、活动图片一组，少量全局基础图标单独组织。活动横幅尤其不宜混进稳定的基础 UI 图集，否则修改横幅可能导致图集纹理和相关包一起变化。
+当某个界面的图集只有它自己使用，并且更新、释放时机一致时，可以与该界面共包；被多个界面使用时，再考虑独立共享包。没有必要固定成“每个图集必有独立包”。
+SpriteAtlas 的打包模式、Include in Build 设置和构建管线会影响最终依赖与重复情况。不能只检查源目录，还要确认构建后图集纹理究竟进入了哪些包。
+5. 合并零散小资源，控制访问与管理开销为了避免包拆得过碎，可以适当合并零散小资源。但“零散”只是文件组织上的描述，不是足够的分包理由，合并仍然需要限定使用范围。
+某个关卡专用的几段机关动画、几张小贴图和几个小材质，如果总是随关卡一起使用，可以合进关卡包。同一玩法中总是一起读取、更新节奏一致的小配置，也可以合成一个配置包。多个战斗玩法共用的小特效，则可以归入战斗范围内的共享包。
+反过来，把登录提示图、战斗音效、活动图标和过场材质全部塞进 misc.bundle，只会制造新的耦合。
+合并前至少检查三件事：使用范围是否接近，更新节奏是否一致，是否会让一个长生命周期资源拖住大量短生命周期资源。
+6. 最后用体积和访问开销修正粒度完成逻辑分组后，再看实际构建产物的大小、数量和依赖关系。
+如果一个功能包明显偏大，优先寻找有业务意义的切分点：按角色、关卡区域、语言、可选高清资源或进入阶段拆分，而不是直接按固定大小机械切块。
+如果一次进入战斗、加载角色或读取配置要访问大量微小包，就优先合并其中总是一起请求、释放时机接近、更新节奏一致的部分。
+不建议将“每包固定 5 MB”之类数字当作通用标准。压缩后的文件大小影响下载，但不能直接反映资源加载后的内存；同样大小的配置、纹理和音频，也可能有完全不同的读取与使用方式。
+可以为项目设定大包和碎包的检查阈值，但阈值应触发分析，而不是自动决定结果。先解决业务边界，再用目标设备上的数据修正粒度。
+7. 把规则沉淀到构建流程当初始方案稳定后，可以让构建报告持续回答这些问题：
+
+哪些资源被重复包含，重复了多少字节？
+哪些包有大量反向依赖，是否混入了无关功能？
+哪些入口需要准备很多包，依赖链是否过深？
+哪些高频更新资源与大块稳定内容共包？
+哪些包体积或依赖关系相比上个版本发生了异常变化？
+
+构建环境也应保持可追踪。Unity 版本、导入设置、压缩方式或构建配置变化，都可能扩大产物变化范围。分包只能降低合理边界内的牵连，不能保证任意构建之间都只有被编辑的资源发生变化。
+五、最终落地：目录怎么细分，具体打成哪些包前面的判断可以收敛为一个默认方案：保留类型目录，在类型目录下按角色、关卡、功能和更新范围细分；将选定的子目录作为打包单元，每个单元默认一个包。总是一起使用的小目录，可以在打包配置中明确合并到同一个包。
+因此，Textures 下确实需要继续细分，但不是把所有层级的文件夹各打一个包，也不是无条件把每个最深层目录打一个包。需要明确选定打包边界：选中 Textures/Characters/Knight 作为单元后，其内部子目录默认一起归入这个单元，不再自动生成额外包；需要独立更新的内容则提前移出这个单元。
+1. 最终目录示例假设骑士的基础模型、贴图、材质和动画体积适中、总是一起使用，森林关卡的贴图较大，活动图片更新频繁，可以整理为：
+Assets/Res/├── Animations/│   └── Characters/Knight/├── Textures/│   ├── Characters/Knight/│   ├── Levels/Forest/│   ├── UI/Inventory/│   └── Activities/Autumn/Banners/├── Prefabs/│   ├── Characters/Knight/│   ├── Levels/Forest/│   ├── UI/Inventory/│   └── Battle/SharedEffects/├── Materials/│   ├── Characters/Knight/│   └── Battle/SharedEffects/├── Configs/│   ├── Core/│   ├── Battle/│   └── Activities/Autumn/└── Fonts/    ├── Common/    └── Languages/Japanese/
+
+Characters、Levels、Activities 等中间目录只用于分类，不直接打包。类型根目录不放待打包的散文件；新增资源必须先确定归属，再进入相应的打包单元。
+2. 目录与最终包的对应关系下表中的路径均相对于 Assets/Res/。包名用于说明归属，实际文件名可以由构建流程生成。
+
+
+
+目录范围
+最终包
+本例采用的规则
+后续资源添加与调整
+
+
+
+Prefabs/Characters/Knight/、Textures/Characters/Knight/、Materials/Characters/Knight/、Animations/Characters/Knight/
+character.knight.bundle
+四个目录明确合并成一个角色包，专用资源随角色一起加载和释放
+骑士基础资源加入对应目录，沿用同一包；新角色建立独立目录和包，可选皮肤另设目录和包
+
+
+Prefabs/Levels/Forest/
+level.forest.prefabs.bundle
+场景物件单独一个包
+同一区域物件加入现有目录；新关卡另建目录和包；关卡过大时按区域拆分，替换原来的整体打包范围
+
+
+Textures/Levels/Forest/
+level.forest.textures.bundle
+较大的关卡贴图目录独立成包，不与其他关卡贴图混合
+普通新增贴图沿用该包；需分区加载时，按 Entrance、BossArea 等子目录分别打包，取消原整体目录的打包范围
+
+
+Prefabs/UI/Inventory/、Textures/UI/Inventory/
+ui.inventory.bundle
+本例假设界面较小且资源独占，两个目录合并成一个界面包
+新增独占资源加入对应目录；独立界面另建包；可选高清预览等大资源单独拆出
+
+
+Textures/Activities/Autumn/Banners/
+activity.autumn.banners.bundle
+高频更新图片单独一个包，与稳定贴图隔离
+同批替换图片沿用该包；其他活动另建目录和包；需要单独轮换的大图再拆为独立单元
+
+
+Prefabs/Battle/SharedEffects/、Materials/Battle/SharedEffects/
+battle.shared.effects.bundle
+本例中体积较小、共同使用的特效与专用材质合并
+同范围的小特效继续加入；大型或仅特定玩法使用的特效另建包，避免共享包持续膨胀
+
+
+Configs/Core/
+config.core.bundle
+一组基础配置一个包，不按每张表拆包
+同加载、同更新的基础配置继续加入；高频变化或仅特定功能使用的配置移至独立目录和包
+
+
+Configs/Battle/
+config.battle.bundle
+战斗配置单独一个包
+始终一起读取的战斗表继续共包；按需读取且规模较大的玩法配置再按玩法拆分
+
+
+Configs/Activities/Autumn/
+config.activity.autumn.bundle
+当前活动配置一个包，避免牵连基础配置与其他活动
+当前活动配置沿用该包；新活动建立独立目录和包，不并入基础配置包
+
+
+Fonts/Common/
+font.common.bundle
+常用字体独立一个包，作为共享依赖
+必需的常用字体继续加入；可选语言或特定功能字体另建目录和包
+
+
+Fonts/Languages/Japanese/
+font.japanese.bundle
+可选语言字体独立一个包，按语言需求准备
+日语字体沿用该包；新增语言建立各自目录和包
+
+
+本例的配置假定为需要进入 AB 的 TextAsset 或 ScriptableObject。角色模型与 Mesh 也假定由角色目录中的源资产提供；实际项目若另设 Models 目录，应将对应目录加入角色包的归属配置。
+这些目录划分不会自动产生跨目录合包。四个骑士目录要生成同一个包，必须在构建配置中把它们明确映射到同一个 Bundle。 如果只是对每个目录分别打包，它们仍然会生成四个包。
+每份资源应有唯一的最终包归属。被角色、特效或关卡共同引用的材质、纹理和 Shader，要先识别为共享依赖，再明确其归属，不能为了凑齐目录内容而重复收进多个包。图集纹理的实际归属还要结合前文的图集规则检查。
+六、怎么判断拆分与合并是否值得分包之后，需要回答的仍然是开头的矛盾：拆小后节省的下载、更新和资源保留成本，是否值得新增的文件访问与包管理开销；合并后减少的访问次数，又是否以过多无关内容为代价。
+这些是设计预期，是否有效，需要构建对比和目标设备测量。下面的例子只说明验证方法，不代表实测成绩。
+1. 同时观察入口包及其全部依赖假设关卡入口包只有 1 MB，但它依赖一个 100 MB 的公共包。若本地缓存都未命中，且两个包都需要完整下载，那么首次进入仍需准备约 101 MB，而不是 1 MB。
+评估一个功能时，应统计“入口包与递归依赖包的去重集合”。再根据本地缓存和已经加载的包，计算本次真正新增的下载与加载成本。仅靠静态依赖清单仍不足以涵盖运行时按地址加载的可选资源，需要结合实际请求记录补充。
+2. 比较调整前后的同一组操作
+
+
+验证操作
+记录内容
+判断依据
+
+
+
+无本地下载缓存，首次进入战斗关卡
+新增下载字节、请求数、从进入到可操作的耗时
+首次准备范围是否缩小，实际等待是否改善
+
+
+已有文件缓存，再次加载同一组角色
+打开包耗时、文件访问、资源加载和主线程峰值
+分包是否引入了过多固定开销
+
+
+基础系统仍运行，退出战斗关卡
+包持有关系、已加载资源及内存快照
+关卡独占资源是否按策略释放，常驻资源是否仍有效
+
+
+反复进入两个共享怪物的关卡
+包重载次数、资源副本、帧耗时
+是否产生卸载后立即重载的抖动
+
+
+一次读取玩法所需的多份配置
+访问包数、总耗时和加载次数
+配置是否拆得过碎，合并是否更划算
+
+
+仅修改活动配置，发布下一版
+变化包列表、实际新增下载量
+更新是否主要限制在预期范围
+
+
+检查共享材质、Shader 和战斗特效
+构建重复报告、运行时资源实例
+是否避免无意重复，实际归属是否符合设计
+
+
+运行时检查应在相同目标设备、相同构建配置和可比较的缓存条件下进行，并重复采样。Unity Profiler 用于分析加载和帧耗时，Memory Profiler 用于检查资源对象、占用及持有关系。不能只看退出关卡后进程内存是否立即下降。
+如果玩家连续进入的两个关卡都会使用同一种怪物，刚退出前一关就立即释放怪物包，可能导致下一关重新加载。此时可以保留有限时间的缓存，或在更大的业务阶段结束后释放。缓存策略与包边界需要配合，不能只靠继续拆包解决。
+3. 用一次小修改验证更新边界可以保留基线版本 A，仅修改一份活动奖励配置后构建版本 B，比较两个版本的清单、文件 Hash 和下载计划。
+假设配置原来与场景资源共处在 80 MB 的包内，拆分后位于 200 KB 的配置包内；在没有差分下载、且只有这个包变化的前提下，该次更新的资源文件下载量就从 80 MB 缩小到 200 KB。这里的数字是示意，不包含清单和协议等额外开销。
+如果修改一份配置却导致多个稳定包变化，应进一步检查引用关系、资源归属以及构建环境差异。验证的重点是解释实际变化的文件，而不只是确认分包配置里写了几个名字。
+实际落地时，可以先采用这样的顺序：按功能确定独占资源，按更新节奏隔离变化内容，按依赖关系处理共享资源，再在相近的使用与释放范围内合并小资源，最后用构建和运行数据调整粒度。
+决定哪些资源放进同一个包，最终是在判断：它们是否值得一起准备、是否适合一起保留，以及一次修改是否应该让它们一起更新。把本来就一起使用的小资源合并，把使用、释放和更新范围明显不同的内容拆开，才能同时控制大包的牵连与小包的开销。
+参考资料
+前文：Unity-AssetBundle结构解析
+前文：Unity-AssetBundle加载与卸载
+
+以下为 Unity 2022.3 官方文档。具体构建结果还需结合使用的构建管线、资源框架和平台检查。
+
+AssetBundle dependencies
+AssetBundle troubleshooting
+AssetBundle compression
+Using AssetBundles Natively
+Sprite Atlas
+
+]]></content>
+      <tags>
+        <tag>Unity-AssetBunde</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Unity-AssetBundle加载与卸载</title>
+    <url>/posts/38e927b7.html</url>
+    <content><![CDATA[AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。
+下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。
+一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。
+但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。
+这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一定会销毁此前加载的对象。
+二、管理目标：明确谁在使用，什么时候能释放这个场景需要解决的，不只是让内存下降，还包括保证资源在使用期间有效，以及避免下次打开界面时无意间再加载一份。
+具体可以归纳为三个目标：
+
+使用期间保持有效。 界面实例、对象池或其他系统仍在引用资源时，不能提前销毁资源。
+重复进入时可复用。 同一份逻辑资源仍然存活时，应有明确的复用或释放策略。
+退出后能够验证。 能够确认引用已经解除、对象得到回收，而不只是观察进程内存有没有立刻下降。
+
+要做到这些，需要先分清各个 API 实际处理的是哪一部分。
+三、处理过程：把加载、使用和回收串起来1. 先确定内存在哪里以本地 AB 包为例，加载过程及各部分的关系如下：
+
+    flowchart TD
+    D[&quot;磁盘：AB 文件&quot;]
+    B[&quot;Native：包管理结构与读取缓冲&quot;]
+    R[&quot;Native：资源对象与所需 CPU 数据&quot;]
+    MB[&quot;Managed：AssetBundle 包装&quot;]
+    MR[&quot;Managed：Texture2D、Mesh 等包装&quot;]
+    G[&quot;GPU：纹理、顶点与索引缓冲&quot;]
+
+    D --&gt;|LoadFromFile| B
+    MB -.-&gt;|引用底层包对象| B
+    B --&gt;|LoadAsset：从文件读取所需数据| R
+    MR -.-&gt;|引用底层资源对象| R
+    R --&gt;|图形数据上传| G
+  
+
+
+磁盘到 Native： LoadFromFile 建立包的访问入口；LoadAsset 再读取所需资源，创建 Native 对象及数据。打开包不等于全部资源都已加载。
+Managed 是脚本访问入口： 加载接口向 C# 提供相应包装对象；图中虚线表示引用关系，像素、顶点等大块数据不必经过托管堆再上传。
+需要 GPU 使用的数据才上传： 例如纹理像素、Mesh 顶点和索引。上传可能发生在加载期间或分帧进行，并非统一等到首次渲染；CPU 副本是否保留取决于 Read&#x2F;Write 等设置。[2][3]
+
+清理时也要分别处理：资源卸载负责 Native 对象及相关 GPU 资源，GC 负责不可达的托管包装和业务对象。 图中表示逻辑归属，统一内存设备上的 CPU 与 GPU 可能共享物理内存。
+2. 将打开包和加载资源分开处理先看两种常见的加载方式：
+// 先将整个文件读入托管数组，再交给 Unity。byte[] data = File.ReadAllBytes(path);AssetBundle memoryBundle = AssetBundle.LoadFromMemory(data);// 让 Unity 直接从文件加载。AssetBundle fileBundle = AssetBundle.LoadFromFile(path);
+
+使用第一种方式时，byte[] 本身就会占用一份托管内存，Unity 侧还需要加载包所需的内存。加载期间，两部分占用可能同时存在。实际峰值还受压缩格式和引擎实现影响，不能简单固定为“文件大小的两倍”。
+如果包已经在本地，通常优先使用 LoadFromFile 或 LoadFromFileAsync，省去先读取整个托管数组的过程。
+前文已经解释了包的按需读取与解压机制，这里只保留一个与内存管理有关的区别：LoadFromFile 返回的是包的访问入口，LoadAsset 返回的是具体资源对象。打开包不代表包内所有资源都已加载；卸载入口，也不必然销毁已经加载的对象。[1]
+3. 确认资源对象和 GPU 数据的加载过程Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(    &quot;assets/game/textures/warrior_diffuse.png&quot;);
+
+调用 LoadAsset 后，Unity 会创建对应的底层资源对象，并向 C# 返回 Texture2D 包装对象。下文默认相关依赖包已经准备好，依赖解析过程沿用前文，不再展开。
+纹理和 Mesh 还涉及 GPU 数据的上传。这里容易产生一个误解：认为 LoadAsset 只准备 CPU 数据，直到第一次渲染时才上传显存。
+实际并没有这样统一的时间界限。Unity 有同步和异步上传管线，数据可能在加载过程中就上传到 GPU，也可能通过缓冲区分帧传输。具体行为取决于资源设置、加载路径及平台，不能仅凭“还没有渲染过”判断显存占用。[2]
+Mesh.UploadMeshData(true) 可以提交 Mesh 数据，并释放脚本读取所需的 CPU 数据副本；这里释放的是 Native 侧的 CPU 数据，不是 C# 包装，GPU 数据仍然保留。它主要用于明确管理 Mesh 数据，并不是加载 AB 资源时必须补上的步骤。
+Read&#x2F;Write 保留的是什么纹理开启 Read/Write Enabled 后，Unity 会保留可供 CPU 访问的像素数据，以支持 GetPixels 等操作。这份数据会增加常驻内存开销。[3]
+如果纹理只用于渲染，通常应关闭该选项；如果运行时确实需要读取或修改像素，则需要保留。UI 图集、大尺寸贴图尤其值得检查。
+关闭 Read&#x2F;Write 能减少 CPU 副本的占用，但不宜把收益一概写成“总内存减半”。纹理格式、MipMap、流送设置、平台，以及对象自身的开销都会影响最终结果。
+4. 根据使用情况选择卸载方式bundle.Unload(unloadAllLoadedObjects: true);// 或bundle.Unload(unloadAllLoadedObjects: false);
+
+两种调用都会卸载包本身，使这个 AssetBundle 无法继续用于加载资源。区别在于，是否同时销毁此前从包中加载出来的对象。[4]
+Unload(true)：包和已加载资源一起卸载Unload(true) 会释放包自身的 Native 管理数据，并销毁属于这个包的已加载资源对象，释放它们的 Native 数据；纹理、Mesh 等对象对应的 GPU 资源也会进入图形系统的释放流程，即使场景中的其他对象仍在引用它们。
+这里的销毁主要针对引擎对象，不意味着 C# 托管包装已经被回收。包装对象仍由 GC 管理；只要业务代码还持有引用，它就可能继续占用托管堆空间。GPU 资源的实际释放也可能等待渲染任务或驱动处理完成。
+例如，从包里加载 Prefab 后调用 Instantiate，场景中的实例通常还在，但它引用的共享 Mesh、材质、纹理可能已被卸载，导致模型无法正常显示。粉红色通常指向 Shader 缺失、错误或不受支持，不能直接归因于“少了一张纹理”。
+底层对象销毁后，已有的 C# 变量不会自动被重新赋值。Unity 重载了 ==，会将底层对象已经失效的包装对象判为空：[5]
+Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(assetName);bundle.Unload(true);Debug.Log(texture == null);                 // trueDebug.Log(ReferenceEquals(texture, null));  // false：托管引用仍存在
+
+这也是判断 Unity 对象时，== null 与普通 C# 引用判空可能不一致的原因。对象失效后，访问需要底层对象的成员可能报错，并不意味着每次访问都会导致程序崩溃。
+Unload(false)：卸载包，保留已加载资源Unload(false) 释放的是包自身的 Native 管理数据和相关读取资源。已加载纹理、Mesh、材质的 Native 对象与数据，以及它们对应的 GPU 资源仍然保留，可以继续使用。
+它不会直接回收 AssetBundle、Texture2D 等 C# 包装，也不会释放调用方传给 LoadFromMemory 的托管 byte[]。这些托管对象都需要在不再可达后，由 GC 回收。
+但这些资源也不再由原来的包实例管理。后续重新打开同一个包，不会自动把旧资源重新关联回来。
+5. 处理重复加载留下的副本下面这段代码就可能产生两个独立的纹理对象：
+AssetBundle bundleA = AssetBundle.LoadFromFile(path);Texture2D textureA = bundleA.LoadAsset&lt;Texture2D&gt;(assetName);bundleA.Unload(false);AssetBundle bundleB = AssetBundle.LoadFromFile(path);Texture2D textureB = bundleB.LoadAsset&lt;Texture2D&gt;(assetName);
+
+第一次卸载时，textureA 被保留下来。第二次加载时，Unity 不会因为磁盘上的资源路径相同，就自动复用这份旧对象，而是可能创建新的 textureB。[1]
+如果旧纹理仍被 UI、材质、静态字段或资源缓存引用，两份对象就会同时存在。继续反复执行这个流程，资源占用便可能逐轮增加。
+不过，重复副本不一定就是永久泄漏。能否回收，要看资源是否还有使用者，以及是否执行了合适的卸载操作：
+
+对不再需要、且符合 API 限制的单个资源，可以使用 Resources.UnloadAsset。该接口不适用于 GameObject 或 Component。[6]
+清除相关引用后，可以在合适的时机调用 Resources.UnloadUnusedAssets()，清理 Unity 判断为未使用的资源。它有全局检查成本，通常安排在加载界面等能够接受开销的位置。
+
+重新加载包，再对新包调用 Unload(true)，并不能顺带销毁上一次 Unload(false) 留下的旧资源。
+6. 使用 UnloadUnusedAssets 做阶段性清理前面提到，Unload(false) 会留下已加载的资源。等使用者退出后，可以通过 Resources.UnloadUnusedAssets() 清理其中不再使用的部分。它也能处理其他加载路径留下的未使用资源，并不局限于 AB 包。
+这个接口清理的重点是未使用资源的 Native 对象及其数据，并让相应 GPU 资源进入释放流程。 它与 C# GC 是不同的回收机制：即使具体版本的执行过程中伴随托管 GC，也不能据此认为所有托管包装、数组和缓存容器都已回收。仍然可达的托管对象依然会保留。[8]
+“未使用”由谁判断这个接口不接收包名或资源列表。Unity 会检查 GameObject 层级、脚本组件及静态变量中的引用，判断哪些资源仍然可达。[7]
+从行为上，可以把这次清理理解成三个步骤：
+
+查找仍在使用的资源。 从上述引用入口出发，沿对象之间的引用关系，确定需要保留的资源。
+识别未使用资源。 将没有被这些引用关系保留的资源列入清理范围；它不是只检查刚关闭的界面或刚卸载的包。
+卸载资源。 销毁符合条件的 Native 资源对象、释放相关数据，并让对应 GPU 资源进入释放流程。
+
+这是便于理解的概括，并非对引擎内部具体算法和线程分工的保证。开销不仅来自最终释放了多少资源，也来自查找、遍历引用关系以及销毁对象的过程。 即使最后只回收少量内存，也可能已经付出了明显的检查成本。
+因此，界面关闭了，不代表界面用过的纹理就能回收。隐藏的 UI、对象池中的角色、静态字典里的资源缓存，都可能继续持有引用。调用这个接口不会替你清空这些缓存。
+还有一个细节：它不会像 C# GC 那样检查脚本执行栈。 仅被普通方法局部变量引用的资源，不能据此保证保留。需要跨越清理过程继续使用的资源，应由明确的持有者保存，例如存活组件的字段；协程局部变量可能被编译成状态机字段，也不宜一概当作普通栈变量理解。[7]
+各接口到底清理哪一层内存
+
+
+操作
+Native 内存
+GPU 内存
+Managed 托管内存
+
+
+
+bundle.Unload(false)
+释放包自身的管理数据和读取资源；保留已加载资源的 Native 数据
+保留已加载资源的 GPU 数据
+不直接回收包装或输入数组；不再可达后由 GC 回收
+
+
+bundle.Unload(true)
+释放包自身及属于它的已加载资源的 Native 数据
+对应资源进入释放流程
+不直接回收仍被持有的 C# 包装；不再可达后由 GC 回收
+
+
+Resources.UnloadAsset(asset)
+卸载指定资源的 Native 对象和数据，受资源类型限制
+对应资源进入释放流程
+不直接回收仍被持有的包装；不再可达后由 GC 回收
+
+
+Resources.UnloadUnusedAssets()
+清理 Unity 判断为未使用的资源的 Native 对象和数据
+被清理资源对应的 GPU 数据进入释放流程
+不能保证包装和业务对象立即回收；其托管内存仍取决于 GC 可达性及回收时机
+
+
+Object.Destroy(instance)
+按销毁规则释放指定实例及相关引擎对象；通常延迟执行，不会自动卸载共享纹理、材质等资源
+不会仅因销毁一个场景实例就释放其引用的共享资源
+C# 包装及脚本的托管部分在不再可达后由 GC 回收
+
+
+GC.Collect()
+不直接卸载 Unity 资源的 Native 对象
+不直接释放
+触发托管 GC，回收符合条件的不可达对象
+
+
+reference = null &#x2F; cache.Clear()
+不直接释放
+不直接释放
+解除引用；不立即回收对象，清空集合通常也保留其容量
+
+
+表中的 GPU 释放指生命周期上的释放请求，不保证调用返回时驱动已归还物理显存；没有 GPU 数据的资源自然不涉及这一列。上述卸载操作也不会删除磁盘上的 AB 文件或下载缓存。
+例如，LoadFromMemory(data) 使用的 data 是托管数组。卸载包负责释放 Unity 侧的包数据；调用方不再持有 data 后，数组才具备被 GC 回收的条件。这是两笔独立的内存，不能只调用一次 Unload 就认为全部清完。
+因此，清理通常分成两个责任：先按资源生命周期释放 Native 对象及相关 GPU 资源，再解除不需要的托管持有关系，让 GC 回收包装和业务对象。解除引用可以先做，但解除引用本身不等于已经释放 Native 或 GPU 数据。
+将清理安排在场景切换的 Loading 阶段UnloadUnusedAssets() 属于开销可能较大的集中清理操作，建议安排在场景切换的 Loading 界面中执行。 它虽然返回 AsyncOperation，但不意味着所有工作都在后台执行，也不保证每帧的耗时足够小。在正常游玩、镜头运动或 UI 动画期间调用，可能让主线程超过单帧预算，造成掉帧或明显卡顿。
+推荐顺序是：先显示 Loading 界面并让它至少完成一帧显示，再卸载旧场景或销毁旧实例、清除不需要的缓存引用，等待销毁完成后执行清理，最后继续新场景的加载流程。若新旧场景共享资源，应先确定需要保留的资源由常驻持有者引用，避免刚清理完又重新加载。
+Loading 界面用于承接这段等待，并不能消除清理成本；其中的转圈动画或进度条也可能短暂停顿。不要在每次 Release、关闭小弹窗或每隔几秒时调用，实际耗时应在目标设备上通过 Profiler 确认。
+下面保留界面退出的简化示例：假设包已通过 Unload(false) 卸载，调用前 Loading 界面已经显示，且负责执行协程的组件在清理期间保持存活。
+using System.Collections;using UnityEngine;public sealed class PanelResourceOwner : MonoBehaviour&#123;    private GameObject panelInstance;    private Texture2D cachedTexture;    public IEnumerator CloseAndCleanup()    &#123;        if (panelInstance != null)            Destroy(panelInstance);        panelInstance = null;        cachedTexture = null;        // 其他缓存、材质或组件若仍引用资源，也需要先解除持有。        // Destroy 延迟执行，留出时间让实例完成销毁。        yield return null;        // 在 Loading 阶段等待集中清理完成；异步接口仍可能产生耗时峰值。        yield return Resources.UnloadUnusedAssets();    &#125;&#125;
+
+示例中的 Destroy 负责结束界面实例的 Native 生命周期，字段设为 null 负责解除托管引用，UnloadUnusedAssets() 则清理已无使用者的资源 Native 数据及相关 GPU 资源。三步处理的是不同的对象或存储部分。
+这里没有紧接着调用 GC.Collect()。是否主动触发托管 GC，需要根据项目的托管分配和卡顿情况单独判断，并不是资源清理的固定步骤。
+清理完成后，再结束 Loading 阶段、恢复正常交互。是否在每次场景切换都执行，应结合内存峰值与目标设备耗时决定，避免没有回收收益的频繁扫描。
+7. 将持有关系落实到管理器工程上常见的做法，是统一管理包及其依赖，复用已打开的包，在确认没有使用者后调用 Unload(true)。
+下面只展示包层计数的基本逻辑：
+using System;using System.Collections.Generic;using UnityEngine;public sealed class BundleRefCounter&#123;    private sealed class Entry    &#123;        public AssetBundle Bundle;        public int RefCount;    &#125;    private readonly Dictionary&lt;string, Entry&gt; entries =        new Dictionary&lt;string, Entry&gt;();    // 在 Unity 主线程调用。bundleId 由调用方统一，避免路径别名。    public AssetBundle Acquire(string bundleId, string path)    &#123;        if (entries.TryGetValue(bundleId, out Entry entry))        &#123;            entry.RefCount++;            return entry.Bundle;        &#125;        AssetBundle bundle = AssetBundle.LoadFromFile(path);        if (bundle == null)            throw new InvalidOperationException($&quot;加载 AB 包失败：&#123;path&#125;&quot;);        entries.Add(bundleId, new Entry        &#123;            Bundle = bundle,            RefCount = 1        &#125;);        return bundle;    &#125;    public void Release(string bundleId)    &#123;        if (!entries.TryGetValue(bundleId, out Entry entry))            throw new InvalidOperationException($&quot;未持有 AB 包：&#123;bundleId&#125;&quot;);        entry.RefCount--;        if (entry.RefCount &gt; 0)            return;        entry.Bundle.Unload(true);        entries.Remove(bundleId);    &#125;&#125;
+
+这段代码本身并不知道场景里还有谁在使用纹理。计数是否可靠，取决于调用方是否遵守约定：一次 Acquire 所代表的持有期，必须覆盖相关资源的整个使用期。
+例如，加载 Prefab 并生成角色后，不能因为“加载结束了”就立即 Release。角色实例、对象池或缓存仍可能引用包里的共享资源，必须等这些使用者都退出后再归还持有权。调用 Destroy 的对象也可能要到帧末才真正销毁，释放顺序需要考虑这一点。
+实际管理器还需要处理几个问题：
+
+依赖包的持有关系。 依赖链沿用前文的加载流程；这里还需要让每个使用者持有相应依赖，直到使用结束，防止共享材质、Shader 或纹理被提前卸载。
+异步请求合并。 多个请求同时加载同一个包时，应共享进行中的任务；加载失败或取消时，要正确回滚计数。
+资源缓存与包状态一致。 缓存中的资源不能在所属包已经 Unload(true) 后继续被当作有效对象返回。
+
+引用计数不是唯一方案。生命周期边界清晰的项目，也可以在关卡退出后统一卸载该关卡独占的包。无论采用哪种方式，最终都需要能回答同一个问题：这个包里的资源，现在还有谁在用？
+四、结果验证：确认副本不再累积，使用中的资源仍有效管理策略调整后，需要验证的是资源生命周期是否符合预期，而不只是某一帧的进程内存数值。
+对于角色预览界面，可以在目标设备的 Player 中，记录打开前、打开后、关闭清理后的 Memory Profiler 快照，再重复若干次相同操作。
+
+
+
+验证场景
+应观察到的结果
+
+
+
+同时存在多个使用者
+释放其中一个后，其余对象仍能正常显示，共享资源保持有效
+
+
+最后一个使用者退出
+确认销毁完成、缓存清除后，相关资源能够按策略卸载
+
+
+反复打开和关闭界面
+同名纹理、Mesh、材质的实例数不持续逐轮增加；允许策略明确的缓存保留
+
+
+执行 UnloadUnusedAssets()
+未使用资源得到清理，仍被有效使用者持有的资源保留
+
+
+主包释放、其他对象仍使用依赖包
+共享依赖保持有效，直到最后一个持有者退出
+
+
+这里列出的是验证标准，并非项目实测数据。具体节省多少内存、清理耗时多长，需要结合资源规模、Unity 版本与目标设备测量。
+验证时也应分开看 Native 资源数量与占用、Managed 包装及业务容器的占用，以及图形内存。Native 资源已释放但包装仍被静态集合引用，和包装已经回收但共享资源仍在使用，是两种不同情况。
+如果资源实例数仍然上涨，优先检查重复加载与旧缓存；如果资源无法回收，检查对象池、静态字段和存活组件的引用。如果对象数量已经恢复，而进程内存没有立即下降，再分析 Unity 分配器保留内存、尚未回收的托管包装，以及 GPU 侧延迟释放等因素。
+回到最初的预览界面：打开包、加载 Prefab、创建角色、销毁角色、卸载资源，是需要衔接的几个步骤。明确每一步的持有者和结束条件，才能同时避免提前卸载与重复副本。Unload(true)、Unload(false) 和 UnloadUnusedAssets() 也就各自有了明确的使用位置。
+参考资料
+前文：Unity-AssetBundle结构解析
+
+以下链接以 Unity 2022.3 文档为主。不同版本和平台的底层实现可能有所变化，具体占用与耗时应以目标设备实测为准。
+
+Using AssetBundles Natively
+
+Loading texture and mesh data
+
+Texture.isReadable
+
+AssetBundle.Unload
+
+UnityEngine.Object.operator &#x3D;&#x3D;
+
+Resources.UnloadAsset
+
+Resources.UnloadUnusedAssets
+
+Managed memory：GC 与 Native 资源回收的区别
+
+
+]]></content>
+      <tags>
+        <tag>Unity-AssetBunde</tag>
+      </tags>
+  </entry>
+  <entry>
     <title>Unity-AssetBundle结构解析</title>
     <url>/posts/d5e3da58.html</url>
     <content><![CDATA[Unity AssetBundle 结构解析笔记
@@ -1229,6 +1528,27 @@ YooAssets（C#）：PackageManifest.cs &#x2F; ResourcePackage.cs，框架清单�
       <tags>
         <tag>Unity-AssetBunde</tag>
       </tags>
+  </entry>
+  <entry>
+    <title>Unity的动态图集实现</title>
+    <url>/posts/71da87fc.html</url>
+    <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
+性能优化测试效果未使用动态图集，2张图4个Draw Call。使用动态图集，2张图3个Drwa Call，图越多解决越多。
+动态图集原理动态图集的核心原理为：在运行时维护一张较大的纹理区域，在运行时动态地往纹理区域内添加或移除，现实上直接把纹理区域指定给RawIamge的texture然后设置其UV Rect即可。由于同时渲染的icon数量往往远远小于实际icon的资源数量，因此通常一张1024或者2048大小的动态图集即可以满足大多数的游戏需求。该方法的好处在于，内存在可控范围，并且icon可以共享纹理从而省draw call。下面详细介绍动态图集实现的技术细节。
+二维装箱算法因为放入的每张图片大小不一，所以高效的寻找图片在纹理区域中的位置，从而打到最大空间利用，是动态图集实现最为核心的问题。对于区域的增删查改，可以抽象成一个二维空间装箱操作，算法上有比较多的实现，有兴趣的可以了解这篇文章概述二维空间uv装箱算法：Shelf、Guillotine、MAXRECTS、Skyline。目前的几个算法都是在不重叠的前提下，尽可能大地利用空间，这是一个NP-hard问题，因此没有有效的算法可以解决所有情况。我这里选用的就是Max-Rect的BSSF最短边匹配优先。
+public IntRect Insert(int w, int h)&#123;    // 1. 找最佳空闲区域（最短边匹配优先 BSSF）    int bestIdx = -1;    int bestShort = int.MaxValue;    for (int i = 0; i &lt; m_freeRects.Count; i++)    &#123;        var free = m_freeRects[i];        if (w &lt;= free.width &amp;&amp; h &lt;= free.height)        &#123;            int leftover = Mathf.Min(free.width - w, free.height - h);            if (leftover &lt; bestShort)            &#123;                bestShort = leftover;                bestIdx = i;            &#125;        &#125;    &#125;    if (bestIdx &lt; 0) return null;    // 2. 放置    var best = m_freeRects[bestIdx];    var placed = new IntRect(best.x, best.y, w, h);    // 3. 裁剪所有重叠的空闲矩形    for (int i = m_freeRects.Count - 1; i &gt;= 0; i--)    &#123;        if (Overlaps(placed, m_freeRects[i]))        &#123;            SplitFreeRect(m_freeRects[i], placed);            m_freeRects.RemoveAt(i);        &#125;    &#125;    // 4. 去除冗余    RemoveRedundant();    return placed;&#125;/// &lt;summary&gt;/// 回收（释放）一个已放置的矩形区域，使其重新可用/// &lt;/summary&gt;/// &lt;param name=&quot;rect&quot;&gt;之前 Insert 返回的矩形&lt;/param&gt;public void Recycle(IntRect rect)&#123;    if (rect == null) return;    // 1. 边界校验    if (rect.x &lt; 0 || rect.y &lt; 0 || rect.right &gt; m_width || rect.top &gt; m_height)        return;    if (rect.width &lt;= 0 || rect.height &lt;= 0)        return;    // 2. 将释放区域加入空闲列表    m_freeRects.Add(new IntRect(rect.x, rect.y, rect.width, rect.height));    // 3. 合并空闲矩形    MergeFreeRects();    // 4. 去除冗余    RemoveRedundant();&#125;
+
+图片拷贝的API选择通过装箱算法知道了图片的位置和区域，第二个问题就是如何高效地把图片拷贝到对于的纹理中。在Unity中纹理的拷贝有两种方式：Graphics.CopyTexture和Texture.Get&#x2F;SetPixels
+Graphics.CopyTexture优点：1.首先第一个就是它是从GPU的显存到显存的直接拷贝，效率非常高。2.不需要勾选texture的read&#x2F;write enabled。由于是直接的显存拷贝，因此并不需要在系统内存里再存储一份texture数据。缺点：1.底层调用OpenGL接口glCopyImageSubData。该接口要求OpenGL4.3以上或者GL ES3.2以上才能支持。
+Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如下图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
+因为Texture.Get&#x2F;SetPixels有诸多的性能问题，Graphics.CopyTexture仅有一个支持API版本问题，并且对应的OpenGL4.3和GL ES3.2，为别IOS8（Iphone 5S）和Android 7.0(2016年发布)。已经是10年前的机型了，所以这里我直接选择了Graphics.CopyTexture。
+动态图集初始大小和区域满后的处理图集的初始大小可能纠结的只有初始太大，导致利用率低，这个根据项目实际使用情况分配就行了，建议初始大小设置成1024*1024。但是一张图如果放满了就有两种处理办法：纹理扩容和多张纹理。下面分类讨论这两种实现。
+纹理扩容图片扩容需要做3件事：1、开辟一张更大的纹理，把原纹理拷贝到大纹理中。2、更新所有图片的UV区域信息。3、更新场景中存在的所有RawIamge组件的UV Rect信息。这个方案的第二、第三步都是O(n)级别的复杂度，并且随着纹理的扩大n也越大，越扩容性能消耗越大。
+多张纹理多张纹理则是新建一张大小一致的纹理，这种做法不需要更新图片UV区域。在代码层面就要维护一个图片数组，每次有新图要加入时从数组中遍历得到一个空闲的纹理加入。同时因为提供的纹理不同，所以会多一些Draw Call的开销。
+综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
+代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
+项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
+]]></content>
   </entry>
   <entry>
     <title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</title>
@@ -1505,6 +1825,9 @@ TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Un
 技术选型的思考1、Text不支持图文混排，除非自己实现一套富文本图片解析。所以有图文混排需求建议无脑TMP。2、仅有描边、投影的需求。之前实现了一个Text的描边和弯曲组件，所以在字符有限的项目中(不考虑本地化、玩家自定义情况)使用Text和TMP，在性能和效果上和TMP差不多。但在字符无限的项目中，推荐使用静态常用字TMP+动态TMP配合，既有较好的性能效果，也能使用TMP的各种功能。3、对渲染效果更高的要求，这个就不用纠结了，美术一定会让你选TMP。
 参考资料[1].Unity字体渲染原理[2].unity-UGUI源码分析(4):Text与TextMeshPro[3].文本渲染-LearnOpenGL
 ]]></content>
+      <tags>
+        <tag>Unity文字渲染</tag>
+      </tags>
   </entry>
   <entry>
     <title>Unity的TMP的纹理优化</title>
@@ -1520,7 +1843,11 @@ if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length 
 
 纹理压缩验证现在在Inspector面板下，此SDF Asset的纹理贴图成功指定到保存出来的纹理。对其进行纹理格式改变，字体也同步模糊和清晰，说明修改成功！
 内存优化效果在Game视图下，ASTC6x6和Aplpha 8(原生类型)，看着差别不大，但是内存一个是16MB，一个是7.1MB，相差将近一倍。
-编辑器全部代码#if UNITY_EDITORusing UnityEngine;using UnityEditor;using TMPro;using System.IO;using System.Linq;using System.Collections.Generic;using UnityEngine.TextCore;using UnityEngine.TextCore.LowLevel;public class TMPSpriteExporterWindow : EditorWindow&#123;    private TMP_FontAsset targetFont;    private Texture2D replacementTexture;    private Texture2D replacementSDFTexture;    private Vector2 scrollPosition;    private Texture2D processedPreviewTexture;    [MenuItem(&quot;Tools/TMP/SDF字体纹理替换器&quot;)]    public static void ShowWindow()    &#123;        var window = GetWindow&lt;TMPSpriteExporterWindow&gt;(&quot;TMP SDF字体纹理替换器&quot;, true, typeof(SceneView));        window.minSize = new Vector2(450, 800);    &#125;    private void OnGUI()    &#123;        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);        EditorGUILayout.LabelField(&quot;TMP SDF字体纹理替换器&quot;, EditorStyles.boldLabel);        EditorGUILayout.HelpBox(&quot;此工具用于替换TMP SDF字体的Font Atlas纹理。注意：SDF字体需要特殊的距离场数据。&quot;, MessageType.Info);        EditorGUILayout.Space(10);        // 1. 选择SDF字体        EditorGUI.BeginChangeCheck();        targetFont = (TMP_FontAsset)EditorGUILayout.ObjectField(&quot;目标SDF字体&quot;, targetFont, typeof(TMP_FontAsset), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (targetFont != null)        &#123;            DisplayFontInfo();        &#125;        EditorGUILayout.Space(20);        // 2. 选择替换纹理        EditorGUILayout.LabelField(&quot;替换纹理设置&quot;, EditorStyles.boldLabel);        EditorGUI.BeginChangeCheck();        replacementTexture =            (Texture2D)EditorGUILayout.ObjectField(&quot;源PNG纹理&quot;, replacementTexture, typeof(Texture2D), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (replacementTexture != null)        &#123;            EditorGUILayout.HelpBox(                $&quot;纹理尺寸: &#123;replacementTexture.width&#125;x&#123;replacementTexture.height&#125; | 格式: &#123;replacementTexture.format&#125;&quot;,                MessageType.None);        &#125;        EditorGUILayout.Space(10);                // 4. 功能按钮        EditorGUILayout.BeginHorizontal();        if (GUILayout.Button(&quot;替换字体纹理&quot;, GUILayout.Height(30)))        &#123;            ReplaceSDFFontTexture();        &#125;        EditorGUILayout.EndHorizontal();        EditorGUILayout.Space(10);        if (GUILayout.Button(&quot;导出当前字体纹理&quot;, GUILayout.Height(30)))        &#123;            ExportCurrentFontTexture();        &#125;        EditorGUILayout.Space(20);        // 5. 预览区域        DrawPreviewSection();        EditorGUILayout.EndScrollView();    &#125;    private void DisplayFontInfo()    &#123;        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField($&quot;当前纹理: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);            EditorGUILayout.LabelField($&quot;字符数量: &#123;targetFont.characterTable?.Count ?? 0&#125;&quot;, EditorStyles.miniLabel);            if (targetFont.material != null)            &#123;                Shader shader = targetFont.material.shader;                bool isSDF = shader != null &amp;&amp; shader.name.Contains(&quot;SDF&quot;);                EditorGUILayout.LabelField($&quot;着色器: &#123;shader?.name&#125; &#123;(isSDF ? &quot;(SDF)&quot; : &quot;(Bitmap)&quot;)&#125;&quot;,                    EditorStyles.miniLabel);            &#125;        &#125;        else        &#123;            EditorGUILayout.HelpBox(&quot;警告：此字体没有纹理图集！&quot;, MessageType.Warning);        &#125;        EditorGUILayout.EndVertical();    &#125;    private void UpdatePreview()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);            processedPreviewTexture = null;        &#125;    &#125;    private void ReplaceSDFFontTexture()    &#123;        if (targetFont == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择目标SDF字体！&quot;, &quot;确定&quot;);            return;        &#125;        if (processedPreviewTexture == null &amp;&amp; replacementTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先生成SDF纹理或选择源纹理！&quot;, &quot;确定&quot;);            return;        &#125;        Texture2D textureToUse = processedPreviewTexture ?? replacementTexture;        if (!EditorUtility.DisplayDialog(&quot;确认替换&quot;,                $&quot;确定要替换 &#x27;&#123;targetFont.name&#125;&#x27; 的Font Atlas纹理吗？\n\n&quot; +                $&quot;新纹理: &#123;textureToUse.width&#125;x&#123;textureToUse.height&#125;\n&quot; +                $&quot;此操作会修改字体资产，请确保已备份！&quot;,                &quot;替换&quot;, &quot;取消&quot;))        &#123;            return;        &#125;        try        &#123;            EditorUtility.DisplayProgressBar(&quot;替换字体纹理&quot;, &quot;处理中...&quot;, 0.5f);            if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)            &#123;                for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)                &#123;                    var texture = targetFont.atlasTextures[i];                    if (texture == null)                    &#123;                        continue;                    &#125;                    AssetDatabase.RemoveObjectFromAsset(texture);                    DestroyImmediate(texture);                &#125;            &#125;            targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;            targetFont.material.mainTexture = replacementTexture;                        // 保存字体资产            EditorUtility.SetDirty(targetFont);            AssetDatabase.SaveAssets();            // 刷新场景            RefreshAllTMPTextComponents(targetFont);            EditorUtility.ClearProgressBar();            EditorUtility.DisplayDialog(&quot;成功&quot;,                $&quot;已成功替换SDF字体纹理！\n\n&quot; +                $&quot;已刷新所有相关文本组件。&quot;,                &quot;确定&quot;);        &#125;        catch (System.Exception e)        &#123;            EditorUtility.ClearProgressBar();            Debug.LogError($&quot;替换SDF字体纹理失败: &#123;e.Message&#125;\n&#123;e.StackTrace&#125;&quot;);            EditorUtility.DisplayDialog(&quot;错误&quot;, $&quot;替换失败: &#123;e.Message&#125;&quot;, &quot;确定&quot;);        &#125;    &#125;        private void ConfigureTextureForSDF(string texturePath)    &#123;        // 检查路径是否在Assets目录下        if (!texturePath.StartsWith(&quot;Assets/&quot;))        &#123;            // 尝试转换为相对路径            string relativePath = GetRelativeAssetPath(texturePath);            if (string.IsNullOrEmpty(relativePath))            &#123;                Debug.LogError($&quot;路径不在Assets目录下: &#123;texturePath&#125;&quot;);                EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;文件必须保存在Assets目录下才能修改导入设置&quot;, &quot;确定&quot;);                return;            &#125;            texturePath = relativePath;        &#125;               TextureImporter importer = AssetImporter.GetAtPath(texturePath) as TextureImporter;        if (importer == null)        &#123;            EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;importer为空!&quot;,&quot;OK&quot;);            return;        &#125;        // 对于SDF纹理，启用alpha通道处理        importer.textureType = TextureImporterType.Default;  // 使用单通道类型        importer.alphaSource = TextureImporterAlphaSource.FromInput;        importer.alphaIsTransparency = true;                importer.isReadable = false;        importer.wrapMode = TextureWrapMode.Clamp;        importer.filterMode = FilterMode.Bilinear;        importer.mipmapEnabled = false;        importer.sRGBTexture = false;  // 对于SDF，通常使用线性颜色空间        // 设置各平台格式        SetPlatformSettings(importer, &quot;Standalone&quot;, TextureImporterFormat.Alpha8, 4096, false);        SetPlatformSettings(importer, &quot;iPhone&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);        SetPlatformSettings(importer, &quot;Android&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);            // 应用更改        importer.SaveAndReimport();        //EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;修改成功&quot;,&quot;OK&quot;);    &#125;        // 将绝对路径转换为Assets相对路径    private string GetRelativeAssetPath(string fullPath)    &#123;        string dataPath = Application.dataPath;        if (fullPath.StartsWith(dataPath))        &#123;            return &quot;Assets&quot; + fullPath.Substring(dataPath.Length).Replace(&quot;\\&quot;, &quot;/&quot;);        &#125;        return null;    &#125;    private void SetPlatformSettings(TextureImporter importer, string platform,         TextureImporterFormat format, int maxSize, bool compressed)    &#123;        var settings = new TextureImporterPlatformSettings();        settings.name = platform;        settings.overridden = true;        settings.format = format;        settings.maxTextureSize = maxSize;        settings.textureCompression = compressed ?             TextureImporterCompression.Compressed :             TextureImporterCompression.Uncompressed;        settings.compressionQuality = 50;            importer.SetPlatformTextureSettings(settings);    &#125;        private void RefreshAllTMPTextComponents(TMP_FontAsset fontAsset)    &#123;        if (fontAsset == null) return;        int count = 0;        // 刷新场景中的文本        TMP_Text[] sceneTexts = GameObject.FindObjectsOfType&lt;TMP_Text&gt;(true);        foreach (TMP_Text text in sceneTexts)        &#123;            if (text.font == fontAsset)            &#123;                text.ForceMeshUpdate();                EditorUtility.SetDirty(text);                count++;            &#125;        &#125;        // 刷新预制件        string[] prefabGUIDs = AssetDatabase.FindAssets(&quot;t:Prefab&quot;);        foreach (string guid in prefabGUIDs)        &#123;            string path = AssetDatabase.GUIDToAssetPath(guid);            GameObject prefab = AssetDatabase.LoadAssetAtPath&lt;GameObject&gt;(path);            if (prefab != null)            &#123;                TMP_Text[] prefabTexts = prefab.GetComponentsInChildren&lt;TMP_Text&gt;(true);                bool changed = false;                foreach (TMP_Text text in prefabTexts)                &#123;                    if (text.font == fontAsset)                    &#123;                        text.ForceMeshUpdate();                        EditorUtility.SetDirty(text);                        changed = true;                        count++;                    &#125;                &#125;                if (changed)                &#123;                    PrefabUtility.SavePrefabAsset(prefab);                &#125;            &#125;        &#125;        Debug.Log($&quot;已刷新 &#123;count&#125; 个文本组件&quot;);    &#125;    private Texture2D MakeTextureReadable(Texture2D texture)    &#123;        if (texture == null || texture.isReadable) return texture;        RenderTexture rt = RenderTexture.GetTemporary(            texture.width,            texture.height,            0,            RenderTextureFormat.ARGB32,            RenderTextureReadWrite.Linear        );        Graphics.Blit(texture, rt);        RenderTexture previous = RenderTexture.active;        RenderTexture.active = rt;        Texture2D readableTexture = new Texture2D(            texture.width,            texture.height,            TextureFormat.RGBA32,            false        );        readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);        readableTexture.Apply();        RenderTexture.active = previous;        RenderTexture.ReleaseTemporary(rt);        return readableTexture;    &#125;    private void ExportCurrentFontTexture()    &#123;        if (targetFont == null || targetFont.atlasTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);            return;        &#125;        string savePath = EditorUtility.SaveFilePanel(            &quot;导出字体纹理&quot;,            Application.dataPath,            $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,            &quot;png&quot;        );        if (!string.IsNullOrEmpty(savePath))        &#123;            ExportTextureAsPNG(targetFont.atlasTexture, savePath);        &#125;    &#125;    private void ExportTextureAsPNG(Texture2D texture, string path)    &#123;        if (texture == null) return;        Texture2D readableTexture = MakeTextureReadable(texture);        byte[] pngData = readableTexture.EncodeToPNG();        File.WriteAllBytes(path, pngData);        if (readableTexture != texture)        &#123;            DestroyImmediate(readableTexture);        &#125;        //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);        AssetDatabase.Refresh();        ConfigureTextureForSDF(path);        EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);    &#125;    private void DrawPreviewSection()    &#123;        EditorGUILayout.Space(20);        EditorGUILayout.LabelField(&quot;预览&quot;, EditorStyles.boldLabel);        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont != null &amp;&amp; targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField(&quot;当前字体纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect origRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(origRect, targetFont.atlasTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);        &#125;        if (processedPreviewTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;生成的SDF纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect newRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(newRect, processedPreviewTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;processedPreviewTexture.width&#125;x&#123;processedPreviewTexture.height&#125;&quot;,                EditorStyles.miniLabel);            // 显示SDF预览            DrawSDFPreview(processedPreviewTexture);        &#125;        else if (replacementTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;源纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect srcRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(srcRect, replacementTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        // 警告信息        if (targetFont != null &amp;&amp; replacementTexture != null)        &#123;            if (targetFont.atlasTexture != null &amp;&amp;                (targetFont.atlasTexture.width != replacementTexture.width ||                 targetFont.atlasTexture.height != replacementTexture.height))            &#123;                EditorGUILayout.HelpBox(                    &quot;⚠️ 警告：纹理尺寸不匹配！\n&quot; +                    &quot;SDF字体的字符UV映射可能不正确，建议使用相同尺寸的纹理。&quot;,                    MessageType.Warning                );            &#125;        &#125;    &#125;    private void DrawSDFPreview(Texture2D sdfTexture)    &#123;        EditorGUILayout.BeginHorizontal();        // 原始预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;Alpha通道&quot;, EditorStyles.miniLabel);        Rect alphaRect = GUILayoutUtility.GetAspectRect(1f);        EditorGUI.DrawTextureAlpha(alphaRect, sdfTexture, ScaleMode.ScaleToFit);        EditorGUILayout.EndVertical();        // 着色预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;距离场预览&quot;, EditorStyles.miniLabel);        Rect colorRect = GUILayoutUtility.GetAspectRect(1f);        // 创建临时材质用于预览SDF        Material previewMat = new Material(Shader.Find(&quot;Hidden/TMP_SDFPreview&quot;));        if (previewMat != null)        &#123;            EditorGUI.DrawPreviewTexture(colorRect, sdfTexture, previewMat);            DestroyImmediate(previewMat);        &#125;        else        &#123;            EditorGUI.DrawTextureTransparent(colorRect, sdfTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        EditorGUILayout.EndHorizontal();    &#125;        private void OnDestroy()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);        &#125;    &#125;&#125;#endif]]></content>
+编辑器全部代码#if UNITY_EDITORusing UnityEngine;using UnityEditor;using TMPro;using System.IO;using System.Linq;using System.Collections.Generic;using UnityEngine.TextCore;using UnityEngine.TextCore.LowLevel;public class TMPSpriteExporterWindow : EditorWindow&#123;    private TMP_FontAsset targetFont;    private Texture2D replacementTexture;    private Texture2D replacementSDFTexture;    private Vector2 scrollPosition;    private Texture2D processedPreviewTexture;    [MenuItem(&quot;Tools/TMP/SDF字体纹理替换器&quot;)]    public static void ShowWindow()    &#123;        var window = GetWindow&lt;TMPSpriteExporterWindow&gt;(&quot;TMP SDF字体纹理替换器&quot;, true, typeof(SceneView));        window.minSize = new Vector2(450, 800);    &#125;    private void OnGUI()    &#123;        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);        EditorGUILayout.LabelField(&quot;TMP SDF字体纹理替换器&quot;, EditorStyles.boldLabel);        EditorGUILayout.HelpBox(&quot;此工具用于替换TMP SDF字体的Font Atlas纹理。注意：SDF字体需要特殊的距离场数据。&quot;, MessageType.Info);        EditorGUILayout.Space(10);        // 1. 选择SDF字体        EditorGUI.BeginChangeCheck();        targetFont = (TMP_FontAsset)EditorGUILayout.ObjectField(&quot;目标SDF字体&quot;, targetFont, typeof(TMP_FontAsset), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (targetFont != null)        &#123;            DisplayFontInfo();        &#125;        EditorGUILayout.Space(20);        // 2. 选择替换纹理        EditorGUILayout.LabelField(&quot;替换纹理设置&quot;, EditorStyles.boldLabel);        EditorGUI.BeginChangeCheck();        replacementTexture =            (Texture2D)EditorGUILayout.ObjectField(&quot;源PNG纹理&quot;, replacementTexture, typeof(Texture2D), false);        if (EditorGUI.EndChangeCheck())        &#123;            UpdatePreview();        &#125;        if (replacementTexture != null)        &#123;            EditorGUILayout.HelpBox(                $&quot;纹理尺寸: &#123;replacementTexture.width&#125;x&#123;replacementTexture.height&#125; | 格式: &#123;replacementTexture.format&#125;&quot;,                MessageType.None);        &#125;        EditorGUILayout.Space(10);                // 4. 功能按钮        EditorGUILayout.BeginHorizontal();        if (GUILayout.Button(&quot;替换字体纹理&quot;, GUILayout.Height(30)))        &#123;            ReplaceSDFFontTexture();        &#125;        EditorGUILayout.EndHorizontal();        EditorGUILayout.Space(10);        if (GUILayout.Button(&quot;导出当前字体纹理&quot;, GUILayout.Height(30)))        &#123;            ExportCurrentFontTexture();        &#125;        EditorGUILayout.Space(20);        // 5. 预览区域        DrawPreviewSection();        EditorGUILayout.EndScrollView();    &#125;    private void DisplayFontInfo()    &#123;        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField($&quot;当前纹理: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);            EditorGUILayout.LabelField($&quot;字符数量: &#123;targetFont.characterTable?.Count ?? 0&#125;&quot;, EditorStyles.miniLabel);            if (targetFont.material != null)            &#123;                Shader shader = targetFont.material.shader;                bool isSDF = shader != null &amp;&amp; shader.name.Contains(&quot;SDF&quot;);                EditorGUILayout.LabelField($&quot;着色器: &#123;shader?.name&#125; &#123;(isSDF ? &quot;(SDF)&quot; : &quot;(Bitmap)&quot;)&#125;&quot;,                    EditorStyles.miniLabel);            &#125;        &#125;        else        &#123;            EditorGUILayout.HelpBox(&quot;警告：此字体没有纹理图集！&quot;, MessageType.Warning);        &#125;        EditorGUILayout.EndVertical();    &#125;    private void UpdatePreview()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);            processedPreviewTexture = null;        &#125;    &#125;    private void ReplaceSDFFontTexture()    &#123;        if (targetFont == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择目标SDF字体！&quot;, &quot;确定&quot;);            return;        &#125;        if (processedPreviewTexture == null &amp;&amp; replacementTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先生成SDF纹理或选择源纹理！&quot;, &quot;确定&quot;);            return;        &#125;        Texture2D textureToUse = processedPreviewTexture ?? replacementTexture;        if (!EditorUtility.DisplayDialog(&quot;确认替换&quot;,                $&quot;确定要替换 &#x27;&#123;targetFont.name&#125;&#x27; 的Font Atlas纹理吗？\n\n&quot; +                $&quot;新纹理: &#123;textureToUse.width&#125;x&#123;textureToUse.height&#125;\n&quot; +                $&quot;此操作会修改字体资产，请确保已备份！&quot;,                &quot;替换&quot;, &quot;取消&quot;))        &#123;            return;        &#125;        try        &#123;            EditorUtility.DisplayProgressBar(&quot;替换字体纹理&quot;, &quot;处理中...&quot;, 0.5f);            if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length &gt; 0)            &#123;                for (int i = 0; i &lt; targetFont.atlasTextures.Length; i++)                &#123;                    var texture = targetFont.atlasTextures[i];                    if (texture == null)                    &#123;                        continue;                    &#125;                    AssetDatabase.RemoveObjectFromAsset(texture);                    DestroyImmediate(texture);                &#125;            &#125;            targetFont.atlasTextures = new Texture2D[] &#123; replacementTexture &#125;;            targetFont.material.mainTexture = replacementTexture;                        // 保存字体资产            EditorUtility.SetDirty(targetFont);            AssetDatabase.SaveAssets();            // 刷新场景            RefreshAllTMPTextComponents(targetFont);            EditorUtility.ClearProgressBar();            EditorUtility.DisplayDialog(&quot;成功&quot;,                $&quot;已成功替换SDF字体纹理！\n\n&quot; +                $&quot;已刷新所有相关文本组件。&quot;,                &quot;确定&quot;);        &#125;        catch (System.Exception e)        &#123;            EditorUtility.ClearProgressBar();            Debug.LogError($&quot;替换SDF字体纹理失败: &#123;e.Message&#125;\n&#123;e.StackTrace&#125;&quot;);            EditorUtility.DisplayDialog(&quot;错误&quot;, $&quot;替换失败: &#123;e.Message&#125;&quot;, &quot;确定&quot;);        &#125;    &#125;        private void ConfigureTextureForSDF(string texturePath)    &#123;        // 检查路径是否在Assets目录下        if (!texturePath.StartsWith(&quot;Assets/&quot;))        &#123;            // 尝试转换为相对路径            string relativePath = GetRelativeAssetPath(texturePath);            if (string.IsNullOrEmpty(relativePath))            &#123;                Debug.LogError($&quot;路径不在Assets目录下: &#123;texturePath&#125;&quot;);                EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;文件必须保存在Assets目录下才能修改导入设置&quot;, &quot;确定&quot;);                return;            &#125;            texturePath = relativePath;        &#125;               TextureImporter importer = AssetImporter.GetAtPath(texturePath) as TextureImporter;        if (importer == null)        &#123;            EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;importer为空!&quot;,&quot;OK&quot;);            return;        &#125;        // 对于SDF纹理，启用alpha通道处理        importer.textureType = TextureImporterType.Default;  // 使用单通道类型        importer.alphaSource = TextureImporterAlphaSource.FromInput;        importer.alphaIsTransparency = true;                importer.isReadable = false;        importer.wrapMode = TextureWrapMode.Clamp;        importer.filterMode = FilterMode.Bilinear;        importer.mipmapEnabled = false;        importer.sRGBTexture = false;  // 对于SDF，通常使用线性颜色空间        // 设置各平台格式        SetPlatformSettings(importer, &quot;Standalone&quot;, TextureImporterFormat.Alpha8, 4096, false);        SetPlatformSettings(importer, &quot;iPhone&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);        SetPlatformSettings(importer, &quot;Android&quot;, TextureImporterFormat.ASTC_6x6, 4096, true);            // 应用更改        importer.SaveAndReimport();        //EditorUtility.DisplayDialog(&quot;修改贴图信息&quot;, $&quot;修改成功&quot;,&quot;OK&quot;);    &#125;        // 将绝对路径转换为Assets相对路径    private string GetRelativeAssetPath(string fullPath)    &#123;        string dataPath = Application.dataPath;        if (fullPath.StartsWith(dataPath))        &#123;            return &quot;Assets&quot; + fullPath.Substring(dataPath.Length).Replace(&quot;\\&quot;, &quot;/&quot;);        &#125;        return null;    &#125;    private void SetPlatformSettings(TextureImporter importer, string platform,         TextureImporterFormat format, int maxSize, bool compressed)    &#123;        var settings = new TextureImporterPlatformSettings();        settings.name = platform;        settings.overridden = true;        settings.format = format;        settings.maxTextureSize = maxSize;        settings.textureCompression = compressed ?             TextureImporterCompression.Compressed :             TextureImporterCompression.Uncompressed;        settings.compressionQuality = 50;            importer.SetPlatformTextureSettings(settings);    &#125;        private void RefreshAllTMPTextComponents(TMP_FontAsset fontAsset)    &#123;        if (fontAsset == null) return;        int count = 0;        // 刷新场景中的文本        TMP_Text[] sceneTexts = GameObject.FindObjectsOfType&lt;TMP_Text&gt;(true);        foreach (TMP_Text text in sceneTexts)        &#123;            if (text.font == fontAsset)            &#123;                text.ForceMeshUpdate();                EditorUtility.SetDirty(text);                count++;            &#125;        &#125;        // 刷新预制件        string[] prefabGUIDs = AssetDatabase.FindAssets(&quot;t:Prefab&quot;);        foreach (string guid in prefabGUIDs)        &#123;            string path = AssetDatabase.GUIDToAssetPath(guid);            GameObject prefab = AssetDatabase.LoadAssetAtPath&lt;GameObject&gt;(path);            if (prefab != null)            &#123;                TMP_Text[] prefabTexts = prefab.GetComponentsInChildren&lt;TMP_Text&gt;(true);                bool changed = false;                foreach (TMP_Text text in prefabTexts)                &#123;                    if (text.font == fontAsset)                    &#123;                        text.ForceMeshUpdate();                        EditorUtility.SetDirty(text);                        changed = true;                        count++;                    &#125;                &#125;                if (changed)                &#123;                    PrefabUtility.SavePrefabAsset(prefab);                &#125;            &#125;        &#125;        Debug.Log($&quot;已刷新 &#123;count&#125; 个文本组件&quot;);    &#125;    private Texture2D MakeTextureReadable(Texture2D texture)    &#123;        if (texture == null || texture.isReadable) return texture;        RenderTexture rt = RenderTexture.GetTemporary(            texture.width,            texture.height,            0,            RenderTextureFormat.ARGB32,            RenderTextureReadWrite.Linear        );        Graphics.Blit(texture, rt);        RenderTexture previous = RenderTexture.active;        RenderTexture.active = rt;        Texture2D readableTexture = new Texture2D(            texture.width,            texture.height,            TextureFormat.RGBA32,            false        );        readableTexture.ReadPixels(new Rect(0, 0, texture.width, texture.height), 0, 0);        readableTexture.Apply();        RenderTexture.active = previous;        RenderTexture.ReleaseTemporary(rt);        return readableTexture;    &#125;    private void ExportCurrentFontTexture()    &#123;        if (targetFont == null || targetFont.atlasTexture == null)        &#123;            EditorUtility.DisplayDialog(&quot;错误&quot;, &quot;请先选择有纹理的TMP字体！&quot;, &quot;确定&quot;);            return;        &#125;        string savePath = EditorUtility.SaveFilePanel(            &quot;导出字体纹理&quot;,            Application.dataPath,            $&quot;&#123;targetFont.name&#125;_SDF_Texture&quot;,            &quot;png&quot;        );        if (!string.IsNullOrEmpty(savePath))        &#123;            ExportTextureAsPNG(targetFont.atlasTexture, savePath);        &#125;    &#125;    private void ExportTextureAsPNG(Texture2D texture, string path)    &#123;        if (texture == null) return;        Texture2D readableTexture = MakeTextureReadable(texture);        byte[] pngData = readableTexture.EncodeToPNG();        File.WriteAllBytes(path, pngData);        if (readableTexture != texture)        &#123;            DestroyImmediate(readableTexture);        &#125;        //Debug.Log($&quot;纹理已导出: &#123;path&#125;&quot;);        AssetDatabase.Refresh();        ConfigureTextureForSDF(path);        EditorUtility.DisplayDialog(&quot;成功&quot;, $&quot;纹理已导出到:\n&#123;path&#125;&quot;, &quot;确定&quot;);    &#125;    private void DrawPreviewSection()    &#123;        EditorGUILayout.Space(20);        EditorGUILayout.LabelField(&quot;预览&quot;, EditorStyles.boldLabel);        EditorGUILayout.BeginVertical(EditorStyles.helpBox);        if (targetFont != null &amp;&amp; targetFont.atlasTexture != null)        &#123;            EditorGUILayout.LabelField(&quot;当前字体纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect origRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(origRect, targetFont.atlasTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;targetFont.atlasTexture.width&#125;x&#123;targetFont.atlasTexture.height&#125;&quot;,                EditorStyles.miniLabel);        &#125;        if (processedPreviewTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;生成的SDF纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect newRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(newRect, processedPreviewTexture, ScaleMode.ScaleToFit);            EditorGUILayout.LabelField($&quot;尺寸: &#123;processedPreviewTexture.width&#125;x&#123;processedPreviewTexture.height&#125;&quot;,                EditorStyles.miniLabel);            // 显示SDF预览            DrawSDFPreview(processedPreviewTexture);        &#125;        else if (replacementTexture != null)        &#123;            EditorGUILayout.Space(10);            EditorGUILayout.LabelField(&quot;源纹理&quot;, EditorStyles.centeredGreyMiniLabel);            Rect srcRect = GUILayoutUtility.GetAspectRect(1.5f);            EditorGUI.DrawTextureTransparent(srcRect, replacementTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        // 警告信息        if (targetFont != null &amp;&amp; replacementTexture != null)        &#123;            if (targetFont.atlasTexture != null &amp;&amp;                (targetFont.atlasTexture.width != replacementTexture.width ||                 targetFont.atlasTexture.height != replacementTexture.height))            &#123;                EditorGUILayout.HelpBox(                    &quot;⚠️ 警告：纹理尺寸不匹配！\n&quot; +                    &quot;SDF字体的字符UV映射可能不正确，建议使用相同尺寸的纹理。&quot;,                    MessageType.Warning                );            &#125;        &#125;    &#125;    private void DrawSDFPreview(Texture2D sdfTexture)    &#123;        EditorGUILayout.BeginHorizontal();        // 原始预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;Alpha通道&quot;, EditorStyles.miniLabel);        Rect alphaRect = GUILayoutUtility.GetAspectRect(1f);        EditorGUI.DrawTextureAlpha(alphaRect, sdfTexture, ScaleMode.ScaleToFit);        EditorGUILayout.EndVertical();        // 着色预览        EditorGUILayout.BeginVertical(GUILayout.Width(position.width / 2 - 20));        EditorGUILayout.LabelField(&quot;距离场预览&quot;, EditorStyles.miniLabel);        Rect colorRect = GUILayoutUtility.GetAspectRect(1f);        // 创建临时材质用于预览SDF        Material previewMat = new Material(Shader.Find(&quot;Hidden/TMP_SDFPreview&quot;));        if (previewMat != null)        &#123;            EditorGUI.DrawPreviewTexture(colorRect, sdfTexture, previewMat);            DestroyImmediate(previewMat);        &#125;        else        &#123;            EditorGUI.DrawTextureTransparent(colorRect, sdfTexture, ScaleMode.ScaleToFit);        &#125;        EditorGUILayout.EndVertical();        EditorGUILayout.EndHorizontal();    &#125;        private void OnDestroy()    &#123;        if (processedPreviewTexture != null)        &#123;            DestroyImmediate(processedPreviewTexture);        &#125;    &#125;&#125;#endif
+]]></content>
+      <tags>
+        <tag>Unity文字渲染</tag>
+      </tags>
   </entry>
   <entry>
     <title>Unity的TMP顶点数据优化</title>
@@ -1619,6 +1946,297 @@ private void ApplyBend(TMP_MeshInfo meshInfo)&#123;    Vector3[] vertices = mesh
 项目地址OptimizeUnityTMP
 参考文章TMP(TextMeshPro)优化篇 — 描边投影效果
 ]]></content>
+      <tags>
+        <tag>Unity文字渲染</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Unity的Text与TMP艺术字实现方案</title>
+    <url>/posts/64d42568.html</url>
+    <content><![CDATA[Text 与 TMP 艺术字实现方案1、需要显示艺术字游戏中的战力、伤害、倍率和胜负提示，通常要求保留美术制作的渐变、金属纹理、立体高光与装饰。这些效果既可能出现在数字上，也可能出现在“胜”“利”“战”“力”等少量汉字上。
+这里的素材是美术逐字提供的透明背景 PNG。我们需要把这些图片组合成可变化的艺术字内容，例如“战力12345”“+1280”“胜利”，并让业务层像更新普通文字一样使用：
+// 字体与风格在预制体中配置，业务只更新显示内容。legacyText.text = &quot;战力12345&quot;;artText.text = &quot;胜利&quot;;damageText.text = &quot;+1280&quot;;
+
+需求包括保留图片原色、控制基线和字距、支持内容更新，以及复用既有 Text 或 TMP 界面。每套风格有明确的静态字符集，所有可见字符都应来自同一套美术素材。
+2、实现艺术字的方法2.1 从字体渲染原理看艺术字之前文章《Unity的TMP和Text原理和使用优化》中说到，动态 Text 会从字体文件获取字形，按字号等条件生成位图，再通过图集显示；TMP 常见的 SDF 路径则先生成距离场图集，再由 shader 重建边缘。
+对逐字绘制好的艺术字，可以把生成字形图像的步骤替换为使用美术图片，继续复用文本组件的字符查找、排版和网格生成能力。
+
+
+
+路径
+图集内容
+显示方式
+对本需求的适用性
+
+
+
+常规 Text 字体
+字形覆盖率位图
+通过字体位图显示轮廓
+不能直接还原逐字绘制的彩色素材
+
+
+TMP SDF 字体
+字形边缘的距离信息
+shader 重建边缘与参数化效果
+适合轮廓、描边与阴影，不能直接还原任意彩色绘制细节
+
+
+图片艺术字
+已绘制完成的 RGBA 颜色
+按图集 UV 输出原色和透明度
+适合本文的逐字 PNG 素材
+
+
+图片字体交给 TMP 显示后仍然是位图，放大质量受素材分辨率限制，不会自动获得 SDF 的缩放能力。下面分别讨论 Text 与 TMP 如何接入这种图片艺术字。
+2.2 Text：静态自定义 FontLegacy UGUI Text 可以使用自定义 UnityEngine.Font，通过 CharacterInfo 保存字符码点、字形范围、步进与 UV，并为字体配置 RGBA 图集和材质。
+业务层接入：在 Text 组件上绑定生成的 .fontsettings，配置好字号和颜色，之后直接设置原生 .text：
+legacyText.text = &quot;战力12345&quot;;
+
+**性能特点：**字形图片与映射在编辑器中准备完成，运行时无需为这些字符动态生成字形位图。多个字形由文本组件生成网格，无需逐字创建 Image。内容更新仍会涉及字符串处理、排版与网格重建，最终批次受材质、遮罩、Canvas 和绘制顺序影响。
+这也是在保持原生 Text 字符查找与排版流程的前提下，直接用 .text 显示自定义图片字形的主要路线。自行派生组件或编写网格渲染器也可以提供同名属性，但要额外维护字形查找、布局和 UI 行为，不属于原生字体资产接入。
+2.3 TMP：使用 SpriteAsset 标签显示艺术字即使只显示艺术字，也可以把逐字图片制作成 TMP SpriteAsset，让每张图片对应一个 sprite，再通过标签组合内容。这里所有图片仍是艺术字字形。
+**业务层接入：**配置 SpriteAsset 后，使用图片名称或索引构造标签。例如显示“01”：
+artText.text = &quot;&lt;sprite name=\&quot;0\&quot;&gt;&lt;sprite name=\&quot;1\&quot;&gt;&quot;;
+
+业务若接收普通字符串，就需要先转换成标签字符串。可以把转换封装到展示层，但名称映射、转义、缓存和素材调整后的对应关系仍需维护。直接使用索引还需要保证资产排序稳定。
+**性能特点：**TMP 会解析标签、查找 sprite 并生成网格。一个标签不会创建一个 Image GameObject，也不意味着一次 DrawCall；纯艺术字使用同一 SpriteAsset 与共享材质时，多个字形可以在同一批次内绘制，最终仍需检查 UI 的实际合批条件。
+额外成本主要在普通字符串到标签字符串的转换、临时字符串分配，以及更长的输入和标签解析。缓存可以减少重复转换，但需要管理缓存范围。仅凭存在标签，不能断言它的 GPU 开销明显高于位图字体。
+SpriteAsset 还可以为字形配置 Unicode，通过 TMP 的字符查找路径显示普通字符，不过需要处理字体优先命中同一码点等查找规则。对于整串艺术字，使用专门的位图字体资产更容易明确字符覆盖与风格归属。
+2.4 TMP：静态位图 FontAsset把艺术字图片打包成图集，为 TMP_FontAsset 创建字形表和字符表，通过 Unicode 将普通字符串映射到图片字形。再使用保留 RGBA 的材质，交给 TMP 完成排版与显示。
+**业务层接入：**在 TMP 组件上配置生成的 FontAsset 和共享材质，之后直接设置原生 .text：
+artText.text = &quot;战力12345&quot;;
+
+**性能特点：**省去普通字符串到 sprite 标签的转换，运行时直接按字符查询字体；字形图集静态生成，无需动态扩充这些艺术字。文字更新仍会产生解析、排版与网格重建成本。
+在相同图集、材质复杂度、可见字形数量和屏幕覆盖面积下，它与纯 sprite 方案的 GPU 开销可能接近。其优势主要是业务接口直接、资产语义清晰，以及减少标签转换和相关字符串管理。
+2.5 业务接入与性能对比
+
+
+方法
+业务层输入
+额外接入工作
+CPU 更新特点
+GPU 与内存特点
+
+
+
+Text 静态 Font
+普通字符串
+生成 Font，配置字体与材质
+原生文字排版与网格重建
+由图集、材质、网格和 UI 合批条件决定
+
+
+TMP Sprite 标签
+标签字符串，或先转换普通字符串
+生成 SpriteAsset，维护名称或索引与转换逻辑
+标签解析；转换过程可能额外分配字符串
+单字不是单个 Image；共享图集和材质有利于合批
+
+
+TMP 位图 FontAsset
+普通字符串
+生成 FontAsset，配置 RGBA 材质
+直接查找字形，无需业务标签转换；仍需排版与重建
+与相同条件的 sprite 方案可能接近，无天然 DrawCall 优势
+
+
+同一批 RGBA 素材采用相同图集尺寸和导入设置时，纹理占用主要由图集决定。Text 与 TMP 的 CPU 排版、网格及资产管理实现不同，不能直接断言某一方总是更快。
+原文章中的 Text 与 TMP 性能数字对应当时的字体、图集和测试内容，不能直接作为这里图片艺术字的性能结论。比较时应统一字符数量、字号、刷新频率、图集格式和目标设备。
+3、选择静态位图字体方案选择“编辑器生成静态位图字体，运行时使用原生文本组件”的方案：已有 Text 界面导出 UnityEngine.Font，已有 TMP 界面导出 TMP_FontAsset，两者共用美术源图与排版配置。
+3.1 核心收益：业务代码无感，只替换组件字体这套方案最主要的好处是把艺术字作为字体资产接入。对于已经通过 .text 更新内容的界面，业务不需要知道字体来自普通字体文件还是美术图片，也不需要增加艺术字专用的显示分支、字符串转换或逐字图片操作。
+例如原有业务代码为：
+// 替换字体前后，业务更新内容的方式保持一致。legacyText.text = &quot;战力12345&quot;;
+
+将 Text 组件上的 Font 替换为生成的艺术字字体后，同一行代码就会显示对应的艺术字。TMP 同理，只需替换组件上的 Font Asset，业务仍然设置原生 .text 属性。
+字体材质由生成工具配套创建并绑定，字形映射、基线和字距保存在字体资产中。UE 人员可以在预制体上完成字体替换和显示调整，业务层无需接入新的运行时接口。对于原本显式指定了其他材质的组件，应同时恢复或绑定与新字体匹配的材质，避免覆盖字体默认材质。
+业务无感的前提是新字体覆盖原有显示内容。例如“战力12345”中的汉字、数字，以及数值格式化可能产生的正负号、小数点和单位，都需要有对应素材。组件上的字号、颜色与布局由 UE 人员按设计效果调整，这些都属于展示配置。
+3.2 工具封装后，由 UE 人员独立维护程序需要一次性封装好素材校验、图集打包、字体生成、材质绑定和原地更新工具。工具交付后，日常修改可以完全由 UE 人员完成：
+
+准备或替换对应风格的逐字图片，配置字符映射与排版参数。
+通过生成工具导出或更新 Text &#x2F; TMP 字体资产。
+在预制体上替换 Font &#x2F; Font Asset，调整字号、颜色与布局并预览效果。
+根据工具提示补齐缺字或修正素材，再保存预制体与相关资产。
+
+后续更换艺术字风格、调整数字字距、替换美术素材，都通过配置和资产更新完成，无需让程序逐个界面修改业务代码。工具必须提供可理解的缺字、重复映射、图集容量和引用错误提示，并在重新生成时保留资产 GUID，才能让这套流程稳定交给 UE 人员使用。
+3.3 选择依据选择位图字体的重点是业务接口保持不变，以及把日常维护交给展示层和工具：程序负责通用生成能力，UE 人员负责字体资产与界面表现，业务继续负责内容更新。
+对于 TMP，相比逐字构造 sprite 标签，位图 FontAsset 还省去了标签转换、名称或索引映射及相关字符串管理。但在相同图集、材质和字形规模下，不能据此承诺明显的 GPU 性能提升；实际性能仍需在目标设备上测量。
+4、我们的方案需要实现的东西需要封装一套可交给 UE 人员独立使用的编辑器生成工具，覆盖素材配置与校验、图集打包、Text 字体导出、TMP 字体导出、材质自动绑定、原地更新与效果预览。工具应提供清晰的操作入口和错误提示，让 UE 人员无需修改代码即可完成字体制作与替换。运行时复用原生文本组件，不需要逐字创建显示对象。
+4.1 显示链路：用字体资产连接字符串与图片一个可用的图片字体包含四类信息：字符映射、字形度量、图集与材质。
+编辑器阶段逐字 PNG + Unicode 映射 + 排版配置                  ↓ 校验、打包、导出       RGBA 图集 + Text / TMP 字体资产运行时阶段text = &quot;胜利&quot;      ↓ 解析字符、查询字体“胜”/“利” → 字形编号 → 图集矩形与度量      ↓ 排版并生成文本组件的网格字形四边形 + UV + 顶点色      ↓ 材质采样图集屏幕显示美术制作的艺术字
+
+以“胜利”为例，文字组件在重建时解析字符串，根据字符表找到两个字形；再根据字形的宽高与基线偏移生成四边形，根据图集区域生成 UV。材质在四边形内部采样原图，图外由 Alpha 保持透明，最终得到两个艺术字。
+字符可以产生字形四边形，但空格、换行等不必产生可见四边形。文字变化通常会使布局或网格变脏，由 Unity 在重建阶段处理，并非每次属性赋值都立即绘制。
+这条路线复用了原生组件的排版与渲染入口，Text 和 TMP 的内部实现、缺字策略及材质约定仍各不相同。
+4.2 字形度量：区分图片尺寸、基线偏移与光标步进仅记录“字符对应图集哪一块”还不够。生成器至少需要保存以下数据：
+
+
+
+数据
+用途
+示例
+
+
+
+Unicode
+从字符串查到字形
+“胜”为 U+80DC，即 32988
+
+
+Glyph ID
+标识一个字形，供字符表引用
+从 1 开始稳定分配
+
+
+Atlas Rect
+图集中的像素采样区域
+x&#x3D;8，y&#x3D;8，w&#x3D;48，h&#x3D;60
+
+
+Width &#x2F; Height
+字形四边形的设计尺寸
+48 × 60
+
+
+Bearing X
+字形左边相对光标的偏移
+0
+
+
+Bearing Y
+字形顶边相对基线的高度
+60
+
+
+Advance
+当前字符结束后光标前进的距离
+52
+
+
+Face Metrics
+整套字体的字号、上升线、下降线和行高
+设计字号 64，行高 72
+
+
+在设计空间中，设光标为 (penX, baselineY)，缩放为 scale，则：
+left   = penX + bearingX × scaletop    = baselineY + bearingY × scaleright  = left + width × scalebottom = top - height × scalenextPenX = penX + advance × scale
+
+例如一个字宽 48、高 60、Bearing Y 为 60，字形就处于基线上方；Advance 为 52，代表给下一个字额外留下 4 个设计单位。若 Bearing Y 写成 0，字形会向基线下方延伸，从而导致上下错位。
+描边、投影与外发光也可能占用图片空间，视觉范围不一定等于排版步进。裁透明边时必须同步补偿 Bearing，避免裁完图片后文字上下跳动。滚动数字建议设置相同 Advance，防止数值改变时整串文字宽度抖动。
+4.3 素材配置：统一字符映射与排版规则建议每套风格使用一份配置，记录设计字号、基线、行高、默认字距，以及每个字符的图片、码点、Bearing 和 Advance。不要仅凭文件尺寸自动推断所有排版数据。
+文件可命名为 0.png、胜.png；对文件名不合法的符号以及非 BMP 字符，使用 U+002F.png 等码点命名，或显式配置映射。生成器应拒绝重复码点、无效 Unicode 标量、空图片和未配置的排版数据。
+Unicode 码点与 C# char 不是同一个概念。普通汉字通常可以直接取 char 的整数值；非 BMP 字符需要解析 UTF-16 代理对，不能简单按字符串中的每个 char 生成一条记录。配置层建议统一使用 uint 存储 Unicode 标量。Legacy Text 对非 BMP 字符的实际支持还需单独验证，不能仅凭 CharacterInfo.index 是整数就承诺支持。
+默认按“一个 Unicode 标量映射一个字形”制作素材。若美术提供的是完整的“胜利”一张图，它应作为整词图片显示；要在普通 text = &quot;胜利&quot; 下将两个字符替换成一个整体字形，需要额外的词组替换或 shaping 机制，不能仅靠基本字符表自动实现。
+空格应有合理的 Advance，可以没有可见图像；同时明确支持半角、全角、正负号和百分号的范围，避免业务格式化后出现未收录字符。
+4.4 图集生成：一次打包并稳定更新资产编辑器生成流程建议为：读取并校验配置，按码点稳定排序，打包图集，保存并重新导入 PNG，再用同一次打包得到的矩形生成字体资产，最后执行字符覆盖与引用检查。
+图片使用 RGBA，初始可采用无压缩、无 MipMap、Clamp、Bilinear 的设置，再按目标平台验证压缩效果。Bilinear 下不建议采用零间距打包，应预留例如 2～4 像素间隔，并根据需要做边缘颜色扩展，降低串色和透明边黑边问题。字体 UV 指向有效字形区域，避免把隔离区算进文字宽度。
+若使用 Texture2D.PackTextures，必须检查输出矩形与源图的尺寸关系；容量不足时它可能缩小图片，不能仍使用原始图片尺寸假定是无损打包。固定精度的艺术字应选择扩大图集、明确分页，或报错要求拆分风格。首版建议限制单页，超限时给出清晰提示。
+图集矩形统一使用左下原点；从左上原点数据导入时转换：
+yBottom = atlasHeight - yTop - glyphHeightuMin = x / atlasWidthvMin = yBottom / atlasHeightuMax = (x + glyphWidth) / atlasWidthvMax = (yBottom + glyphHeight) / atlasHeight
+
+使用禁止旋转的打包方式可以简化适配。重新生成时应保留字体、材质和图集的 GUID，尽量原地更新已有资产，避免预制体引用失效。源素材修改后由生成器更新产物。
+4.5 Text 导出器：生成静态 UnityEngine.FontText 路径输出 .fontsettings、持久化材质与图集 PNG。对每个字符创建 CharacterInfo，设置码点、几何范围、Advance 与四角 UV，再写入 Font.characterInfo。
+建议使用明确的边界字段表达基线关系，减少依赖旧版 vert 矩形写法：
+// 以下变量来自已经校验的字形配置与同一次打包结果。CharacterInfo characterInfo = new CharacterInfo&#123;    index = unicode,    minX = bearingX,    maxX = bearingX + glyphWidth,    minY = bearingY - glyphHeight,    maxY = bearingY,    advance = advance,    uvBottomLeft = new Vector2(uvRect.xMin, uvRect.yMin),    uvBottomRight = new Vector2(uvRect.xMax, uvRect.yMin),    uvTopLeft = new Vector2(uvRect.xMin, uvRect.yMax),    uvTopRight = new Vector2(uvRect.xMax, uvRect.yMax)&#125;;
+
+材质使用支持 RGBA 采样与 UGUI 裁剪的 shader，例如 UI/Default，其主纹理指向已保存并导入的图集。给 Text 配置生成的 Font，组件材质保持默认使用字体材质，Color 为白色；设计好字号与布局后保存预制体，业务直接设置 .text。
+Legacy 自定义 Font 的尺寸换算涉及其序列化度量和 Unity 版本。应在目标版本用固定设计字号建立参考预制体，校准设计高度、基线与行高。内部 m_PixelScale 的近似换算不应当作稳定公开 API。
+此路径不依赖 TMP 的 fallback 机制。缺字应在生成期或界面配置检查中发现，并明确告警或替代字策略；不能假定会自动回退到系统字体。
+UGUI Outline 会复制偏移后的网格，并继续使用纹理 Alpha，并非必然画成矩形。但它会增加顶点量，也难以还原美术的复杂描边与投影；这类效果优先烘焙在图片中。
+4.6 TMP 导出器：静态 FontAsset 与 RGBA 材质TMP 界面使用静态位图 FontAsset，让字体资产直接参与字符查找。与 Text 路径一样，业务通过原生 .text 属性设置艺术字内容；两条路径共享素材与排版配置，分别导出对应的字体资产。
+4.6.1 当前版本的类型与初始化以下 API 以 TMP 3.0.6 为例，使用 UnityEngine.TextCore.FaceInfo、Glyph、GlyphRect、GlyphMetrics，字符映射使用 TMPro.TMP_Character。应使用当前版本的 TextCore 类型定义。
+该版本 glyphTable、characterTable 的 setter 为 internal，外部编辑器工具应通过公开 getter 获得列表后执行 Clear() 和 Add()，而不是直接替换整个属性。
+生成器还需正确初始化字体版本与渲染模式。可以基于当前版本提供的 TMP_FontAsset.CreateFontAsset 创建有效的位图字体骨架，再替换图集、材质、FaceInfo 和表数据，切换为 Static 并清理临时资源；也可以通过隔离的编辑器序列化适配层生成资产。不要仅 CreateInstance 后随意填几个字段：空版本可能触发 TMP 的旧资产升级逻辑。涉及内部序列化字段的方式必须集中封装，并在升级 TMP 时检查。
+4.6.2 彩色艺术字的材质选择当前版本的 TextMeshPro/Bitmap 从 _MainTex 获取 Alpha，RGB 来自 Face 纹理与颜色；TextMeshPro/Mobile/Bitmap 也主要使用字形 Alpha。这两者不能直接当作保留彩色图集原色的通用方案。选择 shader 时应核对当前版本的实际名称和采样逻辑。
+当前 Essential Resources 中的 TextMeshPro/Bitmap Custom Atlas 会执行以下采样：
+color = MainTex(字形UV) × FaceTex(面纹理UV) × 顶点色
+
+将艺术字图集赋给 _MainTex，_FaceTex 设为白纹理，材质和组件颜色保持白色，即可保留 RGBA 原色。应确保已导入相应 shader，并验证 CanvasGroup 透明度、Mask 和 RectMask2D。若另写 shader，也应完整保留这些 UI 行为。
+SDF shader 依赖距离场编码，不能直接拿普通 RGBA 图片当距离场使用。字体放进 TMP 后显示不对，首先区分是字符查找、度量、UV 还是材质采样问题。
+4.6.3 填充字形表与字符表下面展示生成器内部填表逻辑；假定 fontAsset 已完成上述骨架初始化，配置与图集均已校验。这是关键流程片段，不能单独作为完整生成工具运行。
+// Glyph、GlyphRect、GlyphMetrics 来自 UnityEngine.TextCore。// 字符表负责 Unicode 到字形的映射，字形表负责度量与图集区域。fontAsset.glyphTable.Clear();fontAsset.characterTable.Clear();Glyph glyph = new Glyph(    glyphID,    new GlyphMetrics(        glyphWidth,        glyphHeight,        bearingX,        bearingY,        advance),    new GlyphRect(atlasX, atlasY, atlasGlyphWidth, atlasGlyphHeight),    1f,    0);fontAsset.glyphTable.Add(glyph);fontAsset.characterTable.Add(new TMP_Character(unicode, glyph));// 实际生成时逐字填完表，再统一重建查询字典。fontAsset.ReadFontAssetDefinition();
+
+上例为单字示意。完整工具应为全部字形分配稳定且唯一的 Glyph ID，循环填表后只调用一次 ReadFontAssetDefinition()。设置 FaceInfo 时使用统一的设计字号、基线、上升线、下降线及行高；字形 Bearing Y 则表示各自顶边位置，不能统一填零。
+以 UI 正交显示、各级 scale 为 1 为例，字号与设计 Point Size 的比值可作为设计空间缩放的基础。fontSize 等于 Point Size 可作为参考尺寸，但最终屏幕像素还受 CanvasScaler、Transform 等影响。字号可以调整，只是位图放大可能变糊；建议固定设计字号并关闭 Auto Size，保持美术效果稳定。
+4.6.4 持久化完整依赖设置 Static、图集尺寸、实际 Padding、纹理与材质引用，按需关闭多图集扩展。将字体、材质和图集全部保存后，重新导入并验证查表与引用。
+材质既可以作为 FontAsset 的子资产，也可以是独立 .mat；关键在于它必须持久化。图集若保留为独立 PNG，.asset 仍然依赖它，不能称为“一个文件包含所有内容”。如需单文件分发，材质与纹理都要作为子资产保存，并设计对应更新流程。
+预制体中指定 FontAsset，使用匹配的共享材质，避免给每个实例创建新材质。业务打开界面后即可赋值：
+// 当前字体资产必须已收录这些字符。artText.text = &quot;战力12345&quot;;
+
+4.7 字符覆盖校验与业务接入每套风格应收录实际需要显示的全部字符。伤害数字除 0～9 外，可能还需要正负号、小数点、百分号和倍率符号；战力显示若使用“万”“亿”等单位，也要同时制作并收录。固定文案应在生成或构建前检查覆盖情况，数值显示则检查格式化规则可能产生的完整字符集合。
+缺字时记录明确告警，并按界面约定使用同风格替代字或拒绝该内容。普通字体回退无法补齐同风格的美术素材，不能用它掩盖缺字。只接收普通内容时关闭 Rich Text，避免特殊字符被当作格式控制信息。
+在预制体中绑定字体、共享材质、设计字号和颜色，校准基线、字距、行高与显示范围。业务只设置 .text，组件存活期间保持字体、材质与图集引用有效。
+大量伤害飘字应复用整个文本对象，合理控制同时显示数量。按内容变化更新，避免每帧重复格式化和强制刷新；数值转字符串与文字重建仍有成本，不能承诺零 GC。对滚动数字设置等宽 Advance，避免数值变化导致宽度抖动。
+5、结果这套方案的目标产物是一套 UE 人员可独立操作的生成工具、一份艺术字配置、一张共享 RGBA 图集，以及适配 Text 或 TMP 的静态字体资产。UE 人员通过工具更新字体，在组件上替换 Font &#x2F; Font Asset，即可完成艺术字风格切换；已有业务代码继续通过原生 .text 属性更新内容。
+接入后的使用方式统一为：
+legacyText.text = &quot;战力12345&quot;;artText.text = &quot;胜利&quot;;damageText.text = &quot;+1280&quot;;
+
+方案预期减少逐字 Image 的对象与布局管理，并把字符映射、基线、字距和素材更新集中到资产生成阶段。实际完成情况应通过以下验收确认；性能收益需要在目标设备上测量。
+验收清单
+
+
+验收项
+操作
+通过标准
+
+
+
+业务无感
+保持原有 .text 赋值代码，仅替换组件字体及配套展示配置
+业务代码无需修改，艺术字显示正确
+
+
+UE 独立维护
+UE 人员使用工具替换素材、重新生成字体并更新预制体
+全流程无需修改代码，错误可根据工具提示定位与修正
+
+
+原色与透明
+对比带渐变、投影和半透明边缘的原图
+原色保留，无明显黑边或串色
+
+
+基线与字距
+组合显示高低不同的艺术字形，交替显示 1111 &#x2F; 8888
+基线符合配置，等宽数字布局稳定
+
+
+排版
+检查居中、空格、换行和边界字符
+结果与配置一致，视觉效果未被裁切
+
+
+缺字
+输入未收录字符
+明确告警，按约定使用同风格替代字或拒绝内容
+
+
+UI 行为
+使用 Mask、RectMask2D、CanvasGroup
+裁剪与整体透明度正确
+
+
+再生成
+改素材后重新导出、重启编辑器
+GUID 与预制体引用稳定，资产可重新加载
+
+
+构建
+在目标平台加载实际界面
+shader、材质与图集依赖完整，显示与编辑器一致
+
+
+性能
+对比原方案，用 Profiler 与 Frame Debugger 检查
+记录网格重建、GC、材质切换和纹理占用
+
+
+单图集与共享材质有利于减少状态切换，但最终批次仍以 Frame Debugger 为准。按内容变化刷新文本，避免每帧重复格式化；字符串拼接、数值格式化和布局重建仍可能产生开销，不能承诺 .text 调用本身零 GC。
+纹理预算可先按未压缩格式估算：1024×1024 RGBA32 约 4 MiB，2048×2048 约 16 MiB，均未包含 MipMap、可读副本及其他资产开销。优先按实际字符集选择图集尺寸，完成生成后关闭不再需要的运行时 Read&#x2F;Write。
+]]></content>
+      <tags>
+        <tag>Unity文字渲染</tag>
+      </tags>
   </entry>
   <entry>
     <title>Unity的协程的原理理解</title>
@@ -1667,21 +2285,6 @@ StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView�
 ]]></content>
   </entry>
   <entry>
-    <title>Unity节点编辑器(二) -- GraphView窗口</title>
-    <url>/posts/9891abd3.html</url>
-    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
-窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
-public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
-背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
-
-GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
-创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
-拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
-
-实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
-]]></content>
-  </entry>
-  <entry>
     <title>Unity节点编辑器(五) -- 引导遮罩</title>
     <url>/posts/d34f19cf.html</url>
     <content><![CDATA[遮罩需求目前市面上游戏的引导，基本上都采用了在需要突出的地方高亮引导玩家，通过点击等方式去触发下一步操作。所以需求就抽象成两个：1.高亮某一块区域2.高亮区域的点击判断和通知
@@ -1699,6 +2302,21 @@ public class RectMaskVertex : MaskVertexBase&#123;    [Header(&quot;中心位置
 using System.Collections;using System.Collections.Generic;using UnityEngine;using UnityEngine.EventSystems;using UnityEngine.UI;public delegate bool PointerEventCallback(PointerEventData eventData);/// &lt;summary&gt;/// 遮罩的定点类，负责设置遮罩的顶点数据/// &lt;/summary&gt;[RequireComponent(typeof(Image))]public abstract class MaskVertexBase : BaseMeshEffect, IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler&#123;    [Header(&quot;向Shader传递的数据&quot;)]    public AdditionalCanvasShaderChannels additionalCanvasShaderChannels;    protected Canvas canvas;    protected Camera uiCamera;    protected RectTransform canvansRect;    protected RectTransform rectTransform;    [HideInInspector]    public EventSystem eventSystem;    [HideInInspector]    public PointerEventCallback raycastLocationValid;    private List&lt;RaycastResult&gt; raycastResult;    private GameObject m_lastHoverGameObject;    protected virtual void OnEnable()    &#123;        base.OnEnable();        if (canvas == null)        &#123;            canvas = transform.GetComponentInParent&lt;Canvas&gt;();            uiCamera = canvas.worldCamera;            rectTransform = transform.GetComponent&lt;RectTransform&gt;();            canvansRect = canvas.transform.GetComponent&lt;RectTransform&gt;();            raycastResult = new List&lt;RaycastResult&gt;();            AdditionalCanvasShaderChannels();        &#125;    &#125;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);    /// &lt;summary&gt;    /// 添加Canvas向Shader传递的数据    /// &lt;/summary&gt;    protected virtual void AdditionalCanvasShaderChannels()    &#123;        if (canvas == null)        &#123;            return;        &#125;        if (additionalCanvasShaderChannels == UnityEngine.AdditionalCanvasShaderChannels.None)        &#123;            return;        &#125;        if ((canvas.additionalShaderChannels &amp; additionalCanvasShaderChannels) == 0)        &#123;            canvas.additionalShaderChannels |= additionalCanvasShaderChannels;            graphic.SetVerticesDirty();        &#125;    &#125;    #region 对外方法    public void SetEventSystem(EventSystem eventSystem)    &#123;        this.eventSystem = eventSystem;    &#125;        public bool GetLocalPointByScreenPos(Vector2 screenPos, out Vector2 localPoint)    &#123;        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(rectTransform, screenPos, uiCamera, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public bool GetLocalPointByWorldPos(Vector3 worldPos, Camera watchCamera, out Vector2 localPoint)    &#123;        Vector3 screenPos = watchCamera.WorldToScreenPoint(worldPos);        if (GetLocalPointByScreenPos(screenPos, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public Camera GetCanvasWorldCamera()    &#123;        return uiCamera;    &#125;    #endregion    #region 点击实现    private void CheckAndChangeHover(GameObject newHoverGameObject, PointerEventData eventData)    &#123;        if (newHoverGameObject != m_lastHoverGameObject)        &#123;            if (m_lastHoverGameObject != null)            &#123;                ExecuteEvents.Execute(m_lastHoverGameObject, eventData, ExecuteEvents.pointerExitHandler);            &#125;            if (newHoverGameObject != null)            &#123;                ExecuteEvents.Execute(newHoverGameObject, eventData, ExecuteEvents.pointerEnterHandler);            &#125;            m_lastHoverGameObject = newHoverGameObject;        &#125;    &#125;    protected virtual GameObject PassEvent&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        raycastResult.Clear();        eventSystem.RaycastAll(eventData, raycastResult);        bool isExecute = false;        foreach (var result in raycastResult)        &#123;            if (result.gameObject == transform.gameObject)            &#123;                continue;            &#125;            isExecute = ExecuteEvents.Execute(result.gameObject, eventData, function);            return result.gameObject;        &#125;        return null;    &#125;    protected virtual GameObject CheckRaycastLocationValid&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        if (raycastLocationValid != null)        &#123;            bool isCanClick = raycastLocationValid.Invoke(eventData);            if (isCanClick)            &#123;                return PassEvent(eventData, function);            &#125;            // 判断 function 是否指向 pointerClickHandler            if (typeof(T) == typeof(IPointerClickHandler) &amp;&amp;                 function.Method == ExecuteEvents.pointerClickHandler.Method)            &#123;                MessageSystem.Instance.SendMessage(MessageDefine.MASK_CLICK);            &#125;        &#125;        return null;    &#125;    public virtual void OnPointerClick(PointerEventData eventData)    &#123;                var result = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerClickHandler);        if (result != null)        &#123;            MessageSystem.Instance.SendMessage(MessageDefine.MASK_HIGH_LINGHT_CLICK);                   &#125;    &#125;    public virtual void OnPointerEnter(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerEnterHandler);    &#125;    public virtual void OnPointerDown(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerDownHandler);    &#125;    public virtual void OnPointerUp(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerUpHandler);    &#125;    public void OnPointerExit(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerExitHandler);    &#125;    public void OnPointerMove(PointerEventData eventData)    &#123;        GameObject enterObject = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerMoveHandler);        CheckAndChangeHover(enterObject, eventData);    &#125;    #endregion#if UNITY_EDITOR    void OnValidate()    &#123;        if (graphic != null)        &#123;            graphic.SetVerticesDirty();            AdditionalCanvasShaderChannels();        &#125;    &#125;#endif&#125;
 
 遮罩预览
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity节点编辑器(二) -- GraphView窗口</title>
+    <url>/posts/9891abd3.html</url>
+    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
+窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
+public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
+背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
+
+GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
+创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
+拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
+
+实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
 ]]></content>
   </entry>
   <entry>
@@ -1771,6 +2389,36 @@ Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的�
 Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
 
 参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
+]]></content>
+  </entry>
+  <entry>
+    <title>基于前缀树的红点系统设计与实现</title>
+    <url>/posts/79323865.html</url>
+    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
+效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
+前缀树介绍
+前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
+
+红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
+public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
+
+节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
+增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
+public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
+减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
+public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
+数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
+public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
+刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
+public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
+红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
+单例这里我使用了单例模式，类中维护一个红点根节点。
+public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
+添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
+public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
+减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
+public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
+性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
 ]]></content>
   </entry>
   <entry>
@@ -2115,36 +2763,6 @@ TextMeshPro 文档
 ]]></content>
   </entry>
   <entry>
-    <title>基于前缀树的红点系统设计与实现</title>
-    <url>/posts/79323865.html</url>
-    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
-效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
-前缀树介绍
-前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
-
-红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
-public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
-
-节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
-增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
-public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
-减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
-public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
-数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
-public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
-刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
-public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
-红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
-单例这里我使用了单例模式，类中维护一个红点根节点。
-public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
-添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
-public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
-减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
-public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
-性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
-]]></content>
-  </entry>
-  <entry>
     <title>第一篇博客</title>
     <url>/posts/ff05b5bf.html</url>
     <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
@@ -2193,6 +2811,44 @@ GraphAssetGraphControllerGraphWindowEditorNodeNodeViewRuntimeNode业务 UI / 调
 ]]></content>
   </entry>
   <entry>
+    <title>通用节点编辑器02-编辑器部分</title>
+    <url>/posts/80a055ae.html</url>
+    <content><![CDATA[编辑器基类与扩展点编辑器层由图资产、Controller、窗口、图 View、节点外壳和节点内容 View 组成。
+NodeGraphAsset    -&gt; NodeGraphController    -&gt; NodeEditorWindowBase    -&gt; NodeGraphViewBase    -&gt; NodeBase&lt;TData&gt;    -&gt; NodeViewBase&lt;TData&gt;
+
+图资产NodeGraphAsset 是图配置的 ScriptableObject，保存以下内容：
+
+graphId：图的稳定标识。
+graphName：创建时生成的图名称。
+serializedGraph：编辑器图序列化结果。
+
+新建图资产默认保存到：
+Assets/NodeGraphView/Editor Default Resources/GraphData/&#123;GraphName&#125;.asset
+
+ControllerNodeGraphController 是业务图的编辑器策略层，常见覆盖点包括：
+public override Type AssetType =&gt; typeof(TaskGraphAsset);public override Type EditorWindowType =&gt; typeof(TaskGraphWindow);public override Type GraphViewType =&gt; typeof(NodeGraphView.NodeGraphView);public override string GetExportFolderPath(NodeGraphAsset asset)&#123;    return &quot;Assets/Resources/TaskGraphs&quot;;&#125;
+
+Controller 还负责节点创建数据、端口数据、连接规则、图序列化和 Runtime 图导出。
+窗口与图 ViewNodeEditorWindowBase 提供通用窗口生命周期、保存、导出和调试高亮。业务窗口继承它后，可通过 BuildToolbar 加入业务按钮。
+NodeGraphViewBase 负责 GraphView 的节点创建、连线、删除、保存和导出。业务通常不需要重写它，只有在需要特殊交互时才扩展。
+节点外壳与节点内容NodeBase 是所有编辑器节点共用的外壳，负责：
+
+标题编辑。
+节点 ID 显示。
+ID 复制按钮。
+输入与输出端口。
+节点尺寸、样式和右键菜单。
+
+NodeViewBase&lt;TData&gt; 只负责业务节点的内容区。例如 Task 节点的名称和描述编辑字段属于 TaskNodeView。
+public class TaskNode : NodeBase&lt;TaskNodeData&gt;&#123;&#125;public class TaskNodeView : NodeViewBase&lt;TaskNodeData&gt;&#123;    public override void Build(VisualElement root)    &#123;        // 创建业务字段。    &#125;&#125;
+
+Task 节点的代码结构Task 业务在通用编辑器基类上增加自己的资产、Controller、窗口、节点和内容 View。通用层负责图编辑和节点外壳，业务层只描述 Task 的数据、固定端口与内容区。
+classDiagram    class NodeGraphAsset    class TaskGraphAsset    NodeGraphAsset &lt;|-- TaskGraphAsset    class NodeGraphController    class TaskGraphController    NodeGraphController &lt;|-- TaskGraphController    class NodeEditorWindowBase    class TaskGraphWindow    NodeEditorWindowBase &lt;|-- TaskGraphWindow    class NodeGraphViewBase    class NodeBase~TData~ &#123;        +标题编辑        +ID 与复制按钮        +输入输出端口        +尺寸、样式、右键菜单    &#125;    class TaskNode &#123;        +Task 固定端口规则    &#125;    NodeBase~TData~ &lt;|-- TaskNode    class NodeViewBase~TData~ &#123;        +Build(root)    &#125;    class TaskNodeView &#123;        +Task 名称与描述字段    &#125;    NodeViewBase~TData~ &lt;|-- TaskNodeView    class TaskNodeData    TaskNode --&gt; TaskNodeData    TaskNode --&gt; TaskNodeView : 创建内容 View    TaskGraphWindow --&gt; NodeGraphViewBase : 持有    TaskGraphController --&gt; TaskGraphAsset : 管理
+
+图中 NodeBase&lt;TData&gt; 是所有节点共用的 View 外壳；TaskNode 只补充 Task 的端口规则；TaskNodeView 只构建 Task 的业务内容区。这使后续业务可以沿用相同结构，而不需要修改通用编辑器代码。
+]]></content>
+  </entry>
+  <entry>
     <title>通用节点编辑器03-运行时部分</title>
     <url>/posts/7bb25447.html</url>
     <content><![CDATA[通用运行时与序列化接口运行时部分负责加载导出的图数据、创建 RuntimeNode、执行节点生命周期并完成节点跳转。
@@ -2230,41 +2886,68 @@ private readonly INodeGraphSerializer serializer =    new NodeGraphNewtonJsonSer
 ]]></content>
   </entry>
   <entry>
-    <title>通用节点编辑器02-编辑器部分</title>
-    <url>/posts/80a055ae.html</url>
-    <content><![CDATA[编辑器基类与扩展点编辑器层由图资产、Controller、窗口、图 View、节点外壳和节点内容 View 组成。
-NodeGraphAsset    -&gt; NodeGraphController    -&gt; NodeEditorWindowBase    -&gt; NodeGraphViewBase    -&gt; NodeBase&lt;TData&gt;    -&gt; NodeViewBase&lt;TData&gt;
+    <title>通用节点编辑器05-任务系统实例</title>
+    <url>/posts/83c1b684.html</url>
+    <content><![CDATA[Task 节点图示例Task 示例展示了一个完整的业务接入流程：编辑任务节点、导出 Runtime 图、显示任务面板，并根据完成或失败结果继续执行后续节点。
+编辑器部分Task 图包含：
 
-图资产NodeGraphAsset 是图配置的 ScriptableObject，保存以下内容：
+TaskGraphAsset：Task 图资产。
+TaskGraphController：指定 Runtime 导出目录 Assets/Resources/TaskGraphs。
+TaskGraphWindow：注册 Tools/Node Graph/Task/Create Task Graph 创建入口。
+TaskNode：定义 In、complete 和 failed 端口。
+TaskNodeView：编辑 TaskNodeData 的任务名称和描述。
 
-graphId：图的稳定标识。
-graphName：创建时生成的图名称。
-serializedGraph：编辑器图序列化结果。
+任务节点的出口含义：
 
-新建图资产默认保存到：
-Assets/NodeGraphView/Editor Default Resources/GraphData/&#123;GraphName&#125;.asset
 
-ControllerNodeGraphController 是业务图的编辑器策略层，常见覆盖点包括：
-public override Type AssetType =&gt; typeof(TaskGraphAsset);public override Type EditorWindowType =&gt; typeof(TaskGraphWindow);public override Type GraphViewType =&gt; typeof(NodeGraphView.NodeGraphView);public override string GetExportFolderPath(NodeGraphAsset asset)&#123;    return &quot;Assets/Resources/TaskGraphs&quot;;&#125;
 
-Controller 还负责节点创建数据、端口数据、连接规则、图序列化和 Runtime 图导出。
-窗口与图 ViewNodeEditorWindowBase 提供通用窗口生命周期、保存、导出和调试高亮。业务窗口继承它后，可通过 BuildToolbar 加入业务按钮。
-NodeGraphViewBase 负责 GraphView 的节点创建、连线、删除、保存和导出。业务通常不需要重写它，只有在需要特殊交互时才扩展。
-节点外壳与节点内容NodeBase 是所有编辑器节点共用的外壳，负责：
+端口 key
+含义
 
-标题编辑。
-节点 ID 显示。
-ID 复制按钮。
-输入与输出端口。
-节点尺寸、样式和右键菜单。
 
-NodeViewBase&lt;TData&gt; 只负责业务节点的内容区。例如 Task 节点的名称和描述编辑字段属于 TaskNodeView。
-public class TaskNode : NodeBase&lt;TaskNodeData&gt;&#123;&#125;public class TaskNodeView : NodeViewBase&lt;TaskNodeData&gt;&#123;    public override void Build(VisualElement root)    &#123;        // 创建业务字段。    &#125;&#125;
 
-Task 节点的代码结构Task 业务在通用编辑器基类上增加自己的资产、Controller、窗口、节点和内容 View。通用层负责图编辑和节点外壳，业务层只描述 Task 的数据、固定端口与内容区。
-classDiagram    class NodeGraphAsset    class TaskGraphAsset    NodeGraphAsset &lt;|-- TaskGraphAsset    class NodeGraphController    class TaskGraphController    NodeGraphController &lt;|-- TaskGraphController    class NodeEditorWindowBase    class TaskGraphWindow    NodeEditorWindowBase &lt;|-- TaskGraphWindow    class NodeGraphViewBase    class NodeBase~TData~ &#123;        +标题编辑        +ID 与复制按钮        +输入输出端口        +尺寸、样式、右键菜单    &#125;    class TaskNode &#123;        +Task 固定端口规则    &#125;    NodeBase~TData~ &lt;|-- TaskNode    class NodeViewBase~TData~ &#123;        +Build(root)    &#125;    class TaskNodeView &#123;        +Task 名称与描述字段    &#125;    NodeViewBase~TData~ &lt;|-- TaskNodeView    class TaskNodeData    TaskNode --&gt; TaskNodeData    TaskNode --&gt; TaskNodeView : 创建内容 View    TaskGraphWindow --&gt; NodeGraphViewBase : 持有    TaskGraphController --&gt; TaskGraphAsset : 管理
+complete
+任务完成后的下一节点
 
-图中 NodeBase&lt;TData&gt; 是所有节点共用的 View 外壳；TaskNode 只补充 Task 的端口规则；TaskNodeView 只构建 Task 的业务内容区。这使后续业务可以沿用相同结构，而不需要修改通用编辑器代码。
+
+failed
+任务失败后的下一节点
+
+
+运行时入口TaskGraphExampleRunner 只负责：
+
+创建 TaskPanel。
+从 Resources 加载 Task 图。
+将 TaskPanel 注入每一个 TaskRuntimeNode。
+调用 GraphRunner.Start() 启动图。
+
+graphRunner = GraphRuntimeManager.Instance    .LoadFromResources(resourcesPath);foreach (INodeGraphRuntimeNode node in graphRunner.Nodes)&#123;    if (node is TaskRuntimeNode taskNode)    &#123;        taskNode.SetPanel(taskPanel);    &#125;&#125;graphRunner.Start();
+
+TaskRuntimeNode 驱动业务TaskRuntimeNode.OnEnter() 负责设置面板回调并刷新任务信息：
+panel.SetCallbacks(this);panel.Refresh(    string.IsNullOrEmpty(UserData.name) ? Title : UserData.name,    UserData.description,    HasExit(&quot;complete&quot;),    HasExit(&quot;failed&quot;));
+
+TaskPanel 的完成和失败按钮通过 ITaskPanelCallbacks 回调到当前 RuntimeNode：
+TaskPanel Button    -&gt; TaskRuntimeNode.OnComplete / OnFail    -&gt; SelectExit(&quot;complete&quot; / &quot;failed&quot;)    -&gt; GraphRunner.MoveNext    -&gt; 下一个节点 OnEnter
+
+这保证 UI 只负责展示和触发事件，节点本身决定业务流转。
+TaskPanel ViewTaskPanel 位于 Examples/Task/View，负责：
+
+查找任务名称和描述文本。
+控制完成、失败按钮显示。
+绑定按钮事件。
+显示和隐藏面板。
+
+它不直接操作 GraphRunner，也不决定跳转出口。
+
+完整使用流程
+在菜单中创建 Task Graph。
+添加 Task 节点并配置名称、描述和连线。
+保存图资产。
+点击 Export .bytes，生成 Resources 下的运行时图数据。
+场景中挂载 TaskGraphExampleRunner 和 TaskPanel Prefab。
+配置 resourcesPath，例如 TaskGraphs/NewGraph0。
+进入 Play Mode，TaskPanel 会在 TaskRuntimeNode 进入时显示。
+
 ]]></content>
   </entry>
   <entry>
@@ -2334,71 +3017,6 @@ Assets/Resources/TaskGraphs/&#123;GraphName&#125;.bytes
 
 Runtime 使用 Resources 路径加载时不带扩展名：
 GraphRuntimeManager.Instance.LoadFromResources(    &quot;TaskGraphs/NewGraph0&quot;);
-]]></content>
-  </entry>
-  <entry>
-    <title>通用节点编辑器05-任务系统实例</title>
-    <url>/posts/83c1b684.html</url>
-    <content><![CDATA[Task 节点图示例Task 示例展示了一个完整的业务接入流程：编辑任务节点、导出 Runtime 图、显示任务面板，并根据完成或失败结果继续执行后续节点。
-编辑器部分Task 图包含：
-
-TaskGraphAsset：Task 图资产。
-TaskGraphController：指定 Runtime 导出目录 Assets/Resources/TaskGraphs。
-TaskGraphWindow：注册 Tools/Node Graph/Task/Create Task Graph 创建入口。
-TaskNode：定义 In、complete 和 failed 端口。
-TaskNodeView：编辑 TaskNodeData 的任务名称和描述。
-
-任务节点的出口含义：
-
-
-
-端口 key
-含义
-
-
-
-complete
-任务完成后的下一节点
-
-
-failed
-任务失败后的下一节点
-
-
-运行时入口TaskGraphExampleRunner 只负责：
-
-创建 TaskPanel。
-从 Resources 加载 Task 图。
-将 TaskPanel 注入每一个 TaskRuntimeNode。
-调用 GraphRunner.Start() 启动图。
-
-graphRunner = GraphRuntimeManager.Instance    .LoadFromResources(resourcesPath);foreach (INodeGraphRuntimeNode node in graphRunner.Nodes)&#123;    if (node is TaskRuntimeNode taskNode)    &#123;        taskNode.SetPanel(taskPanel);    &#125;&#125;graphRunner.Start();
-
-TaskRuntimeNode 驱动业务TaskRuntimeNode.OnEnter() 负责设置面板回调并刷新任务信息：
-panel.SetCallbacks(this);panel.Refresh(    string.IsNullOrEmpty(UserData.name) ? Title : UserData.name,    UserData.description,    HasExit(&quot;complete&quot;),    HasExit(&quot;failed&quot;));
-
-TaskPanel 的完成和失败按钮通过 ITaskPanelCallbacks 回调到当前 RuntimeNode：
-TaskPanel Button    -&gt; TaskRuntimeNode.OnComplete / OnFail    -&gt; SelectExit(&quot;complete&quot; / &quot;failed&quot;)    -&gt; GraphRunner.MoveNext    -&gt; 下一个节点 OnEnter
-
-这保证 UI 只负责展示和触发事件，节点本身决定业务流转。
-TaskPanel ViewTaskPanel 位于 Examples/Task/View，负责：
-
-查找任务名称和描述文本。
-控制完成、失败按钮显示。
-绑定按钮事件。
-显示和隐藏面板。
-
-它不直接操作 GraphRunner，也不决定跳转出口。
-
-完整使用流程
-在菜单中创建 Task Graph。
-添加 Task 节点并配置名称、描述和连线。
-保存图资产。
-点击 Export .bytes，生成 Resources 下的运行时图数据。
-场景中挂载 TaskGraphExampleRunner 和 TaskPanel Prefab。
-配置 resourcesPath，例如 TaskGraphs/NewGraph0。
-进入 Play Mode，TaskPanel 会在 TaskRuntimeNode 进入时显示。
-
 ]]></content>
   </entry>
   <entry>
