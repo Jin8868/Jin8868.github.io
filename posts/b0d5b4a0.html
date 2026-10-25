@@ -1,0 +1,616 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover"><title>Unity-YooAssets的AB资源分类与管理 | 穿越时空的思念</title><meta name="author" content="穿越时空的思念"><meta name="copyright" content="穿越时空的思念"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#ffffff"><meta name="description" content="YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求前三篇分别讨论了 AssetBundle 的结构、加载与卸载，以及分包策略。到了具体项目里，我们已经可以根据资源的使用范围、生命周期和更新节奏，决定哪些内容适合放进同一个包。 但对于 YooAssets，问题还要再往前走一步。 有的项目按角色和关卡管理资源，有的按玩法和活动组织内容；有的保留贴图、材质、预制体等类型目录，有的直接按功">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Unity-YooAssets的AB资源分类与管理">
+<meta property="og:url" content="https://cyskdsn.top/posts/b0d5b4a0.html">
+<meta property="og:site_name" content="穿越时空的思念">
+<meta property="og:description" content="YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求前三篇分别讨论了 AssetBundle 的结构、加载与卸载，以及分包策略。到了具体项目里，我们已经可以根据资源的使用范围、生命周期和更新节奏，决定哪些内容适合放进同一个包。 但对于 YooAssets，问题还要再往前走一步。 有的项目按角色和关卡管理资源，有的按玩法和活动组织内容；有的保留贴图、材质、预制体等类型目录，有的直接按功">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://cyskdsn.top/img/Title/YooAsset-BundleCollector.jpeg">
+<meta property="article:published_time" content="2026-10-25T05:42:27.627Z">
+<meta property="article:modified_time" content="2026-10-25T06:40:10.551Z">
+<meta property="article:author" content="穿越时空的思念">
+<meta property="article:tag" content="Unity-AssetsBundle">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://cyskdsn.top/img/Title/YooAsset-BundleCollector.jpeg"><script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "Unity-YooAssets的AB资源分类与管理",
+  "url": "https://cyskdsn.top/posts/b0d5b4a0.html",
+  "image": "https://cyskdsn.top/img/Title/YooAsset-BundleCollector.jpeg",
+  "datePublished": "2026-10-25T05:42:27.627Z",
+  "dateModified": "2026-10-25T06:40:10.551Z",
+  "author": [
+    {
+      "@type": "Person",
+      "name": "穿越时空的思念",
+      "url": "https://cyskdsn.top"
+    }
+  ]
+}</script><link rel="shortcut icon" href="/img/favicon.png"><link rel="canonical" href="https://cyskdsn.top/posts/b0d5b4a0.html"><link rel="preconnect" href="//cdn.jsdelivr.net"/><link rel="manifest" href="/null"/><link rel="apple-touch-icon" sizes="180x180" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="32x32" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="16x16" href="/img/heaIcon16.ico"/><link rel="mask-icon" href="/img/heaIcon16.ico" color="#5bbad5"/><link rel="stylesheet" href="/css/index.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css"><script>
+    (() => {
+      
+    const saveToLocal = {
+      set: (key, value, ttl) => {
+        if (!ttl) return
+        const expiry = Date.now() + ttl * 86400000
+        localStorage.setItem(key, JSON.stringify({ value, expiry }))
+      },
+      get: key => {
+        const itemStr = localStorage.getItem(key)
+        if (!itemStr) return undefined
+        const { value, expiry } = JSON.parse(itemStr)
+        if (Date.now() > expiry) {
+          localStorage.removeItem(key)
+          return undefined
+        }
+        return value
+      }
+    }
+
+    window.btf = {
+      saveToLocal,
+      getScript: (url, attr = {}) => new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = url
+        script.async = true
+        Object.entries(attr).forEach(([key, val]) => script.setAttribute(key, val))
+        script.onload = script.onreadystatechange = () => {
+          if (!script.readyState || /loaded|complete/.test(script.readyState)) resolve()
+        }
+        script.onerror = reject
+        document.head.appendChild(script)
+      }),
+      getCSS: (url, id) => new Promise((resolve, reject) => {
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = url
+        if (id) link.id = id
+        link.onload = link.onreadystatechange = () => {
+          if (!link.readyState || /loaded|complete/.test(link.readyState)) resolve()
+        }
+        link.onerror = reject
+        document.head.appendChild(link)
+      }),
+      addGlobalFn: (key, fn, name = false, parent = window) => {
+        if (!false && key.startsWith('pjax')) return
+        const globalFn = parent.globalFn || {}
+        globalFn[key] = globalFn[key] || {}
+        globalFn[key][name || Object.keys(globalFn[key]).length] = fn
+        parent.globalFn = globalFn
+      }
+    }
+  
+      
+      const activateDarkMode = () => {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#0d0d0d')
+        }
+      }
+      const activateLightMode = () => {
+        document.documentElement.setAttribute('data-theme', 'light')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#ffffff')
+        }
+      }
+
+      btf.activateDarkMode = activateDarkMode
+      btf.activateLightMode = activateLightMode
+
+      const theme = saveToLocal.get('theme')
+    
+          theme === 'dark' ? activateDarkMode() : theme === 'light' ? activateLightMode() : null
+        
+      
+      const asideStatus = saveToLocal.get('aside-status')
+      if (asideStatus !== undefined) {
+        document.documentElement.classList.toggle('hide-aside', asideStatus === 'hide')
+      }
+    
+      
+    const detectApple = () => {
+      if (/iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('apple')
+      }
+    }
+    detectApple()
+  
+    })()
+  </script><script>const GLOBAL_CONFIG = {
+  root: '/',
+  algolia: undefined,
+  localSearch: {"path":"/search.xml","preload":false,"top_n_per_article":1,"unescape":false,"languages":{"hits_empty":"未找到符合您查询的内容：${query}","hits_stats":"共找到 ${hits} 篇文章"}},
+  translate: undefined,
+  highlight: {"plugin":"highlight.js","highlightCopy":true,"highlightLang":true,"highlightHeightLimit":false,"highlightFullpage":false,"highlightMacStyle":false},
+  copy: {
+    success: '复制成功',
+    error: '复制失败',
+    noSupport: '浏览器不支持'
+  },
+  relativeDate: {
+    homepage: false,
+    post: false
+  },
+  runtime: '',
+  dateSuffix: {
+    just: '刚刚',
+    min: '分钟前',
+    hour: '小时前',
+    day: '天前',
+    month: '个月前'
+  },
+  copyright: undefined,
+  lightbox: 'null',
+  Snackbar: undefined,
+  infinitegrid: {
+    js: 'https://cdn.jsdelivr.net/npm/@egjs/infinitegrid/dist/infinitegrid.min.js',
+    buttonText: '加载更多'
+  },
+  isPhotoFigcaption: false,
+  islazyloadPlugin: false,
+  isAnchor: false,
+  percent: {
+    toc: true,
+    rightside: false,
+  },
+  autoDarkmode: false
+}</script><script id="config-diff">var GLOBAL_CONFIG_SITE = {
+  title: 'Unity-YooAssets的AB资源分类与管理',
+  isHighlightShrink: false,
+  isToc: true,
+  pageType: 'post'
+}</script><link rel="stylesheet" href="/css/style.css"><meta name="generator" content="Hexo 7.3.0"></head><body><div id="sidebar"><div id="menu-mask"></div><div id="sidebar-menus"><div class="avatar-img text-center"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="site-data text-center"><a href="/archives/"><div class="headline">文章</div><div class="length-num">32</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">7</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div></div></div><div class="post" id="body-wrap"><header class="post-bg" id="page-header" style="background-image: url(/img/Title/YooAsset-BundleCollector.jpeg);"><nav id="nav"><span id="blog-info"><a class="nav-site-title" href="/"><span class="site-name">穿越时空的思念</span></a><a class="nav-page-title" href="/"><span class="site-name">Unity-YooAssets的AB资源分类与管理</span><span class="site-name"><i class="fa-solid fa-circle-arrow-left"></i><span>  返回首页</span></span></a></span><div id="menus"><div id="search-button"><span class="site-page social-icon search"><i class="fas fa-search fa-fw"></i><span> 搜索</span></span></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div><div id="toggle-menu"><span class="site-page"><i class="fas fa-bars fa-fw"></i></span></div></div></nav><div id="post-info"><h1 class="post-title">Unity-YooAssets的AB资源分类与管理</h1><div id="post-meta"><div class="meta-firstline"><span class="post-meta-date"><i class="far fa-calendar-alt fa-fw post-meta-icon"></i><span class="post-meta-label">发表于</span><time class="post-meta-date-created" datetime="2026-10-25T05:42:27.627Z" title="发表于 2026-10-25 13:42:27">2026-10-25</time><span class="post-meta-separator">|</span><i class="fas fa-history fa-fw post-meta-icon"></i><span class="post-meta-label">更新于</span><time class="post-meta-date-updated" datetime="2026-10-25T06:40:10.551Z" title="更新于 2026-10-25 14:40:10">2026-10-25</time></span></div><div class="meta-secondline"><span class="post-meta-separator">|</span><span class="post-meta-wordcount"><i class="far fa-file-word fa-fw post-meta-icon"></i><span class="post-meta-label">总字数:</span><span class="word-count">5k</span><span class="post-meta-separator">|</span><i class="far fa-clock fa-fw post-meta-icon"></i><span class="post-meta-label">阅读时长:</span><span>15分钟</span></span></div></div></div></header><main class="layout" id="content-inner"><div id="post"><article class="container post-content" id="article-container"><h1 id="YooAssets-的-AB-资源分类：如何抽象不同项目的分包需求"><a href="#YooAssets-的-AB-资源分类：如何抽象不同项目的分包需求" class="headerlink" title="YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求"></a>YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求</h1><p>前三篇分别讨论了 <a href="/posts/d5e3da58.html">AssetBundle 的结构</a>、<a href="/posts/38e927b7.html">加载与卸载</a>，以及<a href="/posts/9b7c4e21.html">分包策略</a>。到了具体项目里，我们已经可以根据资源的使用范围、生命周期和更新节奏，决定哪些内容适合放进同一个包。</p>
+<p>但对于 YooAssets，问题还要再往前走一步。</p>
+<p>有的项目按角色和关卡管理资源，有的按玩法和活动组织内容；有的保留贴图、材质、预制体等类型目录，有的直接按功能划分文件夹。同样一个角色，在小项目中可能整体打包，在大项目中却需要拆出皮肤、语音和高清贴图。</p>
+<p><strong>YooAssets 作为一个面向不同项目的通用资源管理器，要适配这些差异，它应该如何抽象资源分类和分包管理？</strong></p>
+<p>如果直接规定“每个文件夹打成一个 AB”，就会把项目的目录结构与打包结构绑在一起；如果规定“每个角色一个 AB”，又无法表达界面、配置、场景和其他业务的需求。通用框架需要提供一套能描述项目差异的结构，让具体项目把自己的分包策略填进去。</p>
+<p>本文就从这个问题出发，按照背景、目标、设计和结果的顺序，理解 YooAssets 在资源收集界面中呈现的四层结构：<strong>Package → Group → Collector → MainAssets</strong>。</p>
+<blockquote>
+<p>本文以 YooAsset 2.3.19 源码为依据。“四层结构”描述的是资源组织与收集的观察层次，其中 MainAssets 是主资源收集器计算出的条目，并非与前三层一样手动配置的容器。</p>
+</blockquote>
+<h2 id="一、通用资源管理器需要表达哪些差异"><a href="#一、通用资源管理器需要表达哪些差异" class="headerlink" title="一、通用资源管理器需要表达哪些差异"></a>一、通用资源管理器需要表达哪些差异</h2><p>上一篇的分包策略给出了一个判断方向：经常一起使用、释放和更新的资源，可以优先考虑放在一起；独立更新或按需下载的内容，再根据实际需求拆分。</p>
+<p>但这是项目的业务判断。框架需要把这些判断转化为可执行、可复用的配置。</p>
+<p>例如，同一批资源可能同时存在几种不同的组织方式：</p>
+<table>
+<thead>
+<tr>
+<th>观察角度</th>
+<th>可能的划分方式</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>发布与版本管理</td>
+<td>基础资源、扩展内容、独立更新的内容集合</td>
+</tr>
+<tr>
+<td>业务管理</td>
+<td>角色、界面、关卡、活动</td>
+</tr>
+<tr>
+<td>源文件存放</td>
+<td>Prefabs、Textures、Materials、Animations</td>
+</tr>
+<tr>
+<td>实际打包</td>
+<td>一个角色一个包、一个目录一个包、一个资源一个包</td>
+</tr>
+<tr>
+<td>运行时访问</td>
+<td>按地址加载预制体，通过引用带出材质与贴图</td>
+</tr>
+</tbody></table>
+<p>这几种划分并不总是重合。一个骑士的资源可以分散在四个类型目录里，却希望合成同一个 Bundle；一个活动目录也可以因为内容体积和更新频率不同，拆出多个 Bundle。</p>
+<p>因此，框架需要让项目分别描述：<strong>资源属于哪个管理范围，按什么业务分组，从哪里收集，以及收集后如何寻址与归包。</strong> 这些问题如果全部压在一个“包名”字段里，配置就很难扩展。</p>
+<h2 id="二、用四层结构逐步落实资源归属"><a href="#二、用四层结构逐步落实资源归属" class="headerlink" title="二、用四层结构逐步落实资源归属"></a>二、用四层结构逐步落实资源归属</h2><p>在 YooAssets 的 Bundle Collector 界面中，可以从外向内看到：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">Package：一个资源包管理范围</span><br><span class="line">└── Group：一组相关收集器</span><br><span class="line">    └── Collector：一套资源收集规则</span><br><span class="line">        └── MainAssets：规则直接收集到的主资源条目</span><br></pre></td></tr></table></figure>
+
+<p>四层结构逐步把范围缩小：</p>
+<table>
+<thead>
+<tr>
+<th>层次</th>
+<th>主要回答的问题</th>
+<th>典型内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Package</td>
+<td>这批资源作为哪个资源集合进行构建、版本管理和运行时访问？</td>
+<td>Package 名称、寻址设置、Groups</td>
+</tr>
+<tr>
+<td>Group</td>
+<td>哪些收集器属于同一个管理分组？</td>
+<td>业务分组、激活规则、组标签、Collectors</td>
+</tr>
+<tr>
+<td>Collector</td>
+<td>从哪里收集，选哪些资源，怎样寻址和计算包名？</td>
+<td>路径、类型、过滤规则、寻址规则、打包规则</td>
+</tr>
+<tr>
+<td>MainAssets</td>
+<td>这些规则最终直接选中了哪些可加载主资源？</td>
+<td>资源路径、Address 等收集结果</td>
+</tr>
+</tbody></table>
+<div class="mermaid-wrap"><pre class="mermaid-src" hidden>
+    graph TD
+    P[Package 资源集合] --&gt; G1[Group 角色资源]
+    P --&gt; G2[Group 界面资源]
+    G1 --&gt; C1[Collector 预制体目录]
+    G1 --&gt; C2[Collector 贴图目录]
+    C1 --&gt; M1[MainAssets 预制体条目]
+    C2 --&gt; M2[MainAssets 贴图条目]
+    C1 -.-&gt; R[打包规则计算 Bundle 归属]
+    C2 -.-&gt; R
+    R --&gt; B[相同 BundleName 的资源归入同一 AssetBundle]
+  </pre></div>
+
+<p>这里要先区分 Package 和 AssetBundle。YooAssets 的 Package 可以包含很多 Bundle；Group 和 Collector 也不天然对应一个 Bundle。<strong>四层结构负责组织资源和表达规则，最终的物理分包由打包规则及后续构建处理决定。</strong></p>
+<h2 id="三、Package：确定资源集合的管理边界"><a href="#三、Package：确定资源集合的管理边界" class="headerlink" title="三、Package：确定资源集合的管理边界"></a>三、Package：确定资源集合的管理边界</h2><h3 id="1-为什么最外层需要-Package"><a href="#1-为什么最外层需要-Package" class="headerlink" title="1. 为什么最外层需要 Package"></a>1. 为什么最外层需要 Package</h3><p>如果项目只有一份资源清单、统一发布和更新，那么把资源放进一个 Package 就能满足大部分需求。</p>
+<p>但有些内容需要独立构建、维护版本或使用不同的资源构建形式。例如，常规 Unity 资产与原生音频文件的构建和加载方式就存在差异。此时需要在单个 Bundle 之上，再提供一个资源集合的管理层次。</p>
+<p>Package 承担的就是这个角色。编辑器中的 <code>AssetBundleCollectorPackage</code> 定义该集合的收集配置；运行时通过对应名称的 <code>ResourcePackage</code> 初始化资源系统、使用资源清单并发起加载。</p>
+<p>可以把它理解为：<strong>先选定在哪一套资源管理上下文中工作，再讨论其中具体资源怎样分类与打包。</strong></p>
+<h3 id="2-Package-管什么"><a href="#2-Package-管什么" class="headerlink" title="2. Package 管什么"></a>2. Package 管什么</h3><p>Package 中包含 <code>PackageName</code>、<code>Groups</code>，以及寻址、忽略资源和自动收集 Shader 等配置。构建时针对指定 Package 收集资源，运行时则在对应 Package 中查找资源位置。</p>
+<p>一个 Package 可以有自己的版本和清单，清单再关联该集合中的资源与 Bundle。它的名字不是某个单独 AB 文件的名字。</p>
+<p>当前项目的配置就包含：</p>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>配置用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DefaultPackage</code></td>
+<td>预制体、材质、配置和场景等 Unity 资源</td>
+</tr>
+<tr>
+<td><code>AudioPackage</code></td>
+<td>Wwise 音频原生文件</td>
+</tr>
+<tr>
+<td><code>CodePackage</code></td>
+<td>热更新程序集与 AOT 元数据文件</td>
+</tr>
+<tr>
+<td><code>VideoPackage</code></td>
+<td>视频原生文件</td>
+</tr>
+</tbody></table>
+<p>这些名称和用途属于项目自己的设计。对于原生文件，还要使用匹配的构建管线与加载方式，不能将它们全部理解为 Unity AssetBundle。</p>
+<h3 id="3-什么需求适合放在这一层"><a href="#3-什么需求适合放在这一层" class="headerlink" title="3. 什么需求适合放在这一层"></a>3. 什么需求适合放在这一层</h3><p>当需求涉及资源集合的独立构建、版本和初始化时，可以考虑 Package 边界。只是希望让某个角色单独成包，通常在一个 Package 内配置打包规则即可；按需下载也可以在 Package 内结合标签、资源和依赖来实现。</p>
+<p>跨 Package 的资源引用需要额外考虑。把共享材质放进另一个 Package，不会自动建立跨 Package 的依赖装载关系，也不能据此保证只构建一份共享内容。</p>
+<h2 id="四、Group：为相关收集器提供管理分组"><a href="#四、Group：为相关收集器提供管理分组" class="headerlink" title="四、Group：为相关收集器提供管理分组"></a>四、Group：为相关收集器提供管理分组</h2><h3 id="1-为什么-Package-下还需要-Group"><a href="#1-为什么-Package-下还需要-Group" class="headerlink" title="1. 为什么 Package 下还需要 Group"></a>1. 为什么 Package 下还需要 Group</h3><p>一个 Package 可能包含几千个资源。如果把所有收集路径平铺在一张列表中，角色、界面、活动和关卡的配置就会混在一起。</p>
+<p>Group 让这些配置有了业务上的组织方式。例如：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line">DefaultPackage</span><br><span class="line">├── Group: Characters</span><br><span class="line">├── Group: UI</span><br><span class="line">├── Group: Levels</span><br><span class="line">└── Group: Activities</span><br></pre></td></tr></table></figure>
+
+<p>也可以继续按更细的业务单位建立 Group，例如 <code>character.knight</code>、<code>ui.inventory</code>。YooAssets 提供分组机制，项目决定使用什么粒度。</p>
+<h3 id="2-Group-管什么"><a href="#2-Group-管什么" class="headerlink" title="2. Group 管什么"></a>2. Group 管什么</h3><p><code>AssetBundleCollectorGroup</code> 中主要包含：</p>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>GroupName</code>、<code>GroupDesc</code></td>
+<td>标识并说明该分组</td>
+</tr>
+<tr>
+<td><code>ActiveRuleName</code></td>
+<td>决定该组是否参与本次主动收集</td>
+</tr>
+<tr>
+<td><code>AssetTags</code></td>
+<td>为组内主资源提供公共标签</td>
+</tr>
+<tr>
+<td><code>Collectors</code></td>
+<td>保存该组的收集器列表</td>
+</tr>
+</tbody></table>
+<p>这让项目可以把多个路径作为同一组管理，而无需修改源文件的目录布局。骑士的预制体、贴图、材质和动画即使分散存放，也可以放在同一个 Group 下。</p>
+<p>组激活控制的是主动收集。即使某组未启用，其中的资源仍可能被其他启用资源引用，并经依赖分析进入构建。标签则用于分类和相关下载选择，同样不会直接切割物理文件。</p>
+<h3 id="3-Group-与-Bundle-的关系"><a href="#3-Group-与-Bundle-的关系" class="headerlink" title="3. Group 与 Bundle 的关系"></a>3. Group 与 Bundle 的关系</h3><p>Group 本身不会强制组内资源合包。如果 Collector 使用 <code>PackDirectory</code>，就按每个资源的直接父目录计算包名；使用 <code>PackGroup</code> 时，才会以 Group 名作为包名依据。</p>
+<p>因此，同一个 Group 可以管理多个 Bundle，也可以通过一致的 <code>PackGroup</code> 规则，把多个 Collector 的资源合入同一个 Bundle。Group 提供组织信息，具体打包规则决定如何使用这些信息。</p>
+<h2 id="五、Collector：把项目差异表达成可组合的规则"><a href="#五、Collector：把项目差异表达成可组合的规则" class="headerlink" title="五、Collector：把项目差异表达成可组合的规则"></a>五、Collector：把项目差异表达成可组合的规则</h2><h3 id="1-为什么收集器是关键的一层"><a href="#1-为什么收集器是关键的一层" class="headerlink" title="1. 为什么收集器是关键的一层"></a>1. 为什么收集器是关键的一层</h3><p>Package 与 Group 确定了资源属于哪里，但还没有回答：具体从哪个目录找，哪些文件参与，地址如何生成，包如何拆分。</p>
+<p>这些变化集中在 Collector 中。每个 <code>AssetBundleCollector</code> 都描述一套收集规则，<code>CollectPath</code> 可以指向文件夹，也可以指向单个文件。</p>
+<p>对于文件夹，收集器搜索范围内的候选资源，再应用忽略规则和过滤规则；对于单个文件，则对该文件进行相应判断。</p>
+<h3 id="2-将几个经常变化的问题分开"><a href="#2-将几个经常变化的问题分开" class="headerlink" title="2. 将几个经常变化的问题分开"></a>2. 将几个经常变化的问题分开</h3><table>
+<thead>
+<tr>
+<th>配置</th>
+<th>负责的问题</th>
+<th>例子</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CollectPath</code></td>
+<td>去哪里找？</td>
+<td><code>Assets/Res/Prefabs/Characters</code></td>
+</tr>
+<tr>
+<td><code>FilterRuleName</code></td>
+<td>直接选中哪些文件？</td>
+<td><code>CollectPrefab</code> 只直接收集预制体</td>
+</tr>
+<tr>
+<td><code>AddressRuleName</code></td>
+<td>可寻址主资源使用什么地址？</td>
+<td><code>AddressByFileName</code> 使用文件名</td>
+</tr>
+<tr>
+<td><code>PackRuleName</code></td>
+<td>资源按什么方式归包？</td>
+<td><code>PackDirectory</code>、<code>PackGroup</code></td>
+</tr>
+<tr>
+<td><code>CollectorType</code></td>
+<td>收集条目承担什么角色？</td>
+<td>Main、Static、Depend</td>
+</tr>
+<tr>
+<td><code>AssetTags</code></td>
+<td>给主资源增加哪些分类标签？</td>
+<td><code>Knight</code>、<code>Optional</code></td>
+</tr>
+<tr>
+<td><code>UserData</code></td>
+<td>给扩展规则提供什么上下文？</td>
+<td>自定义规则约定的数据</td>
+</tr>
+</tbody></table>
+<p>这种拆分允许项目独立调整策略。例如，从“文件名寻址”改成“相对路径寻址”，不必同时改动目录范围和分包方式；把整个角色合包改成每个资源单独打包，也不必重新定义过滤规则。</p>
+<p>YooAssets 还提供 <code>IFilterRule</code>、<code>IAddressRule</code>、<code>IPackRule</code> 等扩展接口。内置规则不能表达项目需求时，可以在相应维度扩展，而不是重写整套资源管理流程。</p>
+<p>这正是通用性的一个来源：<strong>框架提供稳定的配置结构和执行流程，把容易因项目而变化的部分交给规则实现。</strong></p>
+<h3 id="3-分包策略如何落在这一层"><a href="#3-分包策略如何落在这一层" class="headerlink" title="3. 分包策略如何落在这一层"></a>3. 分包策略如何落在这一层</h3><p>几种常用内置打包规则分别对应不同的粒度：</p>
+<table>
+<thead>
+<tr>
+<th>规则</th>
+<th>包名依据</th>
+<th>可以表达的策略</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>PackSeparately</code></td>
+<td>资源文件路径</td>
+<td>每个直接收集的资源单独计算包名</td>
+</tr>
+<tr>
+<td><code>PackDirectory</code></td>
+<td>资源的直接父目录</td>
+<td>按资源所在目录分包</td>
+</tr>
+<tr>
+<td><code>PackTopDirectory</code></td>
+<td>Collector 下的顶级目录</td>
+<td>按第一层子目录组织深层资源</td>
+</tr>
+<tr>
+<td><code>PackCollector</code></td>
+<td>收集器路径</td>
+<td>一个 Collector 的直接收集资源使用同一个包名</td>
+</tr>
+<tr>
+<td><code>PackGroup</code></td>
+<td>Group 名称</td>
+<td>同组中采用此规则的 Collector 跨目录合包</td>
+</tr>
+</tbody></table>
+<p>Collector 会对收集到的每个资源分别计算 BundleName：计算结果相同的资源在构建阶段汇总到同一个包，结果不同的资源则进入不同包。一个 Collector 可以因此对应多个包，多个 Collector 的资源也可以合入同一个包。第八节用具体资源说明这层映射关系。实际归包还需要满足场景、资源类型和构建管线的约束，并考虑 Shader 等特殊处理。</p>
+<p>这些规则不会替项目判断“应该怎样分包”。上一篇讨论的业务策略，最终需要在这里选择对应规则来落实。</p>
+<h2 id="六、MainAssets：从规则落到具体资源条目"><a href="#六、MainAssets：从规则落到具体资源条目" class="headerlink" title="六、MainAssets：从规则落到具体资源条目"></a>六、MainAssets：从规则落到具体资源条目</h2><h3 id="1-最内层显示的是什么"><a href="#1-最内层显示的是什么" class="headerlink" title="1. 最内层显示的是什么"></a>1. 最内层显示的是什么</h3><p>设置完 Collector，还需要确认规则实际选中了谁。展开一个 <code>MainAssetCollector</code>，界面会显示 <code>Main Assets</code> 及其资源条目；开启 Addressable 时，还会展示生成的地址。</p>
+<p>例如，收集路径指向骑士预制体目录，使用 <code>CollectPrefab</code> 和 <code>AddressByFileName</code>，预览可能是：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">Main Assets (1)</span><br><span class="line">[Knight] Assets/Res/Prefabs/Characters/Knight/Knight.prefab</span><br></pre></td></tr></table></figure>
+
+<p>到这里，抽象配置已经落到具体资源：某个路径的预制体被选中，地址是 <code>Knight</code>，打包规则还为它计算了逻辑 Bundle 名。</p>
+<p>源码中，Collector 用 <code>CollectAssetInfo</code> 表示收集条目，其中包含资源信息、收集器类型、Address、BundleName、标签和依赖列表等内容。</p>
+<p><strong>MainAssets 可以视为观察结构的第四层，但它是规则输出。</strong> 项目不需要再手动创建一个 MainAssets 容器；向收集范围内添加符合条件的资源，再刷新预览，就会得到新的条目。</p>
+<h3 id="2-主资源与依赖资源"><a href="#2-主资源与依赖资源" class="headerlink" title="2. 主资源与依赖资源"></a>2. 主资源与依赖资源</h3><p>假设业务按地址加载 <code>Knight.prefab</code>，它再引用材质和贴图。预制体是一个可直接加载的入口，材质和贴图则可以通过依赖关系参与加载。</p>
+<p>“主资源”不等于资源更重要，也不等于一份资源只能有一种业务用途。它主要表达是否作为 YooAssets 清单中的独立加载入口。</p>
+<p>CollectorType 进一步区分了三种情况：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>参与构建的条件</th>
+<th>是否生成普通 Location 加载入口</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>MainAssetCollector</code></td>
+<td>直接收集后参与</td>
+<td>是</td>
+</tr>
+<tr>
+<td><code>StaticAssetCollector</code></td>
+<td>直接收集后参与</td>
+<td>否</td>
+</tr>
+<tr>
+<td><code>DependAssetCollector</code></td>
+<td>被 Main 或 Static 主动收集资源引用时保留，否则剔除</td>
+<td>否</td>
+</tr>
+</tbody></table>
+<p>对应类型的界面预览会显示 <code>Main Assets</code>、<code>Static Assets</code> 或 <code>Depend Assets</code>。<code>Static</code> 不代表资源在运行时永久驻留，<code>Depend</code> 也不能代替业务代码按字符串地址发起的加载需求。</p>
+<p>如果业务需要单独按地址加载某张贴图，它就应有相应的 Main 入口；如果只通过预制体引用它，则可以根据归包需求考虑 Depend 收集器，或交由后续依赖分析处理。</p>
+<h3 id="3-MainAssets-与最终-Bundle-内容的区别"><a href="#3-MainAssets-与最终-Bundle-内容的区别" class="headerlink" title="3. MainAssets 与最终 Bundle 内容的区别"></a>3. MainAssets 与最终 Bundle 内容的区别</h3><p>2.3.19 的界面预览通过 <code>RefreshFoldoutContent</code> 调用 Collector 的 <code>GetAllCollectAssets</code>，并设置 <code>IgnoreGetDependencies</code>，跳过依赖查询。</p>
+<p>所以，MainAssets 里只显示一个预制体，并不代表构建中只有这个文件。只直接收集预制体，也不代表预制体引用的贴图被排除了。依赖分析仍会在构建流程中继续进行。</p>
+<p>同样，FBX 内的 Mesh 和动画等 Unity 子资产，也不能直接按 MainAssets 条目数量判断。这里列出的是收集层面的资源文件，完整产物要结合构建报告查看。</p>
+<h2 id="七、四层结构怎样组合成项目需要的分包方案"><a href="#七、四层结构怎样组合成项目需要的分包方案" class="headerlink" title="七、四层结构怎样组合成项目需要的分包方案"></a>七、四层结构怎样组合成项目需要的分包方案</h2><p>回到上一篇的骑士案例，假设预制体、贴图、材质和动画适合整体使用与更新，可以这样组织：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br></pre></td><td class="code"><pre><span class="line">Package: DefaultPackage</span><br><span class="line">├── Group: character.knight</span><br><span class="line">│   ├── Collector: Prefabs/Characters/Knight</span><br><span class="line">│   │   └── MainAssets: Knight.prefab</span><br><span class="line">│   ├── Collector: Textures/Characters/Knight</span><br><span class="line">│   │   └── MainAssets: KnightBody.png、KnightFace.png</span><br><span class="line">│   ├── Collector: Materials/Characters/Knight</span><br><span class="line">│   │   └── MainAssets: Knight.mat</span><br><span class="line">│   └── Collector: Animations/Characters/Knight</span><br><span class="line">│       └── MainAssets: KnightIdle.anim</span><br><span class="line">└── Group: activity.autumn</span><br><span class="line">    └── Collector: Textures/Activities/Autumn/Banners</span><br><span class="line">        └── MainAssets: AutumnBanner.png</span><br></pre></td></tr></table></figure>
+
+<p>这个示例先让全部资源使用 Main 类型，便于展示第四层。实际项目中，再根据是否需要独立地址加载来选择 Main 或 Depend 等类型。</p>
+<p>四个骑士 Collector 一致使用 <code>PackGroup</code>，就能用相同的组名计算包名；活动图片使用自己的 Group 和打包规则。类型目录得以保留，打包结构则由配置明确表达。</p>
+<p>骑士预制体收集器的核心字段可以表示为：</p>
+<figure class="highlight yaml"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment"># 仅展示单个 Collector 的关键字段，不是完整的 Unity 配置文件。</span></span><br><span class="line"><span class="attr">CollectPath:</span> <span class="string">Assets/Res/Prefabs/Characters/Knight</span></span><br><span class="line"><span class="attr">CollectorType:</span> <span class="number">0</span></span><br><span class="line"><span class="attr">AddressRuleName:</span> <span class="string">AddressByFileName</span></span><br><span class="line"><span class="attr">PackRuleName:</span> <span class="string">PackGroup</span></span><br><span class="line"><span class="attr">FilterRuleName:</span> <span class="string">CollectPrefab</span></span><br><span class="line"><span class="attr">AssetTags:</span> <span class="string">Knight</span></span><br><span class="line"><span class="attr">UserData:</span> <span class="string">&#x27;&#x27;</span></span><br></pre></td></tr></table></figure>
+
+<p>其中 <code>CollectorType: 0</code> 对应 2.3.19 的 Main 类型，界面操作时按名称选择即可。其他三个 Collector 使用各自路径，保留一致的 <code>PackGroup</code>。</p>
+<p>如果以后希望骑士贴图独立成包，只需调整对应 Collector 的打包规则；如果增加一种文件筛选要求，可以修改过滤规则；如果扩展内容需要独立维护版本，再评估是否划出新的 Package。</p>
+<p>每种变化都能找到对应的配置位置，四层结构也就把最初的通用性问题转化成了几个可分别处理的问题。</p>
+<h2 id="八、Collector-下的-Assets-如何映射到-AssetBundle"><a href="#八、Collector-下的-Assets-如何映射到-AssetBundle" class="headerlink" title="八、Collector 下的 Assets 如何映射到 AssetBundle"></a>八、Collector 下的 Assets 如何映射到 AssetBundle</h2><p>Collector 收集到资源后，会对<strong>每个 Asset 分别执行 PackRule，得到一个 BundleName</strong>。在同一 Package 内，参与归包的资源按 BundleName 汇总：包名相同，归入同一个 AssetBundle；包名不同，归入不同的 AssetBundle。</p>
+<p>例如，一个 Collector 收集了下面三个预制体，使用 <code>PackDirectory</code>：</p>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>规则依据</th>
+<th>对应 AssetBundle（包名示意）</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Characters/Knight/Knight.prefab</code></td>
+<td>父目录 <code>Characters/Knight</code></td>
+<td><code>knight.bundle</code></td>
+</tr>
+<tr>
+<td><code>Characters/Knight/KnightPreview.prefab</code></td>
+<td>父目录 <code>Characters/Knight</code></td>
+<td><code>knight.bundle</code></td>
+</tr>
+<tr>
+<td><code>Characters/Mage/Mage.prefab</code></td>
+<td>父目录 <code>Characters/Mage</code></td>
+<td><code>mage.bundle</code></td>
+</tr>
+</tbody></table>
+<p>这个 Collector 收集了三个 Asset，却对应两个 AssetBundle。如果改用 <code>PackCollector</code>，三个 Asset 就会按同一个 Collector 路径计算包名，从而归入同一个包。</p>
+<p>反过来，上一节四个骑士 Collector 一致使用 <code>PackGroup</code>，就会为各自的 Asset 计算出相同的包名，让分散在不同目录的资源归入同一个 AssetBundle。</p>
+<p><strong>Collector 与 AssetBundle 的关系由每个 Asset 的 BundleName 建立：一个 Collector 可以对应多个包，多个 Collector 的资源也可以合入同一个包。</strong> Address 决定如何定位资源，BundleName 决定资源归入哪个包，两者职责不同。</p>
+<p>这里说明的是直接收集资源的归包映射。依赖处理及这些映射如何生成实际的 AB 文件，放到下一篇的打包流程中讨论。</p>
+<h2 id="九、这套抽象最终解决了什么"><a href="#九、这套抽象最终解决了什么" class="headerlink" title="九、这套抽象最终解决了什么"></a>九、这套抽象最终解决了什么</h2><p>YooAssets 通过 Package 管理资源集合，通过 Group 组织相关收集器，通过 Collector 描述项目的收集、寻址和打包规则，把规则落实为 MainAssets 等具体收集条目，再依据条目上的 BundleName 确定资源到 AssetBundle 的归属。</p>
+<p>这样，按类型存放、按功能管理、按更新范围分包就可以同时存在。项目可以保留自己的目录习惯，并用规则表达不同的打包粒度。</p>
+<p>具体应用时，可以按下面的顺序检查：</p>
+<ol>
+<li>用 Package 确定这批资源的构建、版本和运行时归属。</li>
+<li>用 Group 组织相关 Collector，并设置必要的激活规则与标签。</li>
+<li>用 Collector 明确路径、过滤、寻址、类型和打包规则。</li>
+<li>在 MainAssets 等预览中确认直接收集的资源与地址。</li>
+<li>对照各资源的 BundleName，确认哪些资源共包、哪些资源分包。</li>
+</ol>
+<p>预览还不能代替 Package 级校验。同一 Package 内重复收集资源、生成重复地址，仍会产生冲突；Shader 与共享依赖的归包也需要在构建报告中确认。</p>
+<p>这套结构提供了表达不同项目需求的能力，实际分包是否合适，仍取决于项目如何选择边界。前一篇回答“哪些资源应该放在一起”，这一篇则说明 YooAssets 如何提供一组分层的概念，让这些判断成为可以配置和执行的资源管理方案。</p>
+<h2 id="参考资料"><a href="#参考资料" class="headerlink" title="参考资料"></a>参考资料</h2><ul>
+<li><a href="/posts/d5e3da58.html">Unity-AssetBundle结构解析</a></li>
+<li><a href="/posts/38e927b7.html">Unity-AssetBundle加载与卸载</a></li>
+<li><a href="/posts/9b7c4e21.html">Unity-AssetBundle分包策略</a></li>
+<li><a target="_blank" rel="noopener" href="https://github.com/tuyoogame/YooAsset/tree/2.3.19/Assets/YooAsset">YooAsset 2.3.19 源码</a></li>
+</ul>
+<p>相关源码位于 YooAsset 的 <code>Assets/YooAsset/</code> 下：</p>
+<table>
+<thead>
+<tr>
+<th>路径</th>
+<th>对应内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Editor/AssetBundleCollector/AssetBundleCollectorPackage.cs</code></td>
+<td>Package 配置与收集汇总</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleCollector/AssetBundleCollectorGroup.cs</code></td>
+<td>Group 激活与 Collector 汇总</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleCollector/AssetBundleCollector.cs</code></td>
+<td>Collector 规则执行与收集条目生成</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleCollector/CollectAssetInfo.cs</code></td>
+<td>具体收集条目的数据</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleCollector/AssetBundleCollectorWindow.cs</code></td>
+<td>MainAssets 等界面预览</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleCollector/ECollectorType.cs</code></td>
+<td>三种收集器类型</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleCollector/DefaultRules/DefaultPackRule.cs</code></td>
+<td>内置打包规则</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleBuilder/BuildPipeline/BaseTasks/TaskGetBuildMap.cs</code></td>
+<td>依赖处理与构建映射</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleBuilder/BuildMapContext.cs</code></td>
+<td>按 BundleName 汇总资源</td>
+</tr>
+<tr>
+<td><code>Editor/AssetBundleBuilder/BuildBundleInfo.cs</code></td>
+<td>保存单个包的资源列表</td>
+</tr>
+</tbody></table>
+</article><div class="post-copyright"><div class="post-copyright__author"><span class="post-copyright-meta"><i class="fas fa-circle-user fa-fw"></i>文章作者: </span><span class="post-copyright-info"><a href="https://cyskdsn.top">穿越时空的思念</a></span></div><div class="post-copyright__type"><span class="post-copyright-meta"><i class="fas fa-square-arrow-up-right fa-fw"></i>文章链接: </span><span class="post-copyright-info"><a href="https://cyskdsn.top/posts/b0d5b4a0.html">https://cyskdsn.top/posts/b0d5b4a0.html</a></span></div><div class="post-copyright__notice"><span class="post-copyright-meta"><i class="fas fa-circle-exclamation fa-fw"></i>版权声明: </span><span class="post-copyright-info">本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a> 许可协议。转载请注明来源 <a href="https://cyskdsn.top" target="_blank">穿越时空的思念</a>！</span></div></div><div class="tag_share"><div class="post-meta__tag-list"><a class="post-meta__tags" href="/tags/Unity-AssetsBundle/">Unity-AssetsBundle</a></div><div class="post-share"><div class="social-share" data-image="/img/Title/YooAsset-BundleCollector.jpeg" data-sites="facebook,twitter,wechat,weibo,qq"></div><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/css/share.min.css" media="print" onload="this.media='all'"><script src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/js/social-share.min.js" defer></script></div></div><nav class="pagination-post" id="pagination"><a class="pagination-related full-width" href="/posts/64d42568.html" title="Unity的Text与TMP艺术字实现方案"><img class="cover" src="/img/Title/Unity-Text&amp;TMP-ArtFont.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of next post"><div class="info text-right"><div class="info-1"><div class="info-item-1">下一篇</div><div class="info-item-2">Unity的Text与TMP艺术字实现方案</div></div><div class="info-2"><div class="info-item-1">Text 与 TMP 艺术字实现方案1、需要显示艺术字游戏中的战力、伤害、倍率和胜负提示，通常要求保留美术制作的渐变、金属纹理、立体高光与装饰。这些效果既可能出现在数字上，也可能出现在“胜”“利”“战”“力”等少量汉字上。 这里的素材是美术逐字提供的透明背景 PNG。我们需要把这些图片组合成可变化的艺术字内容，例如“战力12345”“+1280”“胜利”，并让业务层像更新普通文字一样使用： 1234// 字体与风格在预制体中配置，业务只更新显示内容。legacyText.text = &quot;战力12345&quot;;artText.text = &quot;胜利&quot;;damageText.text = &quot;+1280&quot;;  需求包括保留图片原色、控制基线和字距、支持内容更新，以及复用既有 Text 或 TMP 界面。每套风格有明确的静态字符集，所有可见字符都应来自同一套美术素材。 2、实现艺术字的方法2.1 从字体渲染原理看艺术字之前文章《Unity的TMP和Text原理和使用优化》中说到，动态 Text 会从字体文件获取字形，按字号等条件生成位...</div></div></div></a></nav><div class="relatedPosts"><div class="headline"><i class="fas fa-thumbs-up fa-fw"></i><span>相关推荐</span></div><div class="relatedPosts-list"><a class="pagination-related" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略"><img class="cover" src="/img/Title/Unity-AssetBundle.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-23</div><div class="info-item-2">Unity-AssetBundle分包策略</div></div><div class="info-2"><div class="info-item-1">AssetBundle 分包策略：哪些资源应该放进同一个包前两篇《Unity-AssetBundle结构解析》和《Unity-AssetBundle加载与卸载》，分别讨论了 AB 文件内部的组织方式，以及资源加载后由谁持有、什么时候释放。 这一篇讨论构建时的问题：哪些资源应该放进同一个包？ 一般项目会先按资源类型划分文件夹，把动画、纹理、预制体、材质、配置和字体分别存放，方便查找和日常管理： 1234567Assets/Res/├── Animations/├── Textures/├── Prefabs/├── Materials/├── Configs/└── Fonts/  如果直接把每个类型文件夹打成一个包，打包规则会很简单：Animations 对应一个动画包，Textures 对应一个纹理包，Prefabs 对应一个预制体包。 但随着项目资源增加，这些包也会越来越大。角色、战斗、场景和界面的纹理都可能进入同一个纹理包，各个玩法的预制体也可能进入同一个预制体包。文件夹按类型整理得很清楚，包内却混合了使用范围完全不同的资源。 这种直接按类型目录打包的方式，就会带来大包的问...</div></div></div></a><a class="pagination-related" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载"><img class="cover" src="/img/Title/Unity-AssetBundleLoad.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-22</div><div class="info-item-2">Unity-AssetBundle加载与卸载</div></div><div class="info-2"><div class="info-item-1">AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。 下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。 一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。 但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。 这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一...</div></div></div></a><a class="pagination-related" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析"><img class="cover" src="/img/Title/Unity-AssetBundle.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-20</div><div class="info-item-2">Unity-AssetBundle结构解析</div></div><div class="info-2"><div class="info-item-1">Unity AssetBundle 结构解析笔记 基于 AssetStudio 逆向源码（BundleFile.cs &#x2F; SerializedFile.cs）与 YooAssets 源码整理。Unity 未公开官方格式文档，本文以逆向工程实现为准（Unity 2022.3 为 UnityFS 主流版本）。  0. 概述 .assetbundle 文件是 Unity 的私有格式，YooAssets &#x2F; Addressables 等框架都只是调用 BuildPipeline.BuildAssetBundles 产出后在外层做 hash &#x2F; 加密 &#x2F; 清单，不改变文件内部结构。 完整的资源体系是三层结构：外层是一个自定义压缩归档（UnityFS），里面躺着若干个 Unity 序列化文件（SerializedFile，即资产真正存放的地方）；bundle 之上还有一层独立文件 manifest（清单），记录所有 bundle 的组织关系。   1. 整体布局先建立全局图景，再逐层展开（第 2、3、4 节）： 12345678910111213141...</div></div></div></a></div></div></div><div class="aside-content" id="aside-content"><div class="card-widget card-info text-center"><div class="avatar-img"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="author-info-name">穿越时空的思念</div><div class="author-info-description">每天进步一点，做更好的自己!</div><div class="site-data"><a href="/archives/"><div class="headline">文章</div><div class="length-num">32</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">7</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><a id="card-info-btn" target="_blank" rel="noopener" href="https://github.com/Jin8868"><i class="fab fa-github"></i><span>Follow Me</span></a></div><div class="card-widget card-announcement"><div class="item-headline"><i class="fas fa-bullhorn fa-shake"></i><span>公告</span></div><div class="announcement_content"></div></div><div class="sticky_layout"><div class="card-widget" id="card-toc"><div class="item-headline"><i class="fas fa-stream"></i><span>目录</span><span class="toc-percentage"></span></div><div class="toc-content"><ol class="toc"><li class="toc-item toc-level-1"><a class="toc-link" href="#YooAssets-%E7%9A%84-AB-%E8%B5%84%E6%BA%90%E5%88%86%E7%B1%BB%EF%BC%9A%E5%A6%82%E4%BD%95%E6%8A%BD%E8%B1%A1%E4%B8%8D%E5%90%8C%E9%A1%B9%E7%9B%AE%E7%9A%84%E5%88%86%E5%8C%85%E9%9C%80%E6%B1%82"><span class="toc-number">1.</span> <span class="toc-text">YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求</span></a><ol class="toc-child"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%80%E3%80%81%E9%80%9A%E7%94%A8%E8%B5%84%E6%BA%90%E7%AE%A1%E7%90%86%E5%99%A8%E9%9C%80%E8%A6%81%E8%A1%A8%E8%BE%BE%E5%93%AA%E4%BA%9B%E5%B7%AE%E5%BC%82"><span class="toc-number">1.1.</span> <span class="toc-text">一、通用资源管理器需要表达哪些差异</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BA%8C%E3%80%81%E7%94%A8%E5%9B%9B%E5%B1%82%E7%BB%93%E6%9E%84%E9%80%90%E6%AD%A5%E8%90%BD%E5%AE%9E%E8%B5%84%E6%BA%90%E5%BD%92%E5%B1%9E"><span class="toc-number">1.2.</span> <span class="toc-text">二、用四层结构逐步落实资源归属</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%89%E3%80%81Package%EF%BC%9A%E7%A1%AE%E5%AE%9A%E8%B5%84%E6%BA%90%E9%9B%86%E5%90%88%E7%9A%84%E7%AE%A1%E7%90%86%E8%BE%B9%E7%95%8C"><span class="toc-number">1.3.</span> <span class="toc-text">三、Package：确定资源集合的管理边界</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E4%B8%BA%E4%BB%80%E4%B9%88%E6%9C%80%E5%A4%96%E5%B1%82%E9%9C%80%E8%A6%81-Package"><span class="toc-number">1.3.1.</span> <span class="toc-text">1. 为什么最外层需要 Package</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-Package-%E7%AE%A1%E4%BB%80%E4%B9%88"><span class="toc-number">1.3.2.</span> <span class="toc-text">2. Package 管什么</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-%E4%BB%80%E4%B9%88%E9%9C%80%E6%B1%82%E9%80%82%E5%90%88%E6%94%BE%E5%9C%A8%E8%BF%99%E4%B8%80%E5%B1%82"><span class="toc-number">1.3.3.</span> <span class="toc-text">3. 什么需求适合放在这一层</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%9B%9B%E3%80%81Group%EF%BC%9A%E4%B8%BA%E7%9B%B8%E5%85%B3%E6%94%B6%E9%9B%86%E5%99%A8%E6%8F%90%E4%BE%9B%E7%AE%A1%E7%90%86%E5%88%86%E7%BB%84"><span class="toc-number">1.4.</span> <span class="toc-text">四、Group：为相关收集器提供管理分组</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E4%B8%BA%E4%BB%80%E4%B9%88-Package-%E4%B8%8B%E8%BF%98%E9%9C%80%E8%A6%81-Group"><span class="toc-number">1.4.1.</span> <span class="toc-text">1. 为什么 Package 下还需要 Group</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-Group-%E7%AE%A1%E4%BB%80%E4%B9%88"><span class="toc-number">1.4.2.</span> <span class="toc-text">2. Group 管什么</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-Group-%E4%B8%8E-Bundle-%E7%9A%84%E5%85%B3%E7%B3%BB"><span class="toc-number">1.4.3.</span> <span class="toc-text">3. Group 与 Bundle 的关系</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BA%94%E3%80%81Collector%EF%BC%9A%E6%8A%8A%E9%A1%B9%E7%9B%AE%E5%B7%AE%E5%BC%82%E8%A1%A8%E8%BE%BE%E6%88%90%E5%8F%AF%E7%BB%84%E5%90%88%E7%9A%84%E8%A7%84%E5%88%99"><span class="toc-number">1.5.</span> <span class="toc-text">五、Collector：把项目差异表达成可组合的规则</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E4%B8%BA%E4%BB%80%E4%B9%88%E6%94%B6%E9%9B%86%E5%99%A8%E6%98%AF%E5%85%B3%E9%94%AE%E7%9A%84%E4%B8%80%E5%B1%82"><span class="toc-number">1.5.1.</span> <span class="toc-text">1. 为什么收集器是关键的一层</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E5%B0%86%E5%87%A0%E4%B8%AA%E7%BB%8F%E5%B8%B8%E5%8F%98%E5%8C%96%E7%9A%84%E9%97%AE%E9%A2%98%E5%88%86%E5%BC%80"><span class="toc-number">1.5.2.</span> <span class="toc-text">2. 将几个经常变化的问题分开</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-%E5%88%86%E5%8C%85%E7%AD%96%E7%95%A5%E5%A6%82%E4%BD%95%E8%90%BD%E5%9C%A8%E8%BF%99%E4%B8%80%E5%B1%82"><span class="toc-number">1.5.3.</span> <span class="toc-text">3. 分包策略如何落在这一层</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%85%AD%E3%80%81MainAssets%EF%BC%9A%E4%BB%8E%E8%A7%84%E5%88%99%E8%90%BD%E5%88%B0%E5%85%B7%E4%BD%93%E8%B5%84%E6%BA%90%E6%9D%A1%E7%9B%AE"><span class="toc-number">1.6.</span> <span class="toc-text">六、MainAssets：从规则落到具体资源条目</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E6%9C%80%E5%86%85%E5%B1%82%E6%98%BE%E7%A4%BA%E7%9A%84%E6%98%AF%E4%BB%80%E4%B9%88"><span class="toc-number">1.6.1.</span> <span class="toc-text">1. 最内层显示的是什么</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E4%B8%BB%E8%B5%84%E6%BA%90%E4%B8%8E%E4%BE%9D%E8%B5%96%E8%B5%84%E6%BA%90"><span class="toc-number">1.6.2.</span> <span class="toc-text">2. 主资源与依赖资源</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-MainAssets-%E4%B8%8E%E6%9C%80%E7%BB%88-Bundle-%E5%86%85%E5%AE%B9%E7%9A%84%E5%8C%BA%E5%88%AB"><span class="toc-number">1.6.3.</span> <span class="toc-text">3. MainAssets 与最终 Bundle 内容的区别</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%83%E3%80%81%E5%9B%9B%E5%B1%82%E7%BB%93%E6%9E%84%E6%80%8E%E6%A0%B7%E7%BB%84%E5%90%88%E6%88%90%E9%A1%B9%E7%9B%AE%E9%9C%80%E8%A6%81%E7%9A%84%E5%88%86%E5%8C%85%E6%96%B9%E6%A1%88"><span class="toc-number">1.7.</span> <span class="toc-text">七、四层结构怎样组合成项目需要的分包方案</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%85%AB%E3%80%81Collector-%E4%B8%8B%E7%9A%84-Assets-%E5%A6%82%E4%BD%95%E6%98%A0%E5%B0%84%E5%88%B0-AssetBundle"><span class="toc-number">1.8.</span> <span class="toc-text">八、Collector 下的 Assets 如何映射到 AssetBundle</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B9%9D%E3%80%81%E8%BF%99%E5%A5%97%E6%8A%BD%E8%B1%A1%E6%9C%80%E7%BB%88%E8%A7%A3%E5%86%B3%E4%BA%86%E4%BB%80%E4%B9%88"><span class="toc-number">1.9.</span> <span class="toc-text">九、这套抽象最终解决了什么</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%8F%82%E8%80%83%E8%B5%84%E6%96%99"><span class="toc-number">1.10.</span> <span class="toc-text">参考资料</span></a></li></ol></li></ol></div></div><div class="card-widget card-post-series"><div class="item-headline"><i class="fa-solid fa-layer-group"></i><span>系列文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理"><img src="/img/Title/YooAsset-BundleCollector.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets的AB资源分类与管理"></a><div class="content"><a class="title" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理">Unity-YooAssets的AB资源分类与管理</a><time datetime="2026-10-25T05:42:27.627Z" title="发表于 2026-10-25 13:42:27">2026-10-25</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略"><img src="/img/Title/Unity-AssetBundle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle分包策略"></a><div class="content"><a class="title" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略">Unity-AssetBundle分包策略</a><time datetime="2026-10-23T12:08:11.452Z" title="发表于 2026-10-23 20:08:11">2026-10-23</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载"><img src="/img/Title/Unity-AssetBundleLoad.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle加载与卸载"></a><div class="content"><a class="title" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载">Unity-AssetBundle加载与卸载</a><time datetime="2026-10-22T11:26:03.041Z" title="发表于 2026-10-22 19:26:03">2026-10-22</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析"><img src="/img/Title/Unity-AssetBundle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle结构解析"></a><div class="content"><a class="title" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析">Unity-AssetBundle结构解析</a><time datetime="2026-10-20T12:59:38.249Z" title="发表于 2026-10-20 20:59:38">2026-10-20</time></div></div></div></div><div class="card-widget card-recent-post"><div class="item-headline"><i class="fas fa-history"></i><span>最新文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理"><img src="/img/Title/YooAsset-BundleCollector.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets的AB资源分类与管理"/></a><div class="content"><a class="title" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理">Unity-YooAssets的AB资源分类与管理</a><time datetime="2026-10-25T05:42:27.627Z" title="发表于 2026-10-25 13:42:27">2026-10-25</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/64d42568.html" title="Unity的Text与TMP艺术字实现方案"><img src="/img/Title/Unity-Text&amp;TMP-ArtFont.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity的Text与TMP艺术字实现方案"/></a><div class="content"><a class="title" href="/posts/64d42568.html" title="Unity的Text与TMP艺术字实现方案">Unity的Text与TMP艺术字实现方案</a><time datetime="2026-10-24T07:08:51.732Z" title="发表于 2026-10-24 15:08:51">2026-10-24</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略"><img src="/img/Title/Unity-AssetBundle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle分包策略"/></a><div class="content"><a class="title" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略">Unity-AssetBundle分包策略</a><time datetime="2026-10-23T12:08:11.452Z" title="发表于 2026-10-23 20:08:11">2026-10-23</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载"><img src="/img/Title/Unity-AssetBundleLoad.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle加载与卸载"/></a><div class="content"><a class="title" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载">Unity-AssetBundle加载与卸载</a><time datetime="2026-10-22T11:26:03.041Z" title="发表于 2026-10-22 19:26:03">2026-10-22</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析"><img src="/img/Title/Unity-AssetBundle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle结构解析"/></a><div class="content"><a class="title" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析">Unity-AssetBundle结构解析</a><time datetime="2026-10-20T12:59:38.249Z" title="发表于 2026-10-20 20:59:38">2026-10-20</time></div></div></div></div></div></div></main><footer id="footer"><div class="footer-other"><div class="footer-copyright"><span class="copyright">&copy;2025 - 2026 By 穿越时空的思念</span></div><div class="footer_custom_text">每天进步一点，做更好的自己!</div></div></footer></div><div id="rightside"><div id="rightside-config-hide"><button id="readmode" type="button" title="阅读模式"><i class="fas fa-book-open"></i></button><button id="darkmode" type="button" title="日间和夜间模式切换"><i class="fas fa-adjust"></i></button><button id="hide-aside-btn" type="button" title="单栏和双栏切换"><i class="fas fa-arrows-alt-h"></i></button></div><div id="rightside-config-show"><button id="rightside-config" type="button" title="设置"><i class="fas fa-cog fa-spin"></i></button><button class="close" id="mobile-toc-button" type="button" title="目录"><i class="fas fa-list-ul"></i></button><button id="go-up" type="button" title="回到顶部"><span class="scroll-percent"></span><i class="fas fa-arrow-up"></i></button></div></div><div><script src="/js/utils.js"></script><script src="/js/main.js"></script><div class="js-pjax"><script>(async () => {
+  const showKatex = () => {
+    document.querySelectorAll('#article-container .katex').forEach(el => el.classList.add('katex-show'))
+  }
+
+  if (!window.katex_js_css) {
+    window.katex_js_css = true
+    await btf.getCSS('https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css')
+    if (true) {
+      await btf.getScript('https://cdn.jsdelivr.net/npm/katex/dist/contrib/copy-tex.min.js')
+    }
+  }
+
+  showKatex()
+})()</script><script>(() => {
+  const runMermaid = ele => {
+    window.loadMermaid = true
+    const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default'
+
+    ele.forEach((item, index) => {
+      const mermaidSrc = item.firstElementChild
+      const mermaidThemeConfig = `%%{init:{ 'theme':'${theme}'}}%%\n`
+      const mermaidID = `mermaid-${index}`
+      const mermaidDefinition = mermaidThemeConfig + mermaidSrc.textContent
+
+      const renderFn = mermaid.render(mermaidID, mermaidDefinition)
+      const renderMermaid = svg => {
+        mermaidSrc.insertAdjacentHTML('afterend', svg)
+      }
+
+      // mermaid v9 and v10 compatibility
+      typeof renderFn === 'string' ? renderMermaid(renderFn) : renderFn.then(({ svg }) => renderMermaid(svg))
+    })
+  }
+
+  const codeToMermaid = () => {
+    const codeMermaidEle = document.querySelectorAll('pre > code.mermaid')
+    if (codeMermaidEle.length === 0) return
+
+    codeMermaidEle.forEach(ele => {
+      const preEle = document.createElement('pre')
+      preEle.className = 'mermaid-src'
+      preEle.hidden = true
+      preEle.textContent = ele.textContent
+      const newEle = document.createElement('div')
+      newEle.className = 'mermaid-wrap'
+      newEle.appendChild(preEle)
+      ele.parentNode.replaceWith(newEle)
+    })
+  }
+
+  const loadMermaid = () => {
+    if (true) codeToMermaid()
+    const $mermaid = document.querySelectorAll('#article-container .mermaid-wrap')
+    if ($mermaid.length === 0) return
+
+    const runMermaidFn = () => runMermaid($mermaid)
+    btf.addGlobalFn('themeChange', runMermaidFn, 'mermaid')
+    window.loadMermaid ? runMermaidFn() : btf.getScript('https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js').then(runMermaidFn)
+  }
+
+  btf.addGlobalFn('encrypt', loadMermaid, 'mermaid')
+  window.pjax ? loadMermaid() : document.addEventListener('DOMContentLoaded', loadMermaid)
+})()</script></div><script defer="defer" id="ribbon" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-ribbon.min.js" size="150" alpha="0.6" zIndex="-1" mobile="true" data-click="true"></script><script defer="defer" id="fluttering_ribbon" mobile="true" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-fluttering-ribbon.min.js"></script><div id="local-search"><div class="search-dialog"><nav class="search-nav"><span class="search-dialog-title">搜索</span><span id="loading-status"></span><button class="search-close-button"><i class="fas fa-times"></i></button></nav><div class="text-center" id="loading-database"><i class="fas fa-spinner fa-pulse"></i><span>  数据加载中</span></div><div class="search-wrap"><div id="local-search-input"><div class="local-search-box"><input class="local-search-box--input" placeholder="搜索文章" type="text"/></div></div><hr/><div id="local-search-results"></div><div id="local-search-stats-wrap"></div></div></div><div id="search-mask"></div><script src="/js/search/local-search.js"></script></div></div></body></html>

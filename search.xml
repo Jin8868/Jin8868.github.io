@@ -1,278 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
-    <title>UI背景模糊的两种实现方法</title>
-    <url>/posts/8434956c.html</url>
-    <content><![CDATA[原理实现模糊的原理比较简单：一个像素本身的颜色通过某种算法，最终计算为周围颜色的一个均值或权重值，这样看起来的图就是模糊的了。通过计算均值颜色的算法选择不同，就产生了不同效果、不同效率的模糊。具体实现算法可以看左神的这篇文章：高品质后处理：十种图像模糊算法的总结与实现，里面把所有的模糊算法的数学原理和效果都列举完了，言简意赅，字字珠玑。下面介绍我在实际工程中的实现UI背景模糊两种实现方法。
-因为需要计算周围颜色的值，所以我们首先需要抓取到当前渲染的画面。目前我知道的抓取画面有两种方法：1、GrabPss。2、屏幕后处理。所以我这两把这两种方式分成了两种方法。
-方法一：GrabPassGrabPass是Unity的内置渲染管线中一个特殊的pass，可以在shader中将当前帧抓取到一张纹理贴图中。我的实现中获取了两次，分别做了垂直和水平方向的模糊处理。效果如下：通过调整Image位置和大小实现局部模糊：
-shader代码Shader &quot;FT/Blur/Back&quot;&#123;	Properties	&#123;		_MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;		_Color (&quot;Main Color&quot;, Color) = (1,1,1,1)        _Size (&quot;Size&quot;, Range(0, 20)) = 1	&#125;	Category &#123;            // We must be transparent, so other objects are drawn before this one.          Tags &#123; 			&quot;Queue&quot;=&quot;Transparent&quot; 			&quot;IgnoreProjector&quot;=&quot;True&quot; 			&quot;RenderType&quot;=&quot;Transparent&quot;			&quot;PreviewType&quot; = &quot;Plane&quot;			&quot;CanUseSpriteAtlas&quot; = &quot;True&quot;		&#125;              SubShader &#123;                // Horizontal blur              GrabPass 			&#123;                                      Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                  Name &quot;BackBlurHor&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord : TEXCOORD0;					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;					float4 color    : COLOR;                &#125;;                  v2f vert (appdata_t v) &#123;                      v2f o;                     o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;			    float4 _MainTex_TexelSize;                float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;                    kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;					return tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x + _GrabTexture_TexelSize.x * kernel * _Size, i.uvgrab.y, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                half4 frag( v2f i ) : COLOR &#123;                   	half4 sum = half4(0,0,0,0);                    sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);                    float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;  			            // Vertical blur              GrabPass &#123;                                          Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                  Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                Name &quot;BackBlurVer&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord: TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    v2f vert (appdata_t v) &#123;                      v2f o;                      o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;                  float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;					kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;                         return tex2Dproj( _GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x, i.uvgrab.y + _GrabTexture_TexelSize.y * kernel * _Size, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                  half4 frag( v2f i ) : COLOR				&#123;                    half4 sum = half4(0,0,0,0);                      sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);					float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;        &#125;	&#125;&#125;
-
-方法二：屏幕后处理Unity通过给相机添加脚本并重写OnRenderImage方法，可以拿到当前渲染画面的纹理，通过对改变此纹理可以实现各种后处理效果。这里我使用了双重模糊算法，通过2倍升&#x2F;降分辨率从而优化每帧传递给GPU的带宽和计算，并且因为先降低分辨率再放大本身就会产生模糊，所以双重模糊使用比较少的迭代次数就能获得其他方法比较高迭代次数的效果。效果如下：
-C#代码using UnityEngine;[ExecuteInEditMode][RequireComponent(typeof(Camera))]public class SimpleDualBlur : MonoBehaviour&#123;    [Range(0, 8)] public int iterations = 4;        public Shader blurShader;    private Material blurMaterial;    private Material BlurMaterial    &#123;        get        &#123;            if (blurMaterial == null)            &#123;                blurMaterial = new Material(blurShader);                blurMaterial.hideFlags = HideFlags.DontSave;            &#125;            return blurMaterial;        &#125;    &#125;    void OnDisable()    &#123;        if (blurMaterial)            DestroyImmediate(blurMaterial);    &#125;    void OnRenderImage(RenderTexture source, RenderTexture destination)    &#123;        if (BlurMaterial == null || iterations &lt;= 0)        &#123;            Graphics.Blit(source, destination);            return;        &#125;        int width = source.width;        int height = source.height;        // 第1个临时纹理        RenderTexture rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);        RenderTexture rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);        // 第1次下采样        Graphics.Blit(source, rt1);                // 双重模糊循环        // 下采样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 上样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = width * 2;            height = height * 2;            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = width * 2;            height = height * 2;            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 最终输出        Graphics.Blit(rt1, destination);        RenderTexture.ReleaseTemporary(rt1);        RenderTexture.ReleaseTemporary(rt2);    &#125;&#125;
-shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#123;        _MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;    &#125;        SubShader    &#123;        Cull Off        ZWrite Off        ZTest Always                // Pass 0: 下采样Pass (5点采样)        Pass        &#123;            Name &quot;DOWNSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_downsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_downsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                float2 offset = texelSize * 2.0; // 2倍下采样                                // 5点采样：中心 + 4个角                fixed4 col = tex2D(_MainTex, i.uv) * 0.6;              // 中心                col += tex2D(_MainTex, i.uv + float2(-offset.x, -offset.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(offset.x, -offset.y)) * 0.1;   // 右上                col += tex2D(_MainTex, i.uv + float2(-offset.x, offset.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(offset.x, offset.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;                // Pass 1: 上采样Pass (9点采样)        Pass        &#123;            Name &quot;UPSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_upsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_upsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                                // 9点采样：中心 + 周围8个点                fixed4 col = tex2D(_MainTex, i.uv) * 0.2;  // 中心 (1/9)                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, -texelSize.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(0.0, -texelSize.y)) * 0.1;           // 上                col += tex2D(_MainTex, i.uv + float2(texelSize.x, -texelSize.y)) * 0.1;   // 右上                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, 0.0)) * 0.1;           // 左                col += tex2D(_MainTex, i.uv + float2(texelSize.x, 0.0)) * 0.1;            // 右                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, texelSize.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(0.0, texelSize.y)) * 0.1;            // 下                col += tex2D(_MainTex, i.uv + float2(texelSize.x, texelSize.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;    &#125;    FallBack Off&#125;
-
-
-方法对比与性能分析通用性：GrabPass只适用于Unity的内置渲染管线，剩下的URP、HDRP、SRP统统都不支持；屏幕后处理则都通用，只需要实现对应的接口即可。需求实现：GrabPass因为生成了材质挂载到Image中，所以可以非常简单的通过调整Image的大小和位置，实现UI局部模糊；屏幕后处理则只能支持全屏。性能消耗：GrabPass在Unity的官方文档中明确指出：“会显著增加CPU和GPU帧时间。除了快速原型制作之外，您通常应该避免使用此命令，并尝试通过其他方式实现您的效果”。而这里使用材质挂载的方式，一个材质就两个pass，所以在多个材质的情况下性能会有严重的问题；对于屏幕后处理只会对渲染管线最后的画面做一次处理，通过双重模糊算法降低与GPU交互数据的带宽，性能较好。
-参考资料[1].【Unity渲染——屏幕后处理】Cg代码实现多种模糊算法
-]]></content>
-  </entry>
-  <entry>
-    <title>C#匿名函数与闭包</title>
-    <url>/posts/278e5dd7.html</url>
-    <content><![CDATA[起因最近看到了一段C#程序，一开始就简单的以为只是一个for循环的0~9的打印，但是深入了解之后发现我错了，而且对其中的原理相知甚少。代码如下：
-public static void Main(string[] args)&#123;    Action[] actions = new Action[10];    for (int i = 0; i &lt; 10; i++)    &#123;        actions[i] = () =&gt; &#123;Console.WriteLine(i.ToString()); &#125;;    &#125;    foreach (var action in actions)    &#123;        action();    &#125;&#125;
-这段代码的运行结果输出是10个10，如果做对了，想必已经是了解其中的原理，下面的内容可以不用看了。
-原因原因其实很简单，使用编辑器查看IL代码，可以很清晰的看到：编译器为匿名函数生成了一个名为&lt;&gt;c__DisplayClass0_0的类，并把int i作为了类内的成员变量，并在类中生成了b__0()方法，在方法中打印成员变量i。在函数运行时，new了一个名为cDisplayClass00的实例，并且在for循环中是不断的自增实例中的变量，最后把自己的b__0()方法传入Action中。C#中class是默认分配在堆上的，所以每次增加的i变量都是同一个地址上的数据，最后执行action委托时，调用的也是同一个类的b__0()方法，所以最后的结果自然全是10。
-闭包中存在的问题既然匿名函数在使用时在堆上new了一个实例，分配了内存，所以必定涉及到了GC。那么代码中的哪种写法导会有严重的GC问题，哪种写法又能尽量避免GC。搜索之后，发现猫仙人的这篇文章总结得非常到位：文章传送连接，以下是我对他文章结论的进一步总结，具体论证细节可以点击连接去查看。
-捕获变量的分类外部变量的分类重要分为3种：1、捕获静态变量2、捕获实例字段3、捕获外部方法的局部变量其中分配内存的多少为：3&gt;2&gt;1&gt;无闭包，并且捕获外部方法的局部变量的内存分配量高达2n次，为了记录外部局部变量的值，编译器每次都new了一个新的匿名类实例和Action实例。
-优化方法文章中指出了，可以通过增加参数数量，使用方法参数去传递要捕获的变量，避免掉对外部变量的捕获，同时避免闭包的额外内存分配。对于该文章开头的代码，若想改成输出0~9，就有两种办法，以下给出代码截图。第二种用了优化建议，内存性能要优于第一种。
-捕获外部方法的局部变量编译器new了n个匿名类实例和Action实例
-增加参数变量编译器只new对应的Aciton实例
-总结对于以上验证，可以简单粗暴的认为：runtime直接不使用()&#x3D;&gt;{}这种匿名函数的写法，能非常有效的避免额外内存开销。
-]]></content>
-  </entry>
-  <entry>
-    <title>UniTask 0GC实现原理</title>
-    <url>/posts/6045236e.html</url>
-    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
-Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
-UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
-
-用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
-
-下面从源码角度拆开看。
-1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
-await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
-
-前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
-例如：
-await someUniTask;
-
-编译器大致会按下面的模式展开：
-var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
-
-而：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
-所以 UniTask 的优化也分成两部分：
-
-实现并优化 await UniTask 的 awaiter 语法糖。
-实现并优化 async UniTask 的 builder 语法糖。
-
-2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
-public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
-
-GetAwaiter() 返回的 Awaiter 是结构体：
-public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
-
-它提供 awaiter pattern 需要的成员：
-public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
-
-这些成员分别对应 await 的几个阶段：
-GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
-
-因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
-也就是说，下面这句：
-await UniTask.Yield();
-
-在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
-UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
-3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
-第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
-第二，Awaiter 内部只保存一个 UniTask 值：
-readonly UniTask task;
-
-第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
-internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
-
-这样可以避免每次 await 都创建一个新的包装委托。
-第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
-所以 await UniTask 的低分配来自几个点叠加：
-UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
-
-4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
-
-UniTask&lt;T&gt; 也是结构体：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
-
-这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
-如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
-如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
-也就是说：
-同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
-
-这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
-5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
-
-它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
-例如：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器大致会生成类似这样的状态机代码：
-var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
-
-遇到 await 时：
-builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
-
-方法正常完成：
-builder.SetResult();
-
-方法抛异常：
-builder.SetException(exception);
-
-注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
-6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
-public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
-
-它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
-它真正做的是：
-
-作为编译器 async 语法的入口。
-启动状态机。
-在第一次异步挂起时，创建或复用一个 runner。
-把 runner 的 MoveNext 注册给 awaiter。
-在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
-通过 Task 属性把最终的 UniTask 返回给调用方。
-
-关键代码在 AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里有两个重点：
-第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
-第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
-7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
-internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
-
-它的职责非常集中：
-
-保存编译器生成的状态机副本。
-提供 MoveNext 给 awaiter 作为 continuation。
-实现 IUniTaskSource，让外部 UniTask 可以 await 它。
-保存完成、异常、取消状态。
-完成后清空并回收到对象池。
-
-第一次挂起时，builder 调用：
-AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
-
-内部会先从池里取：
-if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
-
-这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
-awaiter 完成后，会调用：
-runnerPromise.MoveNext
-
-实际进入：
-void Run()&#123;    stateMachine.MoveNext();&#125;
-
-这就恢复了 async 方法后续逻辑。
-8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
-AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
-public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
-
-调用方拿到的 UniTask 内部指向这个 runner：
-UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
-
-core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
-
-当前状态。
-continuation。
-异常或取消信息。
-version token。
-
-正常完成时：
-public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
-
-异常时：
-public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
-
-调用方 await 完成后会进入：
-public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
-
-TryReturn() 会清理状态并回池：
-core.Reset();stateMachine = default;pool.TryPush(this);
-
-这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
-9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
-典型结构是：
-static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
-
-使用时：
-pool.TryPop(out var result)pool.TryPush(this)
-
-因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
-这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
-10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
-await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
-
-UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
-PlayerLoopHelper.AddAction(timing, result);
-
-YieldPromise 本身也是可池化的：
-sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
-
-在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
-public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
-
-完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
-所以在类似 UI 填充动画这样的循环中：
-while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
-
-预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
-11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
-AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
-
-因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
-async UniTaskVoid 使用的是：
-AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
-
-UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
-简单说：
-UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
-
-12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
-
-第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
-CancellationTokenSource、CreateLinkedTokenSource 会分配。
-取消时可能创建 OperationCanceledException。
-异常路径会捕获异常信息。
-闭包、lambda 捕获、LINQ、装箱仍然会分配。
-Debug.Log、字符串拼接、Unity 日志系统可能分配。
-Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
-
-因此更严谨的说法是：
-
-UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
-
-13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
-
-总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
-
-UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
-[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
-AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
-AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
-UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
-TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
-PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
-awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
-
-最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
-]]></content>
-  </entry>
-  <entry>
     <title>UniTask学习与使用</title>
     <url>/posts/4483a5b.html</url>
     <content><![CDATA[UniTask 学习文档
@@ -816,6 +544,38 @@ GetAsyncOnTriggerEnterTrigger()
 ]]></content>
   </entry>
   <entry>
+    <title>C#匿名函数与闭包</title>
+    <url>/posts/278e5dd7.html</url>
+    <content><![CDATA[起因最近看到了一段C#程序，一开始就简单的以为只是一个for循环的0~9的打印，但是深入了解之后发现我错了，而且对其中的原理相知甚少。代码如下：
+public static void Main(string[] args)&#123;    Action[] actions = new Action[10];    for (int i = 0; i &lt; 10; i++)    &#123;        actions[i] = () =&gt; &#123;Console.WriteLine(i.ToString()); &#125;;    &#125;    foreach (var action in actions)    &#123;        action();    &#125;&#125;
+这段代码的运行结果输出是10个10，如果做对了，想必已经是了解其中的原理，下面的内容可以不用看了。
+原因原因其实很简单，使用编辑器查看IL代码，可以很清晰的看到：编译器为匿名函数生成了一个名为&lt;&gt;c__DisplayClass0_0的类，并把int i作为了类内的成员变量，并在类中生成了b__0()方法，在方法中打印成员变量i。在函数运行时，new了一个名为cDisplayClass00的实例，并且在for循环中是不断的自增实例中的变量，最后把自己的b__0()方法传入Action中。C#中class是默认分配在堆上的，所以每次增加的i变量都是同一个地址上的数据，最后执行action委托时，调用的也是同一个类的b__0()方法，所以最后的结果自然全是10。
+闭包中存在的问题既然匿名函数在使用时在堆上new了一个实例，分配了内存，所以必定涉及到了GC。那么代码中的哪种写法导会有严重的GC问题，哪种写法又能尽量避免GC。搜索之后，发现猫仙人的这篇文章总结得非常到位：文章传送连接，以下是我对他文章结论的进一步总结，具体论证细节可以点击连接去查看。
+捕获变量的分类外部变量的分类重要分为3种：1、捕获静态变量2、捕获实例字段3、捕获外部方法的局部变量其中分配内存的多少为：3&gt;2&gt;1&gt;无闭包，并且捕获外部方法的局部变量的内存分配量高达2n次，为了记录外部局部变量的值，编译器每次都new了一个新的匿名类实例和Action实例。
+优化方法文章中指出了，可以通过增加参数数量，使用方法参数去传递要捕获的变量，避免掉对外部变量的捕获，同时避免闭包的额外内存分配。对于该文章开头的代码，若想改成输出0~9，就有两种办法，以下给出代码截图。第二种用了优化建议，内存性能要优于第一种。
+捕获外部方法的局部变量编译器new了n个匿名类实例和Action实例
+增加参数变量编译器只new对应的Aciton实例
+总结对于以上验证，可以简单粗暴的认为：runtime直接不使用()&#x3D;&gt;{}这种匿名函数的写法，能非常有效的避免额外内存开销。
+]]></content>
+  </entry>
+  <entry>
+    <title>UI背景模糊的两种实现方法</title>
+    <url>/posts/8434956c.html</url>
+    <content><![CDATA[原理实现模糊的原理比较简单：一个像素本身的颜色通过某种算法，最终计算为周围颜色的一个均值或权重值，这样看起来的图就是模糊的了。通过计算均值颜色的算法选择不同，就产生了不同效果、不同效率的模糊。具体实现算法可以看左神的这篇文章：高品质后处理：十种图像模糊算法的总结与实现，里面把所有的模糊算法的数学原理和效果都列举完了，言简意赅，字字珠玑。下面介绍我在实际工程中的实现UI背景模糊两种实现方法。
+因为需要计算周围颜色的值，所以我们首先需要抓取到当前渲染的画面。目前我知道的抓取画面有两种方法：1、GrabPss。2、屏幕后处理。所以我这两把这两种方式分成了两种方法。
+方法一：GrabPassGrabPass是Unity的内置渲染管线中一个特殊的pass，可以在shader中将当前帧抓取到一张纹理贴图中。我的实现中获取了两次，分别做了垂直和水平方向的模糊处理。效果如下：通过调整Image位置和大小实现局部模糊：
+shader代码Shader &quot;FT/Blur/Back&quot;&#123;	Properties	&#123;		_MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;		_Color (&quot;Main Color&quot;, Color) = (1,1,1,1)        _Size (&quot;Size&quot;, Range(0, 20)) = 1	&#125;	Category &#123;            // We must be transparent, so other objects are drawn before this one.          Tags &#123; 			&quot;Queue&quot;=&quot;Transparent&quot; 			&quot;IgnoreProjector&quot;=&quot;True&quot; 			&quot;RenderType&quot;=&quot;Transparent&quot;			&quot;PreviewType&quot; = &quot;Plane&quot;			&quot;CanUseSpriteAtlas&quot; = &quot;True&quot;		&#125;              SubShader &#123;                // Horizontal blur              GrabPass 			&#123;                                      Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                  Name &quot;BackBlurHor&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord : TEXCOORD0;					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;					float4 color    : COLOR;                &#125;;                  v2f vert (appdata_t v) &#123;                      v2f o;                     o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;			    float4 _MainTex_TexelSize;                float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;                    kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;					return tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x + _GrabTexture_TexelSize.x * kernel * _Size, i.uvgrab.y, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                half4 frag( v2f i ) : COLOR &#123;                   	half4 sum = half4(0,0,0,0);                    sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);                    float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;  			            // Vertical blur              GrabPass &#123;                                          Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                  Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                Name &quot;BackBlurVer&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord: TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    v2f vert (appdata_t v) &#123;                      v2f o;                      o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;                  float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;					kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;                         return tex2Dproj( _GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x, i.uvgrab.y + _GrabTexture_TexelSize.y * kernel * _Size, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                  half4 frag( v2f i ) : COLOR				&#123;                    half4 sum = half4(0,0,0,0);                      sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);					float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;        &#125;	&#125;&#125;
+
+方法二：屏幕后处理Unity通过给相机添加脚本并重写OnRenderImage方法，可以拿到当前渲染画面的纹理，通过对改变此纹理可以实现各种后处理效果。这里我使用了双重模糊算法，通过2倍升&#x2F;降分辨率从而优化每帧传递给GPU的带宽和计算，并且因为先降低分辨率再放大本身就会产生模糊，所以双重模糊使用比较少的迭代次数就能获得其他方法比较高迭代次数的效果。效果如下：
+C#代码using UnityEngine;[ExecuteInEditMode][RequireComponent(typeof(Camera))]public class SimpleDualBlur : MonoBehaviour&#123;    [Range(0, 8)] public int iterations = 4;        public Shader blurShader;    private Material blurMaterial;    private Material BlurMaterial    &#123;        get        &#123;            if (blurMaterial == null)            &#123;                blurMaterial = new Material(blurShader);                blurMaterial.hideFlags = HideFlags.DontSave;            &#125;            return blurMaterial;        &#125;    &#125;    void OnDisable()    &#123;        if (blurMaterial)            DestroyImmediate(blurMaterial);    &#125;    void OnRenderImage(RenderTexture source, RenderTexture destination)    &#123;        if (BlurMaterial == null || iterations &lt;= 0)        &#123;            Graphics.Blit(source, destination);            return;        &#125;        int width = source.width;        int height = source.height;        // 第1个临时纹理        RenderTexture rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);        RenderTexture rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);        // 第1次下采样        Graphics.Blit(source, rt1);                // 双重模糊循环        // 下采样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 上样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = width * 2;            height = height * 2;            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = width * 2;            height = height * 2;            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 最终输出        Graphics.Blit(rt1, destination);        RenderTexture.ReleaseTemporary(rt1);        RenderTexture.ReleaseTemporary(rt2);    &#125;&#125;
+shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#123;        _MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;    &#125;        SubShader    &#123;        Cull Off        ZWrite Off        ZTest Always                // Pass 0: 下采样Pass (5点采样)        Pass        &#123;            Name &quot;DOWNSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_downsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_downsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                float2 offset = texelSize * 2.0; // 2倍下采样                                // 5点采样：中心 + 4个角                fixed4 col = tex2D(_MainTex, i.uv) * 0.6;              // 中心                col += tex2D(_MainTex, i.uv + float2(-offset.x, -offset.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(offset.x, -offset.y)) * 0.1;   // 右上                col += tex2D(_MainTex, i.uv + float2(-offset.x, offset.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(offset.x, offset.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;                // Pass 1: 上采样Pass (9点采样)        Pass        &#123;            Name &quot;UPSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_upsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_upsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                                // 9点采样：中心 + 周围8个点                fixed4 col = tex2D(_MainTex, i.uv) * 0.2;  // 中心 (1/9)                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, -texelSize.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(0.0, -texelSize.y)) * 0.1;           // 上                col += tex2D(_MainTex, i.uv + float2(texelSize.x, -texelSize.y)) * 0.1;   // 右上                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, 0.0)) * 0.1;           // 左                col += tex2D(_MainTex, i.uv + float2(texelSize.x, 0.0)) * 0.1;            // 右                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, texelSize.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(0.0, texelSize.y)) * 0.1;            // 下                col += tex2D(_MainTex, i.uv + float2(texelSize.x, texelSize.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;    &#125;    FallBack Off&#125;
+
+
+方法对比与性能分析通用性：GrabPass只适用于Unity的内置渲染管线，剩下的URP、HDRP、SRP统统都不支持；屏幕后处理则都通用，只需要实现对应的接口即可。需求实现：GrabPass因为生成了材质挂载到Image中，所以可以非常简单的通过调整Image的大小和位置，实现UI局部模糊；屏幕后处理则只能支持全屏。性能消耗：GrabPass在Unity的官方文档中明确指出：“会显著增加CPU和GPU帧时间。除了快速原型制作之外，您通常应该避免使用此命令，并尝试通过其他方式实现您的效果”。而这里使用材质挂载的方式，一个材质就两个pass，所以在多个材质的情况下性能会有严重的问题；对于屏幕后处理只会对渲染管线最后的画面做一次处理，通过双重模糊算法降低与GPU交互数据的带宽，性能较好。
+参考资料[1].【Unity渲染——屏幕后处理】Cg代码实现多种模糊算法
+]]></content>
+  </entry>
+  <entry>
     <title>Unity-AssetBundle分包策略</title>
     <url>/posts/9b7c4e21.html</url>
     <content><![CDATA[AssetBundle 分包策略：哪些资源应该放进同一个包前两篇《Unity-AssetBundle结构解析》和《Unity-AssetBundle加载与卸载》，分别讨论了 AB 文件内部的组织方式，以及资源加载后由谁持有、什么时候释放。
@@ -1132,7 +892,7 @@ Sprite Atlas
 
 ]]></content>
       <tags>
-        <tag>Unity-AssetBunde</tag>
+        <tag>Unity-AssetsBundle</tag>
       </tags>
   </entry>
   <entry>
@@ -1360,7 +1120,7 @@ Managed memory：GC 与 Native 资源回收的区别
 
 ]]></content>
       <tags>
-        <tag>Unity-AssetBunde</tag>
+        <tag>Unity-AssetsBundle</tag>
       </tags>
   </entry>
   <entry>
@@ -1526,29 +1286,8 @@ YooAssets（C#）：PackageManifest.cs &#x2F; ResourcePackage.cs，框架清单�
 
 ]]></content>
       <tags>
-        <tag>Unity-AssetBunde</tag>
+        <tag>Unity-AssetsBundle</tag>
       </tags>
-  </entry>
-  <entry>
-    <title>Unity的动态图集实现</title>
-    <url>/posts/71da87fc.html</url>
-    <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
-性能优化测试效果未使用动态图集，2张图4个Draw Call。使用动态图集，2张图3个Drwa Call，图越多解决越多。
-动态图集原理动态图集的核心原理为：在运行时维护一张较大的纹理区域，在运行时动态地往纹理区域内添加或移除，现实上直接把纹理区域指定给RawIamge的texture然后设置其UV Rect即可。由于同时渲染的icon数量往往远远小于实际icon的资源数量，因此通常一张1024或者2048大小的动态图集即可以满足大多数的游戏需求。该方法的好处在于，内存在可控范围，并且icon可以共享纹理从而省draw call。下面详细介绍动态图集实现的技术细节。
-二维装箱算法因为放入的每张图片大小不一，所以高效的寻找图片在纹理区域中的位置，从而打到最大空间利用，是动态图集实现最为核心的问题。对于区域的增删查改，可以抽象成一个二维空间装箱操作，算法上有比较多的实现，有兴趣的可以了解这篇文章概述二维空间uv装箱算法：Shelf、Guillotine、MAXRECTS、Skyline。目前的几个算法都是在不重叠的前提下，尽可能大地利用空间，这是一个NP-hard问题，因此没有有效的算法可以解决所有情况。我这里选用的就是Max-Rect的BSSF最短边匹配优先。
-public IntRect Insert(int w, int h)&#123;    // 1. 找最佳空闲区域（最短边匹配优先 BSSF）    int bestIdx = -1;    int bestShort = int.MaxValue;    for (int i = 0; i &lt; m_freeRects.Count; i++)    &#123;        var free = m_freeRects[i];        if (w &lt;= free.width &amp;&amp; h &lt;= free.height)        &#123;            int leftover = Mathf.Min(free.width - w, free.height - h);            if (leftover &lt; bestShort)            &#123;                bestShort = leftover;                bestIdx = i;            &#125;        &#125;    &#125;    if (bestIdx &lt; 0) return null;    // 2. 放置    var best = m_freeRects[bestIdx];    var placed = new IntRect(best.x, best.y, w, h);    // 3. 裁剪所有重叠的空闲矩形    for (int i = m_freeRects.Count - 1; i &gt;= 0; i--)    &#123;        if (Overlaps(placed, m_freeRects[i]))        &#123;            SplitFreeRect(m_freeRects[i], placed);            m_freeRects.RemoveAt(i);        &#125;    &#125;    // 4. 去除冗余    RemoveRedundant();    return placed;&#125;/// &lt;summary&gt;/// 回收（释放）一个已放置的矩形区域，使其重新可用/// &lt;/summary&gt;/// &lt;param name=&quot;rect&quot;&gt;之前 Insert 返回的矩形&lt;/param&gt;public void Recycle(IntRect rect)&#123;    if (rect == null) return;    // 1. 边界校验    if (rect.x &lt; 0 || rect.y &lt; 0 || rect.right &gt; m_width || rect.top &gt; m_height)        return;    if (rect.width &lt;= 0 || rect.height &lt;= 0)        return;    // 2. 将释放区域加入空闲列表    m_freeRects.Add(new IntRect(rect.x, rect.y, rect.width, rect.height));    // 3. 合并空闲矩形    MergeFreeRects();    // 4. 去除冗余    RemoveRedundant();&#125;
-
-图片拷贝的API选择通过装箱算法知道了图片的位置和区域，第二个问题就是如何高效地把图片拷贝到对于的纹理中。在Unity中纹理的拷贝有两种方式：Graphics.CopyTexture和Texture.Get&#x2F;SetPixels
-Graphics.CopyTexture优点：1.首先第一个就是它是从GPU的显存到显存的直接拷贝，效率非常高。2.不需要勾选texture的read&#x2F;write enabled。由于是直接的显存拷贝，因此并不需要在系统内存里再存储一份texture数据。缺点：1.底层调用OpenGL接口glCopyImageSubData。该接口要求OpenGL4.3以上或者GL ES3.2以上才能支持。
-Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如下图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
-因为Texture.Get&#x2F;SetPixels有诸多的性能问题，Graphics.CopyTexture仅有一个支持API版本问题，并且对应的OpenGL4.3和GL ES3.2，为别IOS8（Iphone 5S）和Android 7.0(2016年发布)。已经是10年前的机型了，所以这里我直接选择了Graphics.CopyTexture。
-动态图集初始大小和区域满后的处理图集的初始大小可能纠结的只有初始太大，导致利用率低，这个根据项目实际使用情况分配就行了，建议初始大小设置成1024*1024。但是一张图如果放满了就有两种处理办法：纹理扩容和多张纹理。下面分类讨论这两种实现。
-纹理扩容图片扩容需要做3件事：1、开辟一张更大的纹理，把原纹理拷贝到大纹理中。2、更新所有图片的UV区域信息。3、更新场景中存在的所有RawIamge组件的UV Rect信息。这个方案的第二、第三步都是O(n)级别的复杂度，并且随着纹理的扩大n也越大，越扩容性能消耗越大。
-多张纹理多张纹理则是新建一张大小一致的纹理，这种做法不需要更新图片UV区域。在代码层面就要维护一个图片数组，每次有新图要加入时从数组中遍历得到一个空闲的纹理加入。同时因为提供的纹理不同，所以会多一些Draw Call的开销。
-综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
-代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
-项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
-]]></content>
   </entry>
   <entry>
     <title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</title>
@@ -1802,6 +1541,405 @@ UniTask：现代 Unity 项目的事实标准，几乎在所有维度上都是协
       </tags>
   </entry>
   <entry>
+    <title>Unity-YooAssets的AB资源分类与管理</title>
+    <url>/posts/b0d5b4a0.html</url>
+    <content><![CDATA[YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求前三篇分别讨论了 AssetBundle 的结构、加载与卸载，以及分包策略。到了具体项目里，我们已经可以根据资源的使用范围、生命周期和更新节奏，决定哪些内容适合放进同一个包。
+但对于 YooAssets，问题还要再往前走一步。
+有的项目按角色和关卡管理资源，有的按玩法和活动组织内容；有的保留贴图、材质、预制体等类型目录，有的直接按功能划分文件夹。同样一个角色，在小项目中可能整体打包，在大项目中却需要拆出皮肤、语音和高清贴图。
+YooAssets 作为一个面向不同项目的通用资源管理器，要适配这些差异，它应该如何抽象资源分类和分包管理？
+如果直接规定“每个文件夹打成一个 AB”，就会把项目的目录结构与打包结构绑在一起；如果规定“每个角色一个 AB”，又无法表达界面、配置、场景和其他业务的需求。通用框架需要提供一套能描述项目差异的结构，让具体项目把自己的分包策略填进去。
+本文就从这个问题出发，按照背景、目标、设计和结果的顺序，理解 YooAssets 在资源收集界面中呈现的四层结构：Package → Group → Collector → MainAssets。
+
+本文以 YooAsset 2.3.19 源码为依据。“四层结构”描述的是资源组织与收集的观察层次，其中 MainAssets 是主资源收集器计算出的条目，并非与前三层一样手动配置的容器。
+
+一、通用资源管理器需要表达哪些差异上一篇的分包策略给出了一个判断方向：经常一起使用、释放和更新的资源，可以优先考虑放在一起；独立更新或按需下载的内容，再根据实际需求拆分。
+但这是项目的业务判断。框架需要把这些判断转化为可执行、可复用的配置。
+例如，同一批资源可能同时存在几种不同的组织方式：
+
+
+
+观察角度
+可能的划分方式
+
+
+
+发布与版本管理
+基础资源、扩展内容、独立更新的内容集合
+
+
+业务管理
+角色、界面、关卡、活动
+
+
+源文件存放
+Prefabs、Textures、Materials、Animations
+
+
+实际打包
+一个角色一个包、一个目录一个包、一个资源一个包
+
+
+运行时访问
+按地址加载预制体，通过引用带出材质与贴图
+
+
+这几种划分并不总是重合。一个骑士的资源可以分散在四个类型目录里，却希望合成同一个 Bundle；一个活动目录也可以因为内容体积和更新频率不同，拆出多个 Bundle。
+因此，框架需要让项目分别描述：资源属于哪个管理范围，按什么业务分组，从哪里收集，以及收集后如何寻址与归包。 这些问题如果全部压在一个“包名”字段里，配置就很难扩展。
+二、用四层结构逐步落实资源归属在 YooAssets 的 Bundle Collector 界面中，可以从外向内看到：
+Package：一个资源包管理范围└── Group：一组相关收集器    └── Collector：一套资源收集规则        └── MainAssets：规则直接收集到的主资源条目
+
+四层结构逐步把范围缩小：
+
+
+
+层次
+主要回答的问题
+典型内容
+
+
+
+Package
+这批资源作为哪个资源集合进行构建、版本管理和运行时访问？
+Package 名称、寻址设置、Groups
+
+
+Group
+哪些收集器属于同一个管理分组？
+业务分组、激活规则、组标签、Collectors
+
+
+Collector
+从哪里收集，选哪些资源，怎样寻址和计算包名？
+路径、类型、过滤规则、寻址规则、打包规则
+
+
+MainAssets
+这些规则最终直接选中了哪些可加载主资源？
+资源路径、Address 等收集结果
+
+
+
+    graph TD
+    P[Package 资源集合] --&gt; G1[Group 角色资源]
+    P --&gt; G2[Group 界面资源]
+    G1 --&gt; C1[Collector 预制体目录]
+    G1 --&gt; C2[Collector 贴图目录]
+    C1 --&gt; M1[MainAssets 预制体条目]
+    C2 --&gt; M2[MainAssets 贴图条目]
+    C1 -.-&gt; R[打包规则计算 Bundle 归属]
+    C2 -.-&gt; R
+    R --&gt; B[相同 BundleName 的资源归入同一 AssetBundle]
+  
+
+这里要先区分 Package 和 AssetBundle。YooAssets 的 Package 可以包含很多 Bundle；Group 和 Collector 也不天然对应一个 Bundle。四层结构负责组织资源和表达规则，最终的物理分包由打包规则及后续构建处理决定。
+三、Package：确定资源集合的管理边界1. 为什么最外层需要 Package如果项目只有一份资源清单、统一发布和更新，那么把资源放进一个 Package 就能满足大部分需求。
+但有些内容需要独立构建、维护版本或使用不同的资源构建形式。例如，常规 Unity 资产与原生音频文件的构建和加载方式就存在差异。此时需要在单个 Bundle 之上，再提供一个资源集合的管理层次。
+Package 承担的就是这个角色。编辑器中的 AssetBundleCollectorPackage 定义该集合的收集配置；运行时通过对应名称的 ResourcePackage 初始化资源系统、使用资源清单并发起加载。
+可以把它理解为：先选定在哪一套资源管理上下文中工作，再讨论其中具体资源怎样分类与打包。
+2. Package 管什么Package 中包含 PackageName、Groups，以及寻址、忽略资源和自动收集 Shader 等配置。构建时针对指定 Package 收集资源，运行时则在对应 Package 中查找资源位置。
+一个 Package 可以有自己的版本和清单，清单再关联该集合中的资源与 Bundle。它的名字不是某个单独 AB 文件的名字。
+当前项目的配置就包含：
+
+
+
+Package
+配置用途
+
+
+
+DefaultPackage
+预制体、材质、配置和场景等 Unity 资源
+
+
+AudioPackage
+Wwise 音频原生文件
+
+
+CodePackage
+热更新程序集与 AOT 元数据文件
+
+
+VideoPackage
+视频原生文件
+
+
+这些名称和用途属于项目自己的设计。对于原生文件，还要使用匹配的构建管线与加载方式，不能将它们全部理解为 Unity AssetBundle。
+3. 什么需求适合放在这一层当需求涉及资源集合的独立构建、版本和初始化时，可以考虑 Package 边界。只是希望让某个角色单独成包，通常在一个 Package 内配置打包规则即可；按需下载也可以在 Package 内结合标签、资源和依赖来实现。
+跨 Package 的资源引用需要额外考虑。把共享材质放进另一个 Package，不会自动建立跨 Package 的依赖装载关系，也不能据此保证只构建一份共享内容。
+四、Group：为相关收集器提供管理分组1. 为什么 Package 下还需要 Group一个 Package 可能包含几千个资源。如果把所有收集路径平铺在一张列表中，角色、界面、活动和关卡的配置就会混在一起。
+Group 让这些配置有了业务上的组织方式。例如：
+DefaultPackage├── Group: Characters├── Group: UI├── Group: Levels└── Group: Activities
+
+也可以继续按更细的业务单位建立 Group，例如 character.knight、ui.inventory。YooAssets 提供分组机制，项目决定使用什么粒度。
+2. Group 管什么AssetBundleCollectorGroup 中主要包含：
+
+
+
+配置
+作用
+
+
+
+GroupName、GroupDesc
+标识并说明该分组
+
+
+ActiveRuleName
+决定该组是否参与本次主动收集
+
+
+AssetTags
+为组内主资源提供公共标签
+
+
+Collectors
+保存该组的收集器列表
+
+
+这让项目可以把多个路径作为同一组管理，而无需修改源文件的目录布局。骑士的预制体、贴图、材质和动画即使分散存放，也可以放在同一个 Group 下。
+组激活控制的是主动收集。即使某组未启用，其中的资源仍可能被其他启用资源引用，并经依赖分析进入构建。标签则用于分类和相关下载选择，同样不会直接切割物理文件。
+3. Group 与 Bundle 的关系Group 本身不会强制组内资源合包。如果 Collector 使用 PackDirectory，就按每个资源的直接父目录计算包名；使用 PackGroup 时，才会以 Group 名作为包名依据。
+因此，同一个 Group 可以管理多个 Bundle，也可以通过一致的 PackGroup 规则，把多个 Collector 的资源合入同一个 Bundle。Group 提供组织信息，具体打包规则决定如何使用这些信息。
+五、Collector：把项目差异表达成可组合的规则1. 为什么收集器是关键的一层Package 与 Group 确定了资源属于哪里，但还没有回答：具体从哪个目录找，哪些文件参与，地址如何生成，包如何拆分。
+这些变化集中在 Collector 中。每个 AssetBundleCollector 都描述一套收集规则，CollectPath 可以指向文件夹，也可以指向单个文件。
+对于文件夹，收集器搜索范围内的候选资源，再应用忽略规则和过滤规则；对于单个文件，则对该文件进行相应判断。
+2. 将几个经常变化的问题分开
+
+
+配置
+负责的问题
+例子
+
+
+
+CollectPath
+去哪里找？
+Assets/Res/Prefabs/Characters
+
+
+FilterRuleName
+直接选中哪些文件？
+CollectPrefab 只直接收集预制体
+
+
+AddressRuleName
+可寻址主资源使用什么地址？
+AddressByFileName 使用文件名
+
+
+PackRuleName
+资源按什么方式归包？
+PackDirectory、PackGroup
+
+
+CollectorType
+收集条目承担什么角色？
+Main、Static、Depend
+
+
+AssetTags
+给主资源增加哪些分类标签？
+Knight、Optional
+
+
+UserData
+给扩展规则提供什么上下文？
+自定义规则约定的数据
+
+
+这种拆分允许项目独立调整策略。例如，从“文件名寻址”改成“相对路径寻址”，不必同时改动目录范围和分包方式；把整个角色合包改成每个资源单独打包，也不必重新定义过滤规则。
+YooAssets 还提供 IFilterRule、IAddressRule、IPackRule 等扩展接口。内置规则不能表达项目需求时，可以在相应维度扩展，而不是重写整套资源管理流程。
+这正是通用性的一个来源：框架提供稳定的配置结构和执行流程，把容易因项目而变化的部分交给规则实现。
+3. 分包策略如何落在这一层几种常用内置打包规则分别对应不同的粒度：
+
+
+
+规则
+包名依据
+可以表达的策略
+
+
+
+PackSeparately
+资源文件路径
+每个直接收集的资源单独计算包名
+
+
+PackDirectory
+资源的直接父目录
+按资源所在目录分包
+
+
+PackTopDirectory
+Collector 下的顶级目录
+按第一层子目录组织深层资源
+
+
+PackCollector
+收集器路径
+一个 Collector 的直接收集资源使用同一个包名
+
+
+PackGroup
+Group 名称
+同组中采用此规则的 Collector 跨目录合包
+
+
+Collector 会对收集到的每个资源分别计算 BundleName：计算结果相同的资源在构建阶段汇总到同一个包，结果不同的资源则进入不同包。一个 Collector 可以因此对应多个包，多个 Collector 的资源也可以合入同一个包。第八节用具体资源说明这层映射关系。实际归包还需要满足场景、资源类型和构建管线的约束，并考虑 Shader 等特殊处理。
+这些规则不会替项目判断“应该怎样分包”。上一篇讨论的业务策略，最终需要在这里选择对应规则来落实。
+六、MainAssets：从规则落到具体资源条目1. 最内层显示的是什么设置完 Collector，还需要确认规则实际选中了谁。展开一个 MainAssetCollector，界面会显示 Main Assets 及其资源条目；开启 Addressable 时，还会展示生成的地址。
+例如，收集路径指向骑士预制体目录，使用 CollectPrefab 和 AddressByFileName，预览可能是：
+Main Assets (1)[Knight] Assets/Res/Prefabs/Characters/Knight/Knight.prefab
+
+到这里，抽象配置已经落到具体资源：某个路径的预制体被选中，地址是 Knight，打包规则还为它计算了逻辑 Bundle 名。
+源码中，Collector 用 CollectAssetInfo 表示收集条目，其中包含资源信息、收集器类型、Address、BundleName、标签和依赖列表等内容。
+MainAssets 可以视为观察结构的第四层，但它是规则输出。 项目不需要再手动创建一个 MainAssets 容器；向收集范围内添加符合条件的资源，再刷新预览，就会得到新的条目。
+2. 主资源与依赖资源假设业务按地址加载 Knight.prefab，它再引用材质和贴图。预制体是一个可直接加载的入口，材质和贴图则可以通过依赖关系参与加载。
+“主资源”不等于资源更重要，也不等于一份资源只能有一种业务用途。它主要表达是否作为 YooAssets 清单中的独立加载入口。
+CollectorType 进一步区分了三种情况：
+
+
+
+类型
+参与构建的条件
+是否生成普通 Location 加载入口
+
+
+
+MainAssetCollector
+直接收集后参与
+是
+
+
+StaticAssetCollector
+直接收集后参与
+否
+
+
+DependAssetCollector
+被 Main 或 Static 主动收集资源引用时保留，否则剔除
+否
+
+
+对应类型的界面预览会显示 Main Assets、Static Assets 或 Depend Assets。Static 不代表资源在运行时永久驻留，Depend 也不能代替业务代码按字符串地址发起的加载需求。
+如果业务需要单独按地址加载某张贴图，它就应有相应的 Main 入口；如果只通过预制体引用它，则可以根据归包需求考虑 Depend 收集器，或交由后续依赖分析处理。
+3. MainAssets 与最终 Bundle 内容的区别2.3.19 的界面预览通过 RefreshFoldoutContent 调用 Collector 的 GetAllCollectAssets，并设置 IgnoreGetDependencies，跳过依赖查询。
+所以，MainAssets 里只显示一个预制体，并不代表构建中只有这个文件。只直接收集预制体，也不代表预制体引用的贴图被排除了。依赖分析仍会在构建流程中继续进行。
+同样，FBX 内的 Mesh 和动画等 Unity 子资产，也不能直接按 MainAssets 条目数量判断。这里列出的是收集层面的资源文件，完整产物要结合构建报告查看。
+七、四层结构怎样组合成项目需要的分包方案回到上一篇的骑士案例，假设预制体、贴图、材质和动画适合整体使用与更新，可以这样组织：
+Package: DefaultPackage├── Group: character.knight│   ├── Collector: Prefabs/Characters/Knight│   │   └── MainAssets: Knight.prefab│   ├── Collector: Textures/Characters/Knight│   │   └── MainAssets: KnightBody.png、KnightFace.png│   ├── Collector: Materials/Characters/Knight│   │   └── MainAssets: Knight.mat│   └── Collector: Animations/Characters/Knight│       └── MainAssets: KnightIdle.anim└── Group: activity.autumn    └── Collector: Textures/Activities/Autumn/Banners        └── MainAssets: AutumnBanner.png
+
+这个示例先让全部资源使用 Main 类型，便于展示第四层。实际项目中，再根据是否需要独立地址加载来选择 Main 或 Depend 等类型。
+四个骑士 Collector 一致使用 PackGroup，就能用相同的组名计算包名；活动图片使用自己的 Group 和打包规则。类型目录得以保留，打包结构则由配置明确表达。
+骑士预制体收集器的核心字段可以表示为：
+# 仅展示单个 Collector 的关键字段，不是完整的 Unity 配置文件。CollectPath: Assets/Res/Prefabs/Characters/KnightCollectorType: 0AddressRuleName: AddressByFileNamePackRuleName: PackGroupFilterRuleName: CollectPrefabAssetTags: KnightUserData: &#x27;&#x27;
+
+其中 CollectorType: 0 对应 2.3.19 的 Main 类型，界面操作时按名称选择即可。其他三个 Collector 使用各自路径，保留一致的 PackGroup。
+如果以后希望骑士贴图独立成包，只需调整对应 Collector 的打包规则；如果增加一种文件筛选要求，可以修改过滤规则；如果扩展内容需要独立维护版本，再评估是否划出新的 Package。
+每种变化都能找到对应的配置位置，四层结构也就把最初的通用性问题转化成了几个可分别处理的问题。
+八、Collector 下的 Assets 如何映射到 AssetBundleCollector 收集到资源后，会对每个 Asset 分别执行 PackRule，得到一个 BundleName。在同一 Package 内，参与归包的资源按 BundleName 汇总：包名相同，归入同一个 AssetBundle；包名不同，归入不同的 AssetBundle。
+例如，一个 Collector 收集了下面三个预制体，使用 PackDirectory：
+
+
+
+Asset
+规则依据
+对应 AssetBundle（包名示意）
+
+
+
+Characters/Knight/Knight.prefab
+父目录 Characters/Knight
+knight.bundle
+
+
+Characters/Knight/KnightPreview.prefab
+父目录 Characters/Knight
+knight.bundle
+
+
+Characters/Mage/Mage.prefab
+父目录 Characters/Mage
+mage.bundle
+
+
+这个 Collector 收集了三个 Asset，却对应两个 AssetBundle。如果改用 PackCollector，三个 Asset 就会按同一个 Collector 路径计算包名，从而归入同一个包。
+反过来，上一节四个骑士 Collector 一致使用 PackGroup，就会为各自的 Asset 计算出相同的包名，让分散在不同目录的资源归入同一个 AssetBundle。
+Collector 与 AssetBundle 的关系由每个 Asset 的 BundleName 建立：一个 Collector 可以对应多个包，多个 Collector 的资源也可以合入同一个包。 Address 决定如何定位资源，BundleName 决定资源归入哪个包，两者职责不同。
+这里说明的是直接收集资源的归包映射。依赖处理及这些映射如何生成实际的 AB 文件，放到下一篇的打包流程中讨论。
+九、这套抽象最终解决了什么YooAssets 通过 Package 管理资源集合，通过 Group 组织相关收集器，通过 Collector 描述项目的收集、寻址和打包规则，把规则落实为 MainAssets 等具体收集条目，再依据条目上的 BundleName 确定资源到 AssetBundle 的归属。
+这样，按类型存放、按功能管理、按更新范围分包就可以同时存在。项目可以保留自己的目录习惯，并用规则表达不同的打包粒度。
+具体应用时，可以按下面的顺序检查：
+
+用 Package 确定这批资源的构建、版本和运行时归属。
+用 Group 组织相关 Collector，并设置必要的激活规则与标签。
+用 Collector 明确路径、过滤、寻址、类型和打包规则。
+在 MainAssets 等预览中确认直接收集的资源与地址。
+对照各资源的 BundleName，确认哪些资源共包、哪些资源分包。
+
+预览还不能代替 Package 级校验。同一 Package 内重复收集资源、生成重复地址，仍会产生冲突；Shader 与共享依赖的归包也需要在构建报告中确认。
+这套结构提供了表达不同项目需求的能力，实际分包是否合适，仍取决于项目如何选择边界。前一篇回答“哪些资源应该放在一起”，这一篇则说明 YooAssets 如何提供一组分层的概念，让这些判断成为可以配置和执行的资源管理方案。
+参考资料
+Unity-AssetBundle结构解析
+Unity-AssetBundle加载与卸载
+Unity-AssetBundle分包策略
+YooAsset 2.3.19 源码
+
+相关源码位于 YooAsset 的 Assets/YooAsset/ 下：
+
+
+
+路径
+对应内容
+
+
+
+Editor/AssetBundleCollector/AssetBundleCollectorPackage.cs
+Package 配置与收集汇总
+
+
+Editor/AssetBundleCollector/AssetBundleCollectorGroup.cs
+Group 激活与 Collector 汇总
+
+
+Editor/AssetBundleCollector/AssetBundleCollector.cs
+Collector 规则执行与收集条目生成
+
+
+Editor/AssetBundleCollector/CollectAssetInfo.cs
+具体收集条目的数据
+
+
+Editor/AssetBundleCollector/AssetBundleCollectorWindow.cs
+MainAssets 等界面预览
+
+
+Editor/AssetBundleCollector/ECollectorType.cs
+三种收集器类型
+
+
+Editor/AssetBundleCollector/DefaultRules/DefaultPackRule.cs
+内置打包规则
+
+
+Editor/AssetBundleBuilder/BuildPipeline/BaseTasks/TaskGetBuildMap.cs
+依赖处理与构建映射
+
+
+Editor/AssetBundleBuilder/BuildMapContext.cs
+按 BundleName 汇总资源
+
+
+Editor/AssetBundleBuilder/BuildBundleInfo.cs
+保存单个包的资源列表
+
+
+]]></content>
+      <tags>
+        <tag>Unity-AssetsBundle</tag>
+      </tags>
+  </entry>
+  <entry>
     <title>Unity的==与空并运算符(？.)</title>
     <url>/posts/1bd27c8e.html</url>
     <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
@@ -1811,23 +1949,6 @@ Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#
 在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
 Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
 ]]></content>
-  </entry>
-  <entry>
-    <title>Unity的TMP和Text原理和使用优化</title>
-    <url>/posts/b46c3d6a.html</url>
-    <content><![CDATA[Unity在2018版本加入了TextMeshPro，并且现在已经将Text标记为Legacy。下面是我有关于TMP和Text的理解和思考。
-Text的渲染原理Unity的text组件是使用FreeType库来加载TrueType字体来实现的。通过加载TrueType字体并为每一个字形生成位图以及计算几个度量值(Metric)，生成出一个具体的字形的位图纹理。text动态渲染一个字符过程为：判断一个字符是否已经存在字体纹理中，在则直接获取对应的纹理坐标渲染；若不在则读取ttf文件中字符数据生成字符的位图，并放入纹理中管理。若放入时图集已满，则会对图集进行一次扩大。因为每个size、粗体、斜体的度量值不同，所以当修改Text的这些值的时候，纹理中会出现同一个字符多个位图的情况。
-TMP的渲染原理TMP是基于SDF(有向距离场)的技术渲染的，将字体中每个像素或顶点离其最近的形状边缘的距离值，存储到一张距离纹理中。所以TMP在显示前必须生成这个距离纹理，否则将无法显示(Unity中TMP会缺字出现口的原因)。因为显示的像素为动态计算该使用何种颜色和透明度，从而创建出精细、高品质的字体效果。所以TMP几乎不受放大的影响，能一直提供锐利清晰的图像。并且因为有距离信息，所以TMP能以一个较小的开销支持描边、投影等效果。在Unity的SDF中可以看到这张纹理，可以看到字体内部为白色，外部为黑色，在字体边缘之间黑白渐变，也就是距离从近到远的变化。
-TMP和Text的性能对比这里使用的TTF文件为AlibabaPuHuiTi-3-65-Medium，TMP和Text渲染内容一篇滕王阁序。为了模拟实际项目中显示所有字符的需求，所有TMP和Text都选择字符模式都为Dynamic。下面从渲染DrawCall和内存两方面对比
-Text的性能表现首先是Text的DrawCall,得益于所有的字符都在一张字符纹理中，所以Text只有一个DC。其次是内存因为滕王阁序的字符有限，所以Text的内存占用也仅有0.5MB。
-TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Unity把文章字符分到了3个不同的字符纹理中，最终使用了3个DrwaCall。内存占用也是3个字符纹理的占用，为6MB。
-性能总结在有限字符的渲染中，Text凭借只会取需要的字符位图存储，所以内存和DrwaCall下更优。但是这里TMP有着明显的优化空间，就是使用静态把所有的文字都的烘培一张纹理中。此时drwaCall为1，内存占用也为一张纹理2MB。但在实际的项目中，除非是没有聊天、排行榜等玩家自定义字符的功能，否则静态纹理一定会出现字符缺失的情况。对于Text来说，只能是使用Dynamic去扩容纹理大小，在纹理达到4096*4096后，也会出现多张纹理导致DrawCall上升。对于TMP因为官方支持了FallBack字体，所以可以使用一个静态纹理打入常用的3000或者7000字符，使用的FallBack字符再设置为动态，可以有效的避免游戏过程中因为贴图扩大的性能开销。
-技术选型的思考1、Text不支持图文混排，除非自己实现一套富文本图片解析。所以有图文混排需求建议无脑TMP。2、仅有描边、投影的需求。之前实现了一个Text的描边和弯曲组件，所以在字符有限的项目中(不考虑本地化、玩家自定义情况)使用Text和TMP，在性能和效果上和TMP差不多。但在字符无限的项目中，推荐使用静态常用字TMP+动态TMP配合，既有较好的性能效果，也能使用TMP的各种功能。3、对渲染效果更高的要求，这个就不用纠结了，美术一定会让你选TMP。
-参考资料[1].Unity字体渲染原理[2].unity-UGUI源码分析(4):Text与TextMeshPro[3].文本渲染-LearnOpenGL
-]]></content>
-      <tags>
-        <tag>Unity文字渲染</tag>
-      </tags>
   </entry>
   <entry>
     <title>Unity的TMP的纹理优化</title>
@@ -1945,6 +2066,23 @@ private void ApplyBend(TMP_MeshInfo meshInfo)&#123;    Vector3[] vertices = mesh
 它适合用于大量 TMP UGUI 文本需要不同描边或阴影的场景。限制也很明确：写入顶点后，文字内容变化、字体变化、Mesh 刷新时都要重新写入；如果还想扩展更多效果，需要重新规划 Vector4 的字段分配，或者启用更多顶点通道。
 项目地址OptimizeUnityTMP
 参考文章TMP(TextMeshPro)优化篇 — 描边投影效果
+]]></content>
+      <tags>
+        <tag>Unity文字渲染</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Unity的TMP和Text原理和使用优化</title>
+    <url>/posts/b46c3d6a.html</url>
+    <content><![CDATA[Unity在2018版本加入了TextMeshPro，并且现在已经将Text标记为Legacy。下面是我有关于TMP和Text的理解和思考。
+Text的渲染原理Unity的text组件是使用FreeType库来加载TrueType字体来实现的。通过加载TrueType字体并为每一个字形生成位图以及计算几个度量值(Metric)，生成出一个具体的字形的位图纹理。text动态渲染一个字符过程为：判断一个字符是否已经存在字体纹理中，在则直接获取对应的纹理坐标渲染；若不在则读取ttf文件中字符数据生成字符的位图，并放入纹理中管理。若放入时图集已满，则会对图集进行一次扩大。因为每个size、粗体、斜体的度量值不同，所以当修改Text的这些值的时候，纹理中会出现同一个字符多个位图的情况。
+TMP的渲染原理TMP是基于SDF(有向距离场)的技术渲染的，将字体中每个像素或顶点离其最近的形状边缘的距离值，存储到一张距离纹理中。所以TMP在显示前必须生成这个距离纹理，否则将无法显示(Unity中TMP会缺字出现口的原因)。因为显示的像素为动态计算该使用何种颜色和透明度，从而创建出精细、高品质的字体效果。所以TMP几乎不受放大的影响，能一直提供锐利清晰的图像。并且因为有距离信息，所以TMP能以一个较小的开销支持描边、投影等效果。在Unity的SDF中可以看到这张纹理，可以看到字体内部为白色，外部为黑色，在字体边缘之间黑白渐变，也就是距离从近到远的变化。
+TMP和Text的性能对比这里使用的TTF文件为AlibabaPuHuiTi-3-65-Medium，TMP和Text渲染内容一篇滕王阁序。为了模拟实际项目中显示所有字符的需求，所有TMP和Text都选择字符模式都为Dynamic。下面从渲染DrawCall和内存两方面对比
+Text的性能表现首先是Text的DrawCall,得益于所有的字符都在一张字符纹理中，所以Text只有一个DC。其次是内存因为滕王阁序的字符有限，所以Text的内存占用也仅有0.5MB。
+TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Unity把文章字符分到了3个不同的字符纹理中，最终使用了3个DrwaCall。内存占用也是3个字符纹理的占用，为6MB。
+性能总结在有限字符的渲染中，Text凭借只会取需要的字符位图存储，所以内存和DrwaCall下更优。但是这里TMP有着明显的优化空间，就是使用静态把所有的文字都的烘培一张纹理中。此时drwaCall为1，内存占用也为一张纹理2MB。但在实际的项目中，除非是没有聊天、排行榜等玩家自定义字符的功能，否则静态纹理一定会出现字符缺失的情况。对于Text来说，只能是使用Dynamic去扩容纹理大小，在纹理达到4096*4096后，也会出现多张纹理导致DrawCall上升。对于TMP因为官方支持了FallBack字体，所以可以使用一个静态纹理打入常用的3000或者7000字符，使用的FallBack字符再设置为动态，可以有效的避免游戏过程中因为贴图扩大的性能开销。
+技术选型的思考1、Text不支持图文混排，除非自己实现一套富文本图片解析。所以有图文混排需求建议无脑TMP。2、仅有描边、投影的需求。之前实现了一个Text的描边和弯曲组件，所以在字符有限的项目中(不考虑本地化、玩家自定义情况)使用Text和TMP，在性能和效果上和TMP差不多。但在字符无限的项目中，推荐使用静态常用字TMP+动态TMP配合，既有较好的性能效果，也能使用TMP的各种功能。3、对渲染效果更高的要求，这个就不用纠结了，美术一定会让你选TMP。
+参考资料[1].Unity字体渲染原理[2].unity-UGUI源码分析(4):Text与TextMeshPro[3].文本渲染-LearnOpenGL
 ]]></content>
       <tags>
         <tag>Unity文字渲染</tag>
@@ -2239,6 +2377,36 @@ shader、材质与图集依赖完整，显示与编辑器一致
       </tags>
   </entry>
   <entry>
+    <title>Unity节点编辑器(一) -- 需求分析</title>
+    <url>/posts/4cce52e3.html</url>
+    <content><![CDATA[最近需求的思考最近工作上在处理项目内的引导系统，我之前的做法是根据策划的需求，通过继承引导基类实现具体子类的做法，来实现不同的引导。但是这样有一个缺点：所有的引导实现都基于我的硬编码，当引导的流程变更的时候，我代码的流程也需要跟着修改，非常麻烦。而且这些变更也仅仅是步骤改变，1-&gt;2-&gt;3变成了1-&gt;3-&gt;2，修改就是纯粹的体力活，非常的琐碎。然后最近在各种机缘巧合之下，接触到了节点编辑器，突然激发了我的灵感，要是我把引导的逻辑封装在一个Node里面，由策划自己去建立Node流程，就是完全由策划编辑，我提供具体的引导Node实现，完美解决。
+关于节点编辑器其实这个东西在已经应用非常广泛了，Unity的ShareGraph和UE的蓝图，都是节点编辑器的应用。而且在Unity上开源的节点编辑器框架也不少，比较出名的就有：xNode，NodeGraphProcessor。本来是打算直接使用这些框架，省下自己造轮子的时间，但是深入了解之后，发现这些框架为了通用性，代码都比较多且太重度了(我目前的需求根本用不上)。所以就想着自己造一个只提供流程的简单节点编辑器。
+编辑器需求首先，因为颜值问题节点编辑器我选择了基于Unity的GraphView实现。要实现的需求：1、GraphView的创建与资源的打开。2、Node的创建、连接。3、GraphView的保存、序列化&#x2F;反序列化。4、需要具有拓展性，为之后功能提供底层复用。
+代码结构因为编辑器窗口仅做显示和把数据保存，就只有model-view两层。model层为保存的Unity的so数据，view层则是解析so数据创建出对应的节点和连接。
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity的动态图集实现</title>
+    <url>/posts/71da87fc.html</url>
+    <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
+性能优化测试效果未使用动态图集，2张图4个Draw Call。使用动态图集，2张图3个Drwa Call，图越多解决越多。
+动态图集原理动态图集的核心原理为：在运行时维护一张较大的纹理区域，在运行时动态地往纹理区域内添加或移除，现实上直接把纹理区域指定给RawIamge的texture然后设置其UV Rect即可。由于同时渲染的icon数量往往远远小于实际icon的资源数量，因此通常一张1024或者2048大小的动态图集即可以满足大多数的游戏需求。该方法的好处在于，内存在可控范围，并且icon可以共享纹理从而省draw call。下面详细介绍动态图集实现的技术细节。
+二维装箱算法因为放入的每张图片大小不一，所以高效的寻找图片在纹理区域中的位置，从而打到最大空间利用，是动态图集实现最为核心的问题。对于区域的增删查改，可以抽象成一个二维空间装箱操作，算法上有比较多的实现，有兴趣的可以了解这篇文章概述二维空间uv装箱算法：Shelf、Guillotine、MAXRECTS、Skyline。目前的几个算法都是在不重叠的前提下，尽可能大地利用空间，这是一个NP-hard问题，因此没有有效的算法可以解决所有情况。我这里选用的就是Max-Rect的BSSF最短边匹配优先。
+public IntRect Insert(int w, int h)&#123;    // 1. 找最佳空闲区域（最短边匹配优先 BSSF）    int bestIdx = -1;    int bestShort = int.MaxValue;    for (int i = 0; i &lt; m_freeRects.Count; i++)    &#123;        var free = m_freeRects[i];        if (w &lt;= free.width &amp;&amp; h &lt;= free.height)        &#123;            int leftover = Mathf.Min(free.width - w, free.height - h);            if (leftover &lt; bestShort)            &#123;                bestShort = leftover;                bestIdx = i;            &#125;        &#125;    &#125;    if (bestIdx &lt; 0) return null;    // 2. 放置    var best = m_freeRects[bestIdx];    var placed = new IntRect(best.x, best.y, w, h);    // 3. 裁剪所有重叠的空闲矩形    for (int i = m_freeRects.Count - 1; i &gt;= 0; i--)    &#123;        if (Overlaps(placed, m_freeRects[i]))        &#123;            SplitFreeRect(m_freeRects[i], placed);            m_freeRects.RemoveAt(i);        &#125;    &#125;    // 4. 去除冗余    RemoveRedundant();    return placed;&#125;/// &lt;summary&gt;/// 回收（释放）一个已放置的矩形区域，使其重新可用/// &lt;/summary&gt;/// &lt;param name=&quot;rect&quot;&gt;之前 Insert 返回的矩形&lt;/param&gt;public void Recycle(IntRect rect)&#123;    if (rect == null) return;    // 1. 边界校验    if (rect.x &lt; 0 || rect.y &lt; 0 || rect.right &gt; m_width || rect.top &gt; m_height)        return;    if (rect.width &lt;= 0 || rect.height &lt;= 0)        return;    // 2. 将释放区域加入空闲列表    m_freeRects.Add(new IntRect(rect.x, rect.y, rect.width, rect.height));    // 3. 合并空闲矩形    MergeFreeRects();    // 4. 去除冗余    RemoveRedundant();&#125;
+
+图片拷贝的API选择通过装箱算法知道了图片的位置和区域，第二个问题就是如何高效地把图片拷贝到对于的纹理中。在Unity中纹理的拷贝有两种方式：Graphics.CopyTexture和Texture.Get&#x2F;SetPixels
+Graphics.CopyTexture优点：1.首先第一个就是它是从GPU的显存到显存的直接拷贝，效率非常高。2.不需要勾选texture的read&#x2F;write enabled。由于是直接的显存拷贝，因此并不需要在系统内存里再存储一份texture数据。缺点：1.底层调用OpenGL接口glCopyImageSubData。该接口要求OpenGL4.3以上或者GL ES3.2以上才能支持。
+Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程如下图所示：首先对tex1调用GetPixels，该接口将返回一个C#的Color32数组。然后将该数组作为参数，对tex2调用SetPixels，将该像素数组设置到tex2的native内存中。最后，通过调用tex2的Apply接口，将该贴图的内容上传到GPU。优点：1.兼容性好。即几乎所有机型都支持该方法。缺点：1.内存占用大。一方面，它只支持RGBA格式，导致无法使用压缩格式；另一方面，由于它需要使用纹理的native内存，因此需要勾选texture的read&#x2F;write enabled选项，从而使得内存占用double。2.Mono GC开销大。这是因为GetPixels接口需要开辟维度较大的C# Color32数组。(在一些低端机上甚至会导致直接OOM导致Crash)3.拷贝流程长。可以看到该拷贝从native内存绕到Mono内存最后再从native内存拷贝到GPU显存，从而导致拷贝的时间也较高。
+因为Texture.Get&#x2F;SetPixels有诸多的性能问题，Graphics.CopyTexture仅有一个支持API版本问题，并且对应的OpenGL4.3和GL ES3.2，为别IOS8（Iphone 5S）和Android 7.0(2016年发布)。已经是10年前的机型了，所以这里我直接选择了Graphics.CopyTexture。
+动态图集初始大小和区域满后的处理图集的初始大小可能纠结的只有初始太大，导致利用率低，这个根据项目实际使用情况分配就行了，建议初始大小设置成1024*1024。但是一张图如果放满了就有两种处理办法：纹理扩容和多张纹理。下面分类讨论这两种实现。
+纹理扩容图片扩容需要做3件事：1、开辟一张更大的纹理，把原纹理拷贝到大纹理中。2、更新所有图片的UV区域信息。3、更新场景中存在的所有RawIamge组件的UV Rect信息。这个方案的第二、第三步都是O(n)级别的复杂度，并且随着纹理的扩大n也越大，越扩容性能消耗越大。
+多张纹理多张纹理则是新建一张大小一致的纹理，这种做法不需要更新图片UV区域。在代码层面就要维护一个图片数组，每次有新图要加入时从数组中遍历得到一个空闲的纹理加入。同时因为提供的纹理不同，所以会多一些Draw Call的开销。
+综合来看如果加入的图集较大较容易触发扩容，推荐使用第二种方式。我工程的实现也是用的第二种。
+代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
+项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
+]]></content>
+  </entry>
+  <entry>
     <title>Unity的协程的原理理解</title>
     <url>/posts/ef3074aa.html</url>
     <content><![CDATA[协程最近在看面试题，经常会遇到一个经典的八股问题：协程是多线程吗？底层原理是什么。虽然接触Unity好几年了，但是一直没用探究过其中的底层原理，看到这个问题也大脑空白。今天就来探寻一下其中的原理。
@@ -2250,38 +2418,243 @@ state变量的使用从截图可以看到，MoveNext()中维护的switch充当�
 ]]></content>
   </entry>
   <entry>
-    <title>Unity节点编辑器(一) -- 需求分析</title>
-    <url>/posts/4cce52e3.html</url>
-    <content><![CDATA[最近需求的思考最近工作上在处理项目内的引导系统，我之前的做法是根据策划的需求，通过继承引导基类实现具体子类的做法，来实现不同的引导。但是这样有一个缺点：所有的引导实现都基于我的硬编码，当引导的流程变更的时候，我代码的流程也需要跟着修改，非常麻烦。而且这些变更也仅仅是步骤改变，1-&gt;2-&gt;3变成了1-&gt;3-&gt;2，修改就是纯粹的体力活，非常的琐碎。然后最近在各种机缘巧合之下，接触到了节点编辑器，突然激发了我的灵感，要是我把引导的逻辑封装在一个Node里面，由策划自己去建立Node流程，就是完全由策划编辑，我提供具体的引导Node实现，完美解决。
-关于节点编辑器其实这个东西在已经应用非常广泛了，Unity的ShareGraph和UE的蓝图，都是节点编辑器的应用。而且在Unity上开源的节点编辑器框架也不少，比较出名的就有：xNode，NodeGraphProcessor。本来是打算直接使用这些框架，省下自己造轮子的时间，但是深入了解之后，发现这些框架为了通用性，代码都比较多且太重度了(我目前的需求根本用不上)。所以就想着自己造一个只提供流程的简单节点编辑器。
-编辑器需求首先，因为颜值问题节点编辑器我选择了基于Unity的GraphView实现。要实现的需求：1、GraphView的创建与资源的打开。2、Node的创建、连接。3、GraphView的保存、序列化&#x2F;反序列化。4、需要具有拓展性，为之后功能提供底层复用。
-代码结构因为编辑器窗口仅做显示和把数据保存，就只有model-view两层。model层为保存的Unity的so数据，view层则是解析so数据创建出对应的节点和连接。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity节点编辑器(三) -- 创建Node节点</title>
-    <url>/posts/6faec29c.html</url>
-    <content><![CDATA[编辑器数据类要做的节点如下图所示根据图片可以很清晰的知道，数据分为4部分。1.要有一个类存储着所有的节点数据。2.每个节点需要保存自己的类型名字(用于反射生成)、节点唯一ID(用于标识节点)、标题、节点位置、输出&#x2F;输出端口的数据、以及一个Object类型的每个子类自己的数据。3.端口数据记录端口所在节点ID、端口唯一ID以及连接的数据。4.连接数据记录着连接的节点ID和端口。我的实现使用了Unity的ScriptableObject。数据结构的图如下。
-GraphSoData 黑板数据[Serializable]public class GraphSoData : ScriptableObject&#123;    [SerializeField] public string graphName;    [SerializeField] public List&lt;NodeSoData&gt; nodeSoDataList = new List&lt;NodeSoData&gt;();    public void Dispose()    &#123;        if (nodeSoDataList != null)        &#123;            nodeSoDataList.Clear();            nodeSoDataList = null;        &#125;    &#125;&#125;
-Node 节点数据[Serializable]public class NodeSoData : ScriptableObject&#123;    [SerializeField] public string nodeFullTypeName;        [SerializeField] public long nodeID;    [SerializeField] public Vector2 nodePos;    [SerializeField] public string nodeTitle;    [SerializeField] public List&lt;PortSerializationData&gt; intputPortDataList;    [SerializeField] public List&lt;PortSerializationData&gt; outputPortDataList;    [SerializeReference] public System.Object userData;&#125;
-port 端口数据其中端口数据需要记录该端口自己的端口唯一ID、所属的节点ID、以及连接的信息。其中连接的信息保存的就是连接的节点与连接的端口。
-[Serializable]public class LinkData&#123;    [SerializeField] public long linkPortID;    [SerializeField] public long linkNodeID;    public LinkData(long linkPortID, long linkNodeID)    &#123;        this.linkPortID = linkPortID;        this.linkNodeID = linkNodeID;    &#125;&#125;[Serializable]public class PortSerializationData&#123;    [SerializeField]    //端口ID    public long portID;    [SerializeField]    //端口所属节点ID    public long portNodeID;    [SerializeField]    //连接的端口ID    public List&lt;LinkData&gt; linkData;&#125;
+    <title>UniTask 0GC实现原理</title>
+    <url>/posts/6045236e.html</url>
+    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
+Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
+UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
 
-NodeBase 编辑器节点基类该Node类做的是显示工作,该类继承于UnityEditor.Experimental.GraphView.Node。类中包含了NodeGraphView黑板实例、NodeSoData此Node的节点数据，以及节点大小等数据。下面是一些流程函数的说明。
-初始化拿到节点数据和黑板实例后，流程先初始化数据，后初始化组件，最后刷新节点。比较简单。
-public virtual void Init(NodeSoData nodeData, NodeGraphView nodeGraphView)&#123;    this.nodeGraphView = nodeGraphView;    this.nodeData = nodeData;    InitData();    InitComponent();    Refresh();&#125;public virtual void Init(NodeGraphView nodeGraphView, bool isStartNode)&#123;    this.nodeGraphView = nodeGraphView;    nodeData = GraphEditorUnility.CreateDefaultNodeData(isStartNode);    InitData();    InitComponent();    Refresh();&#125;
-初始化组件这个函数比较关键，所有节点的操作都在这个函数中初始化了。拿节点数据设置位置、标题，遍历。
-protected virtual void InitComponent()&#123;    AddStyle();    SetPosition(new Rect(nodeData.nodePos, Vector2.zero));    InitTitleLabel();        InitPort();        AddResizeHandle();&#125;private void InitTitleLabel()&#123;    TextField textField = new TextField()    &#123;        value = nodeData.nodeTitle    &#125;;    titleContainer.Insert(0, textField);&#125;public virtual void InitPort()&#123;    //初始化输入端口    if (nodeData.intputPortDataList != null &amp;&amp; nodeData.intputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.intputPortDataList)        &#123;            InstantiatePort(port,nodeData.intputPortDataList,Direction.Input,inputContainer);        &#125;    &#125;    //初始化输出端口    if (nodeData.outputPortDataList != null &amp;&amp; nodeData.outputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.outputPortDataList)        &#123;            InstantiatePort(port,nodeData.outputPortDataList,Direction.Output,outputContainer);        &#125;    &#125;&#125;//创建节点的端口实例private Port InstantiatePort(PortSerializationData portData, List&lt;PortSerializationData&gt; portDataList,Direction direction, VisualElement portContainer)&#123;    // 创建一个水平布局的容器来放置删除按钮和端口    var horizontalContainer = new VisualElement();    horizontalContainer.style.flexDirection = FlexDirection.RowReverse; // 设置为水平排列    horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        Port newPort = InstantiatePort(Orientation.Horizontal, direction, Port.Capacity.Multi, typeof(bool));    newPort.name = string.Empty;    newPort.userData = portData;        // Button deleteButton = new Button();    // deleteButton.text = &quot;X&quot;;    // deleteButton.clicked += Click;    //    // horizontalContainer.Add(deleteButton);    horizontalContainer.Add(newPort);        portContainer.Add(horizontalContainer);    // void Click()    // &#123;    //     portDataList.Remove(portData);    //     nodeGraphView.DisconnectPort(newPort);    //     deleteButton.clicked -= Click;    //         //     portContainer.Remove(horizontalContainer);    // &#125;    return newPort;&#125;
-鼠标拖动节点大小其中AddResizeHandle函数是添加了节点宽度水平拉伸。为了做到鼠标移动到右边界改变鼠标样式，所以在节点的右侧，添加一个透明的VisualElement，并且高度占满节点，宽度为5px(可以根据喜好自行修改)，其中鼠标样式需要添加到uss文件中。
-//uss代码,设置一个水平的鼠标样式.resize-handle &#123;    cursor: resize-horizontal;&#125;protected virtual void AddResizeHandle()&#123;    resizeHandle = new VisualElement();    resizeHandle.style.position = Position.Absolute;    resizeHandle.style.right = 0;    resizeHandle.style.top = 0;    resizeHandle.style.bottom = 0;    resizeHandle.style.width = 10;    resizeHandle.style.backgroundColor = Color.clear;    resizeHandle.AddToClassList(&quot;resize-handle&quot;);    Add(resizeHandle);    resizeHandle.RegisterCallback&lt;MouseDownEvent&gt;(OnResizeHandleMouseDown);    resizeHandle.RegisterCallback&lt;MouseMoveEvent&gt;(OnResizeHandleMouseMove);    resizeHandle.RegisterCallback&lt;MouseUpEvent&gt;(OnResizeHandleMouseUp);&#125;//鼠标按下回调，添加一个绿框样式private void OnResizeHandleMouseDown(MouseDownEvent evt)&#123;    if (evt.button == 0) //     &#123;        isResizing = true;        resizeStartPosition = evt.mousePosition;        resizeStartSize = new Vector2(resolvedStyle.width, resolvedStyle.height);        style.borderTopWidth = 2;        style.borderBottomWidth = 2;        style.borderLeftWidth = 2;        style.borderRightWidth = 2;        style.borderTopColor = Color.green;        style.borderBottomColor = Color.green;        style.borderLeftColor = Color.green;        style.borderRightColor = Color.green;        resizeHandle.CaptureMouse();        evt.StopPropagation();    &#125;&#125;//鼠标按下移动，一直改变节点大小private void OnResizeHandleMouseMove(MouseMoveEvent evt)&#123;    if (isResizing &amp;&amp; resizeHandle.HasMouseCapture())    &#123;        Vector2 delta = evt.mousePosition - resizeStartPosition;        Vector2 newSize = resizeStartSize + new Vector2(delta.x, delta.y);        newSize.x = Mathf.Clamp(newSize.x, minSize.x, maxSize.x);        newSize.y = Mathf.Clamp(newSize.y, minSize.y, maxSize.y);        style.width = newSize.x;        RefreshPorts();        evt.StopPropagation();    &#125;&#125;//鼠标抬起设置大小private void OnResizeHandleMouseUp(MouseUpEvent evt)&#123;    if (isResizing &amp;&amp; evt.button == 0)    &#123;        isResizing = false;        resizeHandle.ReleaseMouse();        evt.StopPropagation();        style.borderTopWidth = StyleKeyword.Null;        style.borderBottomWidth = StyleKeyword.Null;        style.borderLeftWidth = StyleKeyword.Null;        style.borderRightWidth = StyleKeyword.Null;        style.borderTopColor = StyleKeyword.Null;        style.borderBottomColor = StyleKeyword.Null;        style.borderLeftColor = StyleKeyword.Null;        style.borderRightColor = StyleKeyword.Null;        OnSizeChanged();    &#125;&#125;
+用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
 
-StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView中必备的,表示从这个节点开始往下执行。
-//节点数据[Serializable]public class StartNodeData : NodeSerializationData&#123;    [SerializeField]    public bool isStartNode;    &#125;//开始节点public class StartNode : NodeBase&#123;    public StartNodeData startNodeData;        private Toggle checkBox;        protected override void InitData()    &#123;                if (nodeData.userData != null)        &#123;            startNodeData = nodeData.userData as StartNodeData;        &#125;        else        &#123;            startNodeData = new StartNodeData();            startNodeData.isStartNode = true;        &#125;    &#125;    protected override void InitComponent()    &#123;        base.InitComponent();                var horizontalContainer = new VisualElement();        horizontalContainer.style.flexDirection = FlexDirection.Row; // 设置为水平排列        horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        checkBox = new Toggle();        checkBox.SetEnabled(false);        checkBox.value = startNodeData.isStartNode;                var label = new Label(&quot;初始节点&quot;);                horizontalContainer.Add(checkBox);        horizontalContainer.Add(label);                extensionContainer.Add(horizontalContainer);    &#125;    public override NodeSerializationData GetSerializationData()    &#123;        StartNodeData serializationData = new StartNodeData();        serializationData.isStartNode = true;        serializationData.nodeID =  nodeData.nodeID;        serializationData.outputPortDataList = nodeData.outputPortDataList;        serializationData.intputPortDataList = nodeData.intputPortDataList;        return serializationData;    &#125;&#125;
+下面从源码角度拆开看。
+1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
+await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
 
-创建GraphView的So数据这里用的是Unity编辑器的菜单项，创建了一个So数据，并往里塞一个开始节点的默认数据。
-[MenuItem(&quot;★Tools★/CraeteGraph&quot;)]public static void CreateGraph()&#123;    GraphEditorUnility.CreateDefaultGraph();&#125;public static void CreateDefaultGraph()&#123;    GraphSoData graph = ScriptableObject.CreateInstance&lt;GraphSoData&gt;();    int soFileCount = CountFilesExcludingMeta(DEFAULT_FILE_PATH);    string defaultFileName = string.Format(DEFAULT_FILE_NAME, soFileCount);    string defaultFilePath = System.IO.Path.Combine(DEFAULT_FILE_PATH, defaultFileName);    graph.graphName = string.Format(DEFAULT_FILE_SAVE_NAME, soFileCount);    AssetDatabase.CreateAsset(graph, defaultFilePath);    NodeSoData defaultNode = CreateDefaultNodeData(true);    graph.nodeSoDataList.Add(defaultNode);    AssetDatabase.AddObjectToAsset(defaultNode, graph);        EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(defaultNode);    AssetDatabase.SaveAssets();&#125;public static NodeSoData CreateDefaultNodeData(bool isStartNode)&#123;    NodeSoData defaultSoData = ScriptableObject.CreateInstance&lt;NodeSoData&gt;();    defaultSoData.name = &quot;node&quot;;    defaultSoData.nodeID = GraphUtility.GenerateID();    defaultSoData.nodeTitle = &quot;New Node&quot;;    defaultSoData.nodePos = new Vector2(200, 200);    //起始节点加入输出node    if (isStartNode)    &#123;        defaultSoData.nodeFullTypeName = typeof(StartNode).FullName;        StartNodeData startNodeData = new StartNodeData();        startNodeData.isStartNode = true;        defaultSoData.userData = startNodeData;        defaultSoData.AddOutputPortData();    &#125;    else    &#123;        defaultSoData.nodeFullTypeName = typeof(NodeBase).FullName;    &#125;    defaultSoData.outputPortDataList = new List&lt;PortSerializationData&gt;();    defaultSoData.intputPortDataList = new List&lt;PortSerializationData&gt;();    return defaultSoData;&#125;
+前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
+例如：
+await someUniTask;
 
-结果可以在菜单项创建新的节点数据，并且双击打开能看到一个开始节点。
+编译器大致会按下面的模式展开：
+var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
+
+而：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
+所以 UniTask 的优化也分成两部分：
+
+实现并优化 await UniTask 的 awaiter 语法糖。
+实现并优化 async UniTask 的 builder 语法糖。
+
+2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
+public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
+
+GetAwaiter() 返回的 Awaiter 是结构体：
+public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
+
+它提供 awaiter pattern 需要的成员：
+public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
+
+这些成员分别对应 await 的几个阶段：
+GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
+
+因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
+也就是说，下面这句：
+await UniTask.Yield();
+
+在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
+UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
+3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
+第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
+第二，Awaiter 内部只保存一个 UniTask 值：
+readonly UniTask task;
+
+第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
+internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
+
+这样可以避免每次 await 都创建一个新的包装委托。
+第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
+所以 await UniTask 的低分配来自几个点叠加：
+UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
+
+4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
+
+UniTask&lt;T&gt; 也是结构体：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
+
+这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
+如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
+如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
+也就是说：
+同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
+
+这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
+5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
+
+它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
+例如：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器大致会生成类似这样的状态机代码：
+var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
+
+遇到 await 时：
+builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
+
+方法正常完成：
+builder.SetResult();
+
+方法抛异常：
+builder.SetException(exception);
+
+注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
+6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
+public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
+
+它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
+它真正做的是：
+
+作为编译器 async 语法的入口。
+启动状态机。
+在第一次异步挂起时，创建或复用一个 runner。
+把 runner 的 MoveNext 注册给 awaiter。
+在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
+通过 Task 属性把最终的 UniTask 返回给调用方。
+
+关键代码在 AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里有两个重点：
+第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
+第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
+7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
+internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
+
+它的职责非常集中：
+
+保存编译器生成的状态机副本。
+提供 MoveNext 给 awaiter 作为 continuation。
+实现 IUniTaskSource，让外部 UniTask 可以 await 它。
+保存完成、异常、取消状态。
+完成后清空并回收到对象池。
+
+第一次挂起时，builder 调用：
+AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
+
+内部会先从池里取：
+if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
+
+这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
+awaiter 完成后，会调用：
+runnerPromise.MoveNext
+
+实际进入：
+void Run()&#123;    stateMachine.MoveNext();&#125;
+
+这就恢复了 async 方法后续逻辑。
+8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
+AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
+public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
+
+调用方拿到的 UniTask 内部指向这个 runner：
+UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
+
+core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
+
+当前状态。
+continuation。
+异常或取消信息。
+version token。
+
+正常完成时：
+public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
+
+异常时：
+public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
+
+调用方 await 完成后会进入：
+public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
+
+TryReturn() 会清理状态并回池：
+core.Reset();stateMachine = default;pool.TryPush(this);
+
+这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
+9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
+典型结构是：
+static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
+
+使用时：
+pool.TryPop(out var result)pool.TryPush(this)
+
+因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
+这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
+10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
+await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+
+UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
+PlayerLoopHelper.AddAction(timing, result);
+
+YieldPromise 本身也是可池化的：
+sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
+
+在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
+public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
+
+完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
+所以在类似 UI 填充动画这样的循环中：
+while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
+
+预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
+11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
+AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
+
+因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
+async UniTaskVoid 使用的是：
+AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
+
+UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
+简单说：
+UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
+
+12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
+
+第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
+CancellationTokenSource、CreateLinkedTokenSource 会分配。
+取消时可能创建 OperationCanceledException。
+异常路径会捕获异常信息。
+闭包、lambda 捕获、LINQ、装箱仍然会分配。
+Debug.Log、字符串拼接、Unity 日志系统可能分配。
+Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
+
+因此更严谨的说法是：
+
+UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
+
+13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
+
+总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
+
+UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
+[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
+AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
+AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
+UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
+TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
+PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
+awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
+
+最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
 ]]></content>
   </entry>
   <entry>
@@ -2302,21 +2675,6 @@ public class RectMaskVertex : MaskVertexBase&#123;    [Header(&quot;中心位置
 using System.Collections;using System.Collections.Generic;using UnityEngine;using UnityEngine.EventSystems;using UnityEngine.UI;public delegate bool PointerEventCallback(PointerEventData eventData);/// &lt;summary&gt;/// 遮罩的定点类，负责设置遮罩的顶点数据/// &lt;/summary&gt;[RequireComponent(typeof(Image))]public abstract class MaskVertexBase : BaseMeshEffect, IPointerClickHandler, IPointerEnterHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler, IPointerMoveHandler&#123;    [Header(&quot;向Shader传递的数据&quot;)]    public AdditionalCanvasShaderChannels additionalCanvasShaderChannels;    protected Canvas canvas;    protected Camera uiCamera;    protected RectTransform canvansRect;    protected RectTransform rectTransform;    [HideInInspector]    public EventSystem eventSystem;    [HideInInspector]    public PointerEventCallback raycastLocationValid;    private List&lt;RaycastResult&gt; raycastResult;    private GameObject m_lastHoverGameObject;    protected virtual void OnEnable()    &#123;        base.OnEnable();        if (canvas == null)        &#123;            canvas = transform.GetComponentInParent&lt;Canvas&gt;();            uiCamera = canvas.worldCamera;            rectTransform = transform.GetComponent&lt;RectTransform&gt;();            canvansRect = canvas.transform.GetComponent&lt;RectTransform&gt;();            raycastResult = new List&lt;RaycastResult&gt;();            AdditionalCanvasShaderChannels();        &#125;    &#125;    public override void ModifyMesh(VertexHelper vh)    &#123;        if (!IsActive())            return;        // 准备临时列表        List&lt;UIVertex&gt; vertices = new List&lt;UIVertex&gt;();        vh.GetUIVertexStream(vertices);        // 确保每个顶点都有UV2数据        for (int i = 0; i &lt; vertices.Count; i++)        &#123;            UIVertex vertex = vertices[i];            vertices[i] = SetVertexData(vertex);        &#125;        // 清空并重新添加顶点数据        vh.Clear();        vh.AddUIVertexTriangleStream(vertices);    &#125;    /// &lt;summary&gt;    /// 设置顶点数据    /// &lt;/summary&gt;    /// &lt;param name=&quot;vertex&quot;&gt;&lt;/param&gt;    /// &lt;returns&gt;&lt;/returns&gt;    protected abstract UIVertex SetVertexData(UIVertex vertex);    /// &lt;summary&gt;    /// 添加Canvas向Shader传递的数据    /// &lt;/summary&gt;    protected virtual void AdditionalCanvasShaderChannels()    &#123;        if (canvas == null)        &#123;            return;        &#125;        if (additionalCanvasShaderChannels == UnityEngine.AdditionalCanvasShaderChannels.None)        &#123;            return;        &#125;        if ((canvas.additionalShaderChannels &amp; additionalCanvasShaderChannels) == 0)        &#123;            canvas.additionalShaderChannels |= additionalCanvasShaderChannels;            graphic.SetVerticesDirty();        &#125;    &#125;    #region 对外方法    public void SetEventSystem(EventSystem eventSystem)    &#123;        this.eventSystem = eventSystem;    &#125;        public bool GetLocalPointByScreenPos(Vector2 screenPos, out Vector2 localPoint)    &#123;        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(rectTransform, screenPos, uiCamera, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public bool GetLocalPointByWorldPos(Vector3 worldPos, Camera watchCamera, out Vector2 localPoint)    &#123;        Vector3 screenPos = watchCamera.WorldToScreenPoint(worldPos);        if (GetLocalPointByScreenPos(screenPos, out localPoint))        &#123;            return true;        &#125;        return false;    &#125;    public Camera GetCanvasWorldCamera()    &#123;        return uiCamera;    &#125;    #endregion    #region 点击实现    private void CheckAndChangeHover(GameObject newHoverGameObject, PointerEventData eventData)    &#123;        if (newHoverGameObject != m_lastHoverGameObject)        &#123;            if (m_lastHoverGameObject != null)            &#123;                ExecuteEvents.Execute(m_lastHoverGameObject, eventData, ExecuteEvents.pointerExitHandler);            &#125;            if (newHoverGameObject != null)            &#123;                ExecuteEvents.Execute(newHoverGameObject, eventData, ExecuteEvents.pointerEnterHandler);            &#125;            m_lastHoverGameObject = newHoverGameObject;        &#125;    &#125;    protected virtual GameObject PassEvent&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        raycastResult.Clear();        eventSystem.RaycastAll(eventData, raycastResult);        bool isExecute = false;        foreach (var result in raycastResult)        &#123;            if (result.gameObject == transform.gameObject)            &#123;                continue;            &#125;            isExecute = ExecuteEvents.Execute(result.gameObject, eventData, function);            return result.gameObject;        &#125;        return null;    &#125;    protected virtual GameObject CheckRaycastLocationValid&lt;T&gt;(PointerEventData eventData, ExecuteEvents.EventFunction&lt;T&gt; function) where T : IEventSystemHandler    &#123;        if (raycastLocationValid != null)        &#123;            bool isCanClick = raycastLocationValid.Invoke(eventData);            if (isCanClick)            &#123;                return PassEvent(eventData, function);            &#125;            // 判断 function 是否指向 pointerClickHandler            if (typeof(T) == typeof(IPointerClickHandler) &amp;&amp;                 function.Method == ExecuteEvents.pointerClickHandler.Method)            &#123;                MessageSystem.Instance.SendMessage(MessageDefine.MASK_CLICK);            &#125;        &#125;        return null;    &#125;    public virtual void OnPointerClick(PointerEventData eventData)    &#123;                var result = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerClickHandler);        if (result != null)        &#123;            MessageSystem.Instance.SendMessage(MessageDefine.MASK_HIGH_LINGHT_CLICK);                   &#125;    &#125;    public virtual void OnPointerEnter(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerEnterHandler);    &#125;    public virtual void OnPointerDown(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerDownHandler);    &#125;    public virtual void OnPointerUp(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerUpHandler);    &#125;    public void OnPointerExit(PointerEventData eventData)    &#123;        CheckRaycastLocationValid(eventData, ExecuteEvents.pointerExitHandler);    &#125;    public void OnPointerMove(PointerEventData eventData)    &#123;        GameObject enterObject = CheckRaycastLocationValid(eventData, ExecuteEvents.pointerMoveHandler);        CheckAndChangeHover(enterObject, eventData);    &#125;    #endregion#if UNITY_EDITOR    void OnValidate()    &#123;        if (graphic != null)        &#123;            graphic.SetVerticesDirty();            AdditionalCanvasShaderChannels();        &#125;    &#125;#endif&#125;
 
 遮罩预览
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity节点编辑器(二) -- GraphView窗口</title>
-    <url>/posts/9891abd3.html</url>
-    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
-窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
-public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
-背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
-
-GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
-创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
-拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
-
-实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
 ]]></content>
   </entry>
   <entry>
@@ -2347,78 +2705,44 @@ public class GuideCollection&#123;    private string m_guideName;    private Lis
 private List&lt;GuideHandlerBase&gt; LoadData(string guideName)&#123;    string fileName = guideName + &quot;.json&quot;;    var bytesData = Resources.Load&lt;TextAsset&gt;(guideName);    var strList = bytesData.text.Split(&quot;|&quot;).ToList();    var handlerList = DeserializeObjectAndHandler(strList);    m_guideDataDic.Add(guideName, handlerList);    return handlerList;&#125;private List&lt;GuideHandlerBase&gt; DeserializeObjectAndHandler(List&lt;string&gt; objectStrList)&#123;    if (objectStrList == null || objectStrList.Count &lt;= 0)    &#123;        return null;    &#125;    var nodeDataList = new List&lt;GuideHandlerBase&gt;();    foreach (var objectStr in objectStrList)    &#123;        // 首先尝试解析为基础数据以获取类型信息        var baseData = Newtonsoft.Json.JsonConvert.DeserializeObject&lt;NodeSerializationData&gt;(objectStr);        if (baseData == null)        &#123;            Debug.LogError(&quot;无法反序列化基础数据&quot;);            continue;        &#125;        // 根据类型全名找到对应的类型        Type targetType = null;        foreach (var typeItem in m_guideTypeMap)        &#123;            if (typeItem.Key.FullName.Equals(baseData.typeFullName))            &#123;                targetType = typeItem.Key;                break;            &#125;        &#125;        if (targetType == null)        &#123;            Debug.LogError($&quot;未找到匹配的类型: &#123;baseData.typeFullName&#125;&quot;);            continue;        &#125;        // 使用正确的类型进行反序列化        var saveData = Newtonsoft.Json.JsonConvert.DeserializeObject(objectStr, targetType);        if (saveData == null)        &#123;            Debug.LogError($&quot;无法反序列化为目标类型: &#123;targetType.FullName&#125;&quot;);            continue;        &#125;        // 创建处理器实例        if (!m_guideTypeMap.TryGetValue(targetType, out Type handlerType))        &#123;            Debug.LogError($&quot;未找到类型 &#123;targetType.FullName&#125; 对应的处理器类型&quot;);            continue;        &#125;        var handler = Activator.CreateInstance(handlerType, saveData) as GuideHandlerBase;        if (handler == null)        &#123;            Debug.LogError($&quot;无法创建处理器实例: &#123;handlerType.FullName&#125;&quot;);            continue;        &#125;        nodeDataList.Add(handler);    &#125;    return nodeDataList;&#125;]]></content>
   </entry>
   <entry>
-    <title>Unity节点编辑器(四) -- 保存&amp;打开Graph数据</title>
-    <url>/posts/92b1d9a5.html</url>
-    <content><![CDATA[打开SO数据使用Unity内置函数添加双击打开事件使用Unity提供的OnOpenAsset(0)，然后重新设置graphView的数据并重绘。
-[OnOpenAsset(0)]public static bool OnOpen(int instanceID, int line)&#123;    GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;    if (nodeGraph != null)    &#123;        Open(nodeGraph);        return true;    &#125;    return false;&#125;public static void Open(GraphSoData nodeGraph)&#123;    ShowExample();    m_graphView.SetGraphData(nodeGraph);    m_graphView.RebuildGraph();&#125;
+    <title>Unity节点编辑器(三) -- 创建Node节点</title>
+    <url>/posts/6faec29c.html</url>
+    <content><![CDATA[编辑器数据类要做的节点如下图所示根据图片可以很清晰的知道，数据分为4部分。1.要有一个类存储着所有的节点数据。2.每个节点需要保存自己的类型名字(用于反射生成)、节点唯一ID(用于标识节点)、标题、节点位置、输出&#x2F;输出端口的数据、以及一个Object类型的每个子类自己的数据。3.端口数据记录端口所在节点ID、端口唯一ID以及连接的数据。4.连接数据记录着连接的节点ID和端口。我的实现使用了Unity的ScriptableObject。数据结构的图如下。
+GraphSoData 黑板数据[Serializable]public class GraphSoData : ScriptableObject&#123;    [SerializeField] public string graphName;    [SerializeField] public List&lt;NodeSoData&gt; nodeSoDataList = new List&lt;NodeSoData&gt;();    public void Dispose()    &#123;        if (nodeSoDataList != null)        &#123;            nodeSoDataList.Clear();            nodeSoDataList = null;        &#125;    &#125;&#125;
+Node 节点数据[Serializable]public class NodeSoData : ScriptableObject&#123;    [SerializeField] public string nodeFullTypeName;        [SerializeField] public long nodeID;    [SerializeField] public Vector2 nodePos;    [SerializeField] public string nodeTitle;    [SerializeField] public List&lt;PortSerializationData&gt; intputPortDataList;    [SerializeField] public List&lt;PortSerializationData&gt; outputPortDataList;    [SerializeReference] public System.Object userData;&#125;
+port 端口数据其中端口数据需要记录该端口自己的端口唯一ID、所属的节点ID、以及连接的信息。其中连接的信息保存的就是连接的节点与连接的端口。
+[Serializable]public class LinkData&#123;    [SerializeField] public long linkPortID;    [SerializeField] public long linkNodeID;    public LinkData(long linkPortID, long linkNodeID)    &#123;        this.linkPortID = linkPortID;        this.linkNodeID = linkNodeID;    &#125;&#125;[Serializable]public class PortSerializationData&#123;    [SerializeField]    //端口ID    public long portID;    [SerializeField]    //端口所属节点ID    public long portNodeID;    [SerializeField]    //连接的端口ID    public List&lt;LinkData&gt; linkData;&#125;
 
-获取So数据后进行节点的创建RebuildGraph函数先清空原有的所有节点和节点连接，再重新创建。
-public void RebuildGraph()&#123;    ClearNodeAndEdge();    CreateNode(m_graphData.nodeSoDataList);&#125;
-清空节点contentContainer是Unity节点内的所有元素的容器，遍历这个容器，把NodeBase和Edge删除。
-public virtual void ClearNodeAndEdge()&#123;    if (contentContainer == null || contentContainer.childCount &lt;= 0)    &#123;        return;    &#125;    for (int i = contentContainer.childCount - 1; i &gt;= 0; i--)    &#123;        var elementItem = contentContainer.ElementAt(i);        //???Node        if (elementItem is NodeBase node)        &#123;            contentContainer.RemoveAt(i);        &#125;        //???Edge        if (elementItem is Edge edge)        &#123;            contentContainer.RemoveAt(i);        &#125;    &#125;&#125;
-创建节点拿到GraphSoData中的NodeSoData列表信息进行遍历。对每个Node数据信息，拿到TypeName后使用反射实例化出具体的Node子类，随后通过AddElement函数把Node添加到图中管理。
-public virtual List&lt;NodeBase&gt; CreateNode(List&lt;NodeSoData&gt; nodeDataList)&#123;    if (nodeDataList == null || nodeDataList.Count &lt;= 0)    &#123;        return null;    &#125;    List&lt;NodeBase&gt; nodeViewList = new List&lt;NodeBase&gt;(nodeDataList.Count);    foreach (NodeSoData node in nodeDataList)    &#123;        Type nodeType = Type.GetType(node.nodeFullTypeName);        NodeBase newNode = (NodeBase)Activator.CreateInstance(nodeType);        newNode.Init(node, this);        nodeViewList.Add(newNode);        AddElement(newNode);    &#125;        LinkNode();    return nodeViewList;&#125;
-创建连接为了避免找不到未生成节点的先后顺序问题，所以在所有的节点创建完成后，再进行节点连接的创建。节点之间的连接通过之前记录在端口中的LinkData数据，通过节点ID和端口ID找到唯一的端口，并通过ConnectTo函数连接两个节点，最后把Edge连接通过AddElement函数添加到Graph中管理。
-protected virtual void LinkNode()&#123;    foreach (var node in nodes)    &#123;        NodeBase nodeBase = node as NodeBase;        if (nodeBase == null)        &#123;            continue;        &#125;        foreach (var portData in nodeBase.nodeData.outputPortDataList)        &#123;            long curPortID = portData.portID;            Port curPort = GetPortByID(curPortID);            foreach (var linkData in portData.linkData)            &#123;                long linkPortID = linkData.linkPortID;                Port linkPort = GetPortByID(linkPortID);                if (linkPort == null)                &#123;                    Debug.LogError($&quot;nodeID=&#123;nodeBase.nodeData.nodeID&#125; linkPortID=&#123;linkPortID&#125;,port is null&quot;);                &#125;                var edge = curPort.ConnectTo(linkPort);                AddElement(edge);            &#125;        &#125;    &#125;&#125;
-保存运行时序列化数据前面的GraphSoData是仅作为编辑器使，而且运行时的时候比如一些节点的大小、位置这些信息是用不到的。为了数据的精简和高效，所以在原有的NodeSoData创建了一个NodeSerializationData用于保存运行时序列化信息。在运行时一张图就转变为一个List数据。这个NodeSerializationData数据由NodeBase提供一个虚方法，并由各个具体的子类继承实现。
-public virtual NodeSerializationData GetSerializationData()&#123;    return new NodeSerializationData(nodeData);&#125;
+NodeBase 编辑器节点基类该Node类做的是显示工作,该类继承于UnityEditor.Experimental.GraphView.Node。类中包含了NodeGraphView黑板实例、NodeSoData此Node的节点数据，以及节点大小等数据。下面是一些流程函数的说明。
+初始化拿到节点数据和黑板实例后，流程先初始化数据，后初始化组件，最后刷新节点。比较简单。
+public virtual void Init(NodeSoData nodeData, NodeGraphView nodeGraphView)&#123;    this.nodeGraphView = nodeGraphView;    this.nodeData = nodeData;    InitData();    InitComponent();    Refresh();&#125;public virtual void Init(NodeGraphView nodeGraphView, bool isStartNode)&#123;    this.nodeGraphView = nodeGraphView;    nodeData = GraphEditorUnility.CreateDefaultNodeData(isStartNode);    InitData();    InitComponent();    Refresh();&#125;
+初始化组件这个函数比较关键，所有节点的操作都在这个函数中初始化了。拿节点数据设置位置、标题，遍历。
+protected virtual void InitComponent()&#123;    AddStyle();    SetPosition(new Rect(nodeData.nodePos, Vector2.zero));    InitTitleLabel();        InitPort();        AddResizeHandle();&#125;private void InitTitleLabel()&#123;    TextField textField = new TextField()    &#123;        value = nodeData.nodeTitle    &#125;;    titleContainer.Insert(0, textField);&#125;public virtual void InitPort()&#123;    //初始化输入端口    if (nodeData.intputPortDataList != null &amp;&amp; nodeData.intputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.intputPortDataList)        &#123;            InstantiatePort(port,nodeData.intputPortDataList,Direction.Input,inputContainer);        &#125;    &#125;    //初始化输出端口    if (nodeData.outputPortDataList != null &amp;&amp; nodeData.outputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.outputPortDataList)        &#123;            InstantiatePort(port,nodeData.outputPortDataList,Direction.Output,outputContainer);        &#125;    &#125;&#125;//创建节点的端口实例private Port InstantiatePort(PortSerializationData portData, List&lt;PortSerializationData&gt; portDataList,Direction direction, VisualElement portContainer)&#123;    // 创建一个水平布局的容器来放置删除按钮和端口    var horizontalContainer = new VisualElement();    horizontalContainer.style.flexDirection = FlexDirection.RowReverse; // 设置为水平排列    horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        Port newPort = InstantiatePort(Orientation.Horizontal, direction, Port.Capacity.Multi, typeof(bool));    newPort.name = string.Empty;    newPort.userData = portData;        // Button deleteButton = new Button();    // deleteButton.text = &quot;X&quot;;    // deleteButton.clicked += Click;    //    // horizontalContainer.Add(deleteButton);    horizontalContainer.Add(newPort);        portContainer.Add(horizontalContainer);    // void Click()    // &#123;    //     portDataList.Remove(portData);    //     nodeGraphView.DisconnectPort(newPort);    //     deleteButton.clicked -= Click;    //         //     portContainer.Remove(horizontalContainer);    // &#125;    return newPort;&#125;
+鼠标拖动节点大小其中AddResizeHandle函数是添加了节点宽度水平拉伸。为了做到鼠标移动到右边界改变鼠标样式，所以在节点的右侧，添加一个透明的VisualElement，并且高度占满节点，宽度为5px(可以根据喜好自行修改)，其中鼠标样式需要添加到uss文件中。
+//uss代码,设置一个水平的鼠标样式.resize-handle &#123;    cursor: resize-horizontal;&#125;protected virtual void AddResizeHandle()&#123;    resizeHandle = new VisualElement();    resizeHandle.style.position = Position.Absolute;    resizeHandle.style.right = 0;    resizeHandle.style.top = 0;    resizeHandle.style.bottom = 0;    resizeHandle.style.width = 10;    resizeHandle.style.backgroundColor = Color.clear;    resizeHandle.AddToClassList(&quot;resize-handle&quot;);    Add(resizeHandle);    resizeHandle.RegisterCallback&lt;MouseDownEvent&gt;(OnResizeHandleMouseDown);    resizeHandle.RegisterCallback&lt;MouseMoveEvent&gt;(OnResizeHandleMouseMove);    resizeHandle.RegisterCallback&lt;MouseUpEvent&gt;(OnResizeHandleMouseUp);&#125;//鼠标按下回调，添加一个绿框样式private void OnResizeHandleMouseDown(MouseDownEvent evt)&#123;    if (evt.button == 0) //     &#123;        isResizing = true;        resizeStartPosition = evt.mousePosition;        resizeStartSize = new Vector2(resolvedStyle.width, resolvedStyle.height);        style.borderTopWidth = 2;        style.borderBottomWidth = 2;        style.borderLeftWidth = 2;        style.borderRightWidth = 2;        style.borderTopColor = Color.green;        style.borderBottomColor = Color.green;        style.borderLeftColor = Color.green;        style.borderRightColor = Color.green;        resizeHandle.CaptureMouse();        evt.StopPropagation();    &#125;&#125;//鼠标按下移动，一直改变节点大小private void OnResizeHandleMouseMove(MouseMoveEvent evt)&#123;    if (isResizing &amp;&amp; resizeHandle.HasMouseCapture())    &#123;        Vector2 delta = evt.mousePosition - resizeStartPosition;        Vector2 newSize = resizeStartSize + new Vector2(delta.x, delta.y);        newSize.x = Mathf.Clamp(newSize.x, minSize.x, maxSize.x);        newSize.y = Mathf.Clamp(newSize.y, minSize.y, maxSize.y);        style.width = newSize.x;        RefreshPorts();        evt.StopPropagation();    &#125;&#125;//鼠标抬起设置大小private void OnResizeHandleMouseUp(MouseUpEvent evt)&#123;    if (isResizing &amp;&amp; evt.button == 0)    &#123;        isResizing = false;        resizeHandle.ReleaseMouse();        evt.StopPropagation();        style.borderTopWidth = StyleKeyword.Null;        style.borderBottomWidth = StyleKeyword.Null;        style.borderLeftWidth = StyleKeyword.Null;        style.borderRightWidth = StyleKeyword.Null;        style.borderTopColor = StyleKeyword.Null;        style.borderBottomColor = StyleKeyword.Null;        style.borderLeftColor = StyleKeyword.Null;        style.borderRightColor = StyleKeyword.Null;        OnSizeChanged();    &#125;&#125;
 
-窗口添加保存按钮在对应的windows窗口中添加一个ToolBar并在其中添加一个按钮。
-private void AddToolBar()&#123;    Toolbar toolbar = new Toolbar();    //// 设置工具栏样式（确保可见）    //toolbar.style.height = 30;    //// 关键修复：设置工具栏宽度为100%    //toolbar.style.width = Length.Percent(100);    //// 设置背景色使其可见    //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);    Button saveBtn = new Button();    saveBtn.text = &quot;保存&quot;;    saveBtn.clicked += SaveBtnClick;    toolbar.Add(saveBtn);    rootVisualElement.Add(toolbar);&#125;private void SaveBtnClick()&#123;    if (m_graphView == null)    &#123;        return;    &#125;    m_graphView.SaveData();&#125;
-核心逻辑为调用GraphView中的SaveData接口，在里面遍历所有的Nodebase的获取序列化数据的接口，并且获得数据都存入list容器中最后写入文件。我这里的处理办法比较简单粗暴，用了NewtonJson去序列化每个Node信息后直接使用|去分割每个Node的信息后序列化成了string保存起来。可以使用protobuf等二进制数据去序列化，进一步地优化文件的体积大小。
-public virtual void SaveData()&#123;    List&lt;NodeSerializationData&gt; nodeSaveData = new List&lt;NodeSerializationData&gt;();    foreach (var node in nodes)    &#123;        if (node == null)        &#123;            continue;        &#125;        if (node is NodeBase nodeBase)        &#123;            nodeSaveData.Add(nodeBase.GetSerializationData());        &#125;    &#125;    if (nodeSaveData.Count &lt;= 0)    &#123;        Debug.Log(&quot;Graph的Node数量为0!&quot;);        return;    &#125;    // string data = MergeUnsafe(nodeSaveData);    var data = MergeNodeData(nodeSaveData);    GraphEditorUnility.SaveDataToBytes(data, m_graphData.graphName);&#125;private string MergeNodeData(List&lt;NodeSerializationData&gt; nodeData)&#123;    StringBuilder sb = new StringBuilder();    for (int i = 0; i &lt; nodeData.Count; i++)    &#123;        string data = nodeData[i].Serialize();        //Debug.Log(data);        sb.Append(data);        if (i &lt; nodeData.Count - 1)        &#123;            sb.Append(&quot;|&quot;);        &#125;    &#125;    return sb.ToString();&#125;
+StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView中必备的,表示从这个节点开始往下执行。
+//节点数据[Serializable]public class StartNodeData : NodeSerializationData&#123;    [SerializeField]    public bool isStartNode;    &#125;//开始节点public class StartNode : NodeBase&#123;    public StartNodeData startNodeData;        private Toggle checkBox;        protected override void InitData()    &#123;                if (nodeData.userData != null)        &#123;            startNodeData = nodeData.userData as StartNodeData;        &#125;        else        &#123;            startNodeData = new StartNodeData();            startNodeData.isStartNode = true;        &#125;    &#125;    protected override void InitComponent()    &#123;        base.InitComponent();                var horizontalContainer = new VisualElement();        horizontalContainer.style.flexDirection = FlexDirection.Row; // 设置为水平排列        horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        checkBox = new Toggle();        checkBox.SetEnabled(false);        checkBox.value = startNodeData.isStartNode;                var label = new Label(&quot;初始节点&quot;);                horizontalContainer.Add(checkBox);        horizontalContainer.Add(label);                extensionContainer.Add(horizontalContainer);    &#125;    public override NodeSerializationData GetSerializationData()    &#123;        StartNodeData serializationData = new StartNodeData();        serializationData.isStartNode = true;        serializationData.nodeID =  nodeData.nodeID;        serializationData.outputPortDataList = nodeData.outputPortDataList;        serializationData.intputPortDataList = nodeData.intputPortDataList;        return serializationData;    &#125;&#125;
 
-结果因为是继承Unity的GraphView和Node，所以现在已经能自由的添加&#x2F;删除连接、添加&#x2F;删除节点了。节点编辑器的基本功能已经实现完成了。
+创建GraphView的So数据这里用的是Unity编辑器的菜单项，创建了一个So数据，并往里塞一个开始节点的默认数据。
+[MenuItem(&quot;★Tools★/CraeteGraph&quot;)]public static void CreateGraph()&#123;    GraphEditorUnility.CreateDefaultGraph();&#125;public static void CreateDefaultGraph()&#123;    GraphSoData graph = ScriptableObject.CreateInstance&lt;GraphSoData&gt;();    int soFileCount = CountFilesExcludingMeta(DEFAULT_FILE_PATH);    string defaultFileName = string.Format(DEFAULT_FILE_NAME, soFileCount);    string defaultFilePath = System.IO.Path.Combine(DEFAULT_FILE_PATH, defaultFileName);    graph.graphName = string.Format(DEFAULT_FILE_SAVE_NAME, soFileCount);    AssetDatabase.CreateAsset(graph, defaultFilePath);    NodeSoData defaultNode = CreateDefaultNodeData(true);    graph.nodeSoDataList.Add(defaultNode);    AssetDatabase.AddObjectToAsset(defaultNode, graph);        EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(defaultNode);    AssetDatabase.SaveAssets();&#125;public static NodeSoData CreateDefaultNodeData(bool isStartNode)&#123;    NodeSoData defaultSoData = ScriptableObject.CreateInstance&lt;NodeSoData&gt;();    defaultSoData.name = &quot;node&quot;;    defaultSoData.nodeID = GraphUtility.GenerateID();    defaultSoData.nodeTitle = &quot;New Node&quot;;    defaultSoData.nodePos = new Vector2(200, 200);    //起始节点加入输出node    if (isStartNode)    &#123;        defaultSoData.nodeFullTypeName = typeof(StartNode).FullName;        StartNodeData startNodeData = new StartNodeData();        startNodeData.isStartNode = true;        defaultSoData.userData = startNodeData;        defaultSoData.AddOutputPortData();    &#125;    else    &#123;        defaultSoData.nodeFullTypeName = typeof(NodeBase).FullName;    &#125;    defaultSoData.outputPortDataList = new List&lt;PortSerializationData&gt;();    defaultSoData.intputPortDataList = new List&lt;PortSerializationData&gt;();    return defaultSoData;&#125;
+
+结果可以在菜单项创建新的节点数据，并且双击打开能看到一个开始节点。
 ]]></content>
   </entry>
   <entry>
-    <title>Unity颜色空间:sRGB和Linear</title>
-    <url>/posts/b73f5a7a.html</url>
-    <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
-sRGB和Linear在物理世界中，如果光增加一倍，那么亮度也增加一倍，这是线性关系。但是在最早的显示器中，显示图像的时候，电压增加一倍，亮度并不是跟着增加一倍，而是呈亮度增加量等于电压增加量的2.2次幂的非线性关系:&nbsp;&nbsp;l_亮度&#x3D;u2.2&nbsp;&nbsp;&nbsp;&nbsp;(l ∈[0,1],u∈[0,1])2.2也叫做显示器的Gamma值。因为亮度0是黑，1是白，这种关系意味着当电压线性变化的时候，相对于真实的世界来说，亮度的变化在暗处黑的地方变换比较慢，暗占据数据范围更广，颜色整体偏暗。如图，直线代表物理世界的线性空间（Linear Space），下曲线是显示器输出的Gamma2.2空间（Gamma Space）。
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;横坐标表示电压，纵坐标表示亮度
-常情况下，人眼看物理世界感知到了正常的亮度。而如果显示器输出一个颜色后再被你看到，即相当于走了一次Gamma2.2曲线的调整，这下子颜色就变暗了。如果我们在显示器输出之前，做一个操作把显示器的Gamma2.2影响平衡掉，那就和人眼直接观察物理世界一样了！这个平衡的操作就叫做伽马校正。在数学上，伽马校正是一个约0.45的幂运算（和上面的2.2次幂互为逆运算）:&nbsp;&nbsp;Co &#x3D; Ci1&#x2F;2.2
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;左(Gamma0.45) 中(Gamma2.2) 右(线性物理空间)
-Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的纹理如果是sRGB（Gamma0.45），那我们要进行一个操作转换到线性空间。这个操作叫做Remove Gamma Correction，在数学上是一个2.2的幂运算 。如果输入不是sRGB，而是已经在线性空间的纹理了呢？那就可以跳过Remove Gamma Correction了。注：美术输出资源时都是在sRGB空间的，但Normal Map等其他电脑计算出来的纹理则一般在线性空间，即Linear Texture。
-第二步，现在输入已经在线性空间了，那么进行Shader中光照、插值等计算后就是比较真实的结果了，如果不对sRGB进行Remove Gamma Correction直接就进入Shader计算，那算出来的就会不自然。
-第三步，Shader计算完成后，需要进行Gamma Correction，从线性空间变换到Gamma0.45空间，在数学上是一个约为0.45的幂运算。如果不进行Gamma Correction输出会怎么样？那显示器就会将颜色从线性空间转换到Gamma2.2空间，接着再被你看到，结果会更暗。我遇到问题的原因！
-第四步，经过了前面的Gamma Correction，显示器输出在了线性空间，这就和人眼看物理世界的过程是一样的了！
-问题解决知道了sRGB和Linear的底层原理和变暗的原因，那么解决方案也就清晰明了：因为相机是Linear空间，会对输入进行一次Gamma2.2的操作。如果我们这里想要看到正常的图片，就有两种解决方案：
-如果在运行时截图显示：对显示的Texuture2D，进行一次Gamma0.45去和Remove Gamma Correction的Gamma2.2抵消(因为我也是运行时改图，这也是我采用的方案)。最终效果
-如果是读取编辑器的图片：直接在Inspector面板取消sRGB选项，Unity会做一次Gamma0.45，然后在Unity编辑器中看到的图片是偏白的。
-Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
+    <title>Unity节点编辑器(二) -- GraphView窗口</title>
+    <url>/posts/9891abd3.html</url>
+    <content><![CDATA[编辑器窗口创建我这里直接用了Unity编辑器uss创建一个窗口。然后添加了一个网格样式。
+窗口代码窗口中持有一个NodeGraphView实例，并且在其中OnEnable中进行初始化。
+public class NodeGraphWindow : EditorWindow&#123;    protected static NodeGraphView m_graphView;    [MenuItem(&quot;★Tools★/NodeGraphWindow&quot;)]    public static void ShowExample()    &#123;        GetWindow&lt;NodeGraphWindow&gt;();    &#125;    [MenuItem(&quot;★Tools★/CraeteGraph&quot;)]    public static void CreateGraph()    &#123;        GraphEditorUnility.CreateDefaultGraph();    &#125;    [OnOpenAsset(0)]    public static bool OnOpen(int instanceID, int line)    &#123;        GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;        if (nodeGraph != null)        &#123;            Open(nodeGraph);            return true;        &#125;        return false;    &#125;    public static void Open(GraphSoData nodeGraph)    &#123;        ShowExample();        m_graphView.SetGraphData(nodeGraph);        m_graphView.RebuildGraph();    &#125;    public void OnEnable()    &#123;        Init();    &#125;    public void Init()    &#123;        rootVisualElement.style.flexDirection = FlexDirection.Column;        AddToolBar();        GraphSoData graphSoDataBase = new GraphSoData();        m_graphView = new NodeGraphView();        m_graphView.Init(graphSoDataBase);        // 让GraphView占据剩余空间        m_graphView.style.flexGrow = 1;        rootVisualElement.Add(m_graphView);    &#125;    private void AddToolBar()    &#123;        Toolbar toolbar = new Toolbar();        //// 设置工具栏样式（确保可见）        //toolbar.style.height = 30;        //// 关键修复：设置工具栏宽度为100%        //toolbar.style.width = Length.Percent(100);        //// 设置背景色使其可见        //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);        Button saveBtn = new Button();        saveBtn.text = &quot;保存&quot;;        saveBtn.clicked += SaveBtnClick;        toolbar.Add(saveBtn);        rootVisualElement.Add(toolbar);    &#125;    private void SaveBtnClick()    &#123;        if (m_graphView == null)        &#123;            return;        &#125;        m_graphView.SaveData();    &#125;    public void OnDestroy()    &#123;        if (m_graphView != null)        &#123;            rootVisualElement.Remove(m_graphView);            m_graphView.Dispose();            m_graphView = null;        &#125;    &#125;&#125;
+背景网格代码GridBackground&#123;    --grid-background-color: #2b2b2b;    --line-color: rgba(51,51,51,8);    --thick-line-color: rgba(51,51,51,1);    --spacing: 25;&#125;
 
-参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
-]]></content>
-  </entry>
-  <entry>
-    <title>基于前缀树的红点系统设计与实现</title>
-    <url>/posts/79323865.html</url>
-    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
-效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
-前缀树介绍
-前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
+GraphView 黑板GraphView有人叫视图，也有人叫黑板，后面统称为黑板。黑板这里我直接继承了Unity的GraphView，然后实现其中的接口就能实现功能，没啥技术含量上网搜索、看API文档，甚至直接问AI要代码都可以，下面是我的实现代码。
+创建节点//添加右键菜单this.AddManipulator(new ContextualMenuManipulator(evt =&gt; BuildNodeCreationMenu(evt)));//创建节点菜单项private void BuildNodeCreationMenu(ContextualMenuPopulateEvent evt)&#123;    evt.menu.AppendSeparator();    var subMenu = evt.menu;    foreach (var type in nodeTypeMap)    &#123;        string itemName = $&quot;Create Node/&#123;type.Value&#125;&quot;;        subMenu.AppendAction(            itemName,            action =&gt; CreateNode(type.Key, action.eventInfo.mousePosition),            action =&gt; DropdownMenuAction.Status.Normal        );    &#125;&#125;//通过反射获取菜单项数据private void CollectNodeTypes()&#123;    nodeTypeMap.Clear();    var assemblies = AppDomain.CurrentDomain.GetAssemblies();    foreach (var assembly in assemblies)    &#123;        try        &#123;            var types = assembly.GetTypes()                .Where(t =&gt;                        (t == typeof(NodeBase) || t.IsSubclassOf(typeof(NodeBase))) &amp;&amp;                        !t.IsAbstract &amp;&amp;                        !t.IsGenericType)                    .ToList();            foreach (var type in types)            &#123;                nodeTypeMap[type] = type.FullName;            &#125;        &#125;        catch (ReflectionTypeLoadException)        &#123;                    &#125;    &#125;        nodeTypeMap = nodeTypeMap        .OrderBy(kvp =&gt; kvp.Value)        .ToDictionary(kvp =&gt; kvp.Key, kvp =&gt; kvp.Value);&#125;// 创建节点private void CreateNode(Type nodeType, Vector2 screenPosition)&#123;    Vector2 graphPosition = viewTransform.matrix.inverse.MultiplyPoint(screenPosition);    //使用反射创建了一个Node实例    NodeBase node = (NodeBase)Activator.CreateInstance(nodeType);    node.Init(this,m_graphData.nodeSoDataList.Count &lt;= 0);    node.nodeData.nodeFullTypeName = nodeType.FullName;    GraphEditorUnility.AddNodeToGraph(node.nodeData, m_graphData);    node.SetPosition(new Rect(graphPosition, Vector2.zero));    node.nodeData.nodePos = graphPosition;    AddElement(node);&#125;public static void AddNodeToGraph(NodeSoData node, GraphSoData graph)&#123;    if (node == null || graph == null)    &#123;        Debug.LogError(&quot;node or graph is null!&quot;);    &#125;    graph.nodeSoDataList.Add(node);    AssetDatabase.AddObjectToAsset(node, graph);    EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(node);    AssetDatabase.SaveAssets();&#125;
+拉伸、拖拽、框选//默认函数，固定写法this.AddManipulator(new ContentDragger());this.AddManipulator(new ContentZoomer());this.AddManipulator(new SelectionDragger());this.AddManipulator(new RectangleSelector());
 
-红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
-public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
-
-节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
-增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
-public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
-减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
-public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
-数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
-public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
-刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
-public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
-红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
-单例这里我使用了单例模式，类中维护一个红点根节点。
-public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
-添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
-public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
-减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
-public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
-性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
+实现完就得到一个这样的窗口，可以框选、拓展和伸缩，同时右键有创建节点的选项，但是现在还没实现NodeBase。
 ]]></content>
   </entry>
   <entry>
@@ -2763,6 +3087,81 @@ TextMeshPro 文档
 ]]></content>
   </entry>
   <entry>
+    <title>Unity节点编辑器(四) -- 保存&amp;打开Graph数据</title>
+    <url>/posts/92b1d9a5.html</url>
+    <content><![CDATA[打开SO数据使用Unity内置函数添加双击打开事件使用Unity提供的OnOpenAsset(0)，然后重新设置graphView的数据并重绘。
+[OnOpenAsset(0)]public static bool OnOpen(int instanceID, int line)&#123;    GraphSoData nodeGraph = EditorUtility.InstanceIDToObject(instanceID) as GraphSoData;    if (nodeGraph != null)    &#123;        Open(nodeGraph);        return true;    &#125;    return false;&#125;public static void Open(GraphSoData nodeGraph)&#123;    ShowExample();    m_graphView.SetGraphData(nodeGraph);    m_graphView.RebuildGraph();&#125;
+
+获取So数据后进行节点的创建RebuildGraph函数先清空原有的所有节点和节点连接，再重新创建。
+public void RebuildGraph()&#123;    ClearNodeAndEdge();    CreateNode(m_graphData.nodeSoDataList);&#125;
+清空节点contentContainer是Unity节点内的所有元素的容器，遍历这个容器，把NodeBase和Edge删除。
+public virtual void ClearNodeAndEdge()&#123;    if (contentContainer == null || contentContainer.childCount &lt;= 0)    &#123;        return;    &#125;    for (int i = contentContainer.childCount - 1; i &gt;= 0; i--)    &#123;        var elementItem = contentContainer.ElementAt(i);        //???Node        if (elementItem is NodeBase node)        &#123;            contentContainer.RemoveAt(i);        &#125;        //???Edge        if (elementItem is Edge edge)        &#123;            contentContainer.RemoveAt(i);        &#125;    &#125;&#125;
+创建节点拿到GraphSoData中的NodeSoData列表信息进行遍历。对每个Node数据信息，拿到TypeName后使用反射实例化出具体的Node子类，随后通过AddElement函数把Node添加到图中管理。
+public virtual List&lt;NodeBase&gt; CreateNode(List&lt;NodeSoData&gt; nodeDataList)&#123;    if (nodeDataList == null || nodeDataList.Count &lt;= 0)    &#123;        return null;    &#125;    List&lt;NodeBase&gt; nodeViewList = new List&lt;NodeBase&gt;(nodeDataList.Count);    foreach (NodeSoData node in nodeDataList)    &#123;        Type nodeType = Type.GetType(node.nodeFullTypeName);        NodeBase newNode = (NodeBase)Activator.CreateInstance(nodeType);        newNode.Init(node, this);        nodeViewList.Add(newNode);        AddElement(newNode);    &#125;        LinkNode();    return nodeViewList;&#125;
+创建连接为了避免找不到未生成节点的先后顺序问题，所以在所有的节点创建完成后，再进行节点连接的创建。节点之间的连接通过之前记录在端口中的LinkData数据，通过节点ID和端口ID找到唯一的端口，并通过ConnectTo函数连接两个节点，最后把Edge连接通过AddElement函数添加到Graph中管理。
+protected virtual void LinkNode()&#123;    foreach (var node in nodes)    &#123;        NodeBase nodeBase = node as NodeBase;        if (nodeBase == null)        &#123;            continue;        &#125;        foreach (var portData in nodeBase.nodeData.outputPortDataList)        &#123;            long curPortID = portData.portID;            Port curPort = GetPortByID(curPortID);            foreach (var linkData in portData.linkData)            &#123;                long linkPortID = linkData.linkPortID;                Port linkPort = GetPortByID(linkPortID);                if (linkPort == null)                &#123;                    Debug.LogError($&quot;nodeID=&#123;nodeBase.nodeData.nodeID&#125; linkPortID=&#123;linkPortID&#125;,port is null&quot;);                &#125;                var edge = curPort.ConnectTo(linkPort);                AddElement(edge);            &#125;        &#125;    &#125;&#125;
+保存运行时序列化数据前面的GraphSoData是仅作为编辑器使，而且运行时的时候比如一些节点的大小、位置这些信息是用不到的。为了数据的精简和高效，所以在原有的NodeSoData创建了一个NodeSerializationData用于保存运行时序列化信息。在运行时一张图就转变为一个List数据。这个NodeSerializationData数据由NodeBase提供一个虚方法，并由各个具体的子类继承实现。
+public virtual NodeSerializationData GetSerializationData()&#123;    return new NodeSerializationData(nodeData);&#125;
+
+窗口添加保存按钮在对应的windows窗口中添加一个ToolBar并在其中添加一个按钮。
+private void AddToolBar()&#123;    Toolbar toolbar = new Toolbar();    //// 设置工具栏样式（确保可见）    //toolbar.style.height = 30;    //// 关键修复：设置工具栏宽度为100%    //toolbar.style.width = Length.Percent(100);    //// 设置背景色使其可见    //toolbar.style.backgroundColor = new Color(0.15f, 0.15f, 0.15f);    Button saveBtn = new Button();    saveBtn.text = &quot;保存&quot;;    saveBtn.clicked += SaveBtnClick;    toolbar.Add(saveBtn);    rootVisualElement.Add(toolbar);&#125;private void SaveBtnClick()&#123;    if (m_graphView == null)    &#123;        return;    &#125;    m_graphView.SaveData();&#125;
+核心逻辑为调用GraphView中的SaveData接口，在里面遍历所有的Nodebase的获取序列化数据的接口，并且获得数据都存入list容器中最后写入文件。我这里的处理办法比较简单粗暴，用了NewtonJson去序列化每个Node信息后直接使用|去分割每个Node的信息后序列化成了string保存起来。可以使用protobuf等二进制数据去序列化，进一步地优化文件的体积大小。
+public virtual void SaveData()&#123;    List&lt;NodeSerializationData&gt; nodeSaveData = new List&lt;NodeSerializationData&gt;();    foreach (var node in nodes)    &#123;        if (node == null)        &#123;            continue;        &#125;        if (node is NodeBase nodeBase)        &#123;            nodeSaveData.Add(nodeBase.GetSerializationData());        &#125;    &#125;    if (nodeSaveData.Count &lt;= 0)    &#123;        Debug.Log(&quot;Graph的Node数量为0!&quot;);        return;    &#125;    // string data = MergeUnsafe(nodeSaveData);    var data = MergeNodeData(nodeSaveData);    GraphEditorUnility.SaveDataToBytes(data, m_graphData.graphName);&#125;private string MergeNodeData(List&lt;NodeSerializationData&gt; nodeData)&#123;    StringBuilder sb = new StringBuilder();    for (int i = 0; i &lt; nodeData.Count; i++)    &#123;        string data = nodeData[i].Serialize();        //Debug.Log(data);        sb.Append(data);        if (i &lt; nodeData.Count - 1)        &#123;            sb.Append(&quot;|&quot;);        &#125;    &#125;    return sb.ToString();&#125;
+
+结果因为是继承Unity的GraphView和Node，所以现在已经能自由的添加&#x2F;删除连接、添加&#x2F;删除节点了。节点编辑器的基本功能已经实现完成了。
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity颜色空间:sRGB和Linear</title>
+    <url>/posts/b73f5a7a.html</url>
+    <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
+sRGB和Linear在物理世界中，如果光增加一倍，那么亮度也增加一倍，这是线性关系。但是在最早的显示器中，显示图像的时候，电压增加一倍，亮度并不是跟着增加一倍，而是呈亮度增加量等于电压增加量的2.2次幂的非线性关系:&nbsp;&nbsp;l_亮度&#x3D;u2.2&nbsp;&nbsp;&nbsp;&nbsp;(l ∈[0,1],u∈[0,1])2.2也叫做显示器的Gamma值。因为亮度0是黑，1是白，这种关系意味着当电压线性变化的时候，相对于真实的世界来说，亮度的变化在暗处黑的地方变换比较慢，暗占据数据范围更广，颜色整体偏暗。如图，直线代表物理世界的线性空间（Linear Space），下曲线是显示器输出的Gamma2.2空间（Gamma Space）。
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;横坐标表示电压，纵坐标表示亮度
+常情况下，人眼看物理世界感知到了正常的亮度。而如果显示器输出一个颜色后再被你看到，即相当于走了一次Gamma2.2曲线的调整，这下子颜色就变暗了。如果我们在显示器输出之前，做一个操作把显示器的Gamma2.2影响平衡掉，那就和人眼直接观察物理世界一样了！这个平衡的操作就叫做伽马校正。在数学上，伽马校正是一个约0.45的幂运算（和上面的2.2次幂互为逆运算）:&nbsp;&nbsp;Co &#x3D; Ci1&#x2F;2.2
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;左(Gamma0.45) 中(Gamma2.2) 右(线性物理空间)
+Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的纹理如果是sRGB（Gamma0.45），那我们要进行一个操作转换到线性空间。这个操作叫做Remove Gamma Correction，在数学上是一个2.2的幂运算 。如果输入不是sRGB，而是已经在线性空间的纹理了呢？那就可以跳过Remove Gamma Correction了。注：美术输出资源时都是在sRGB空间的，但Normal Map等其他电脑计算出来的纹理则一般在线性空间，即Linear Texture。
+第二步，现在输入已经在线性空间了，那么进行Shader中光照、插值等计算后就是比较真实的结果了，如果不对sRGB进行Remove Gamma Correction直接就进入Shader计算，那算出来的就会不自然。
+第三步，Shader计算完成后，需要进行Gamma Correction，从线性空间变换到Gamma0.45空间，在数学上是一个约为0.45的幂运算。如果不进行Gamma Correction输出会怎么样？那显示器就会将颜色从线性空间转换到Gamma2.2空间，接着再被你看到，结果会更暗。我遇到问题的原因！
+第四步，经过了前面的Gamma Correction，显示器输出在了线性空间，这就和人眼看物理世界的过程是一样的了！
+问题解决知道了sRGB和Linear的底层原理和变暗的原因，那么解决方案也就清晰明了：因为相机是Linear空间，会对输入进行一次Gamma2.2的操作。如果我们这里想要看到正常的图片，就有两种解决方案：
+如果在运行时截图显示：对显示的Texuture2D，进行一次Gamma0.45去和Remove Gamma Correction的Gamma2.2抵消(因为我也是运行时改图，这也是我采用的方案)。最终效果
+如果是读取编辑器的图片：直接在Inspector面板取消sRGB选项，Unity会做一次Gamma0.45，然后在Unity编辑器中看到的图片是偏白的。
+Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
+
+参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
+]]></content>
+  </entry>
+  <entry>
+    <title>基于前缀树的红点系统设计与实现</title>
+    <url>/posts/79323865.html</url>
+    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
+效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
+前缀树介绍
+前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
+
+红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
+public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
+
+节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
+增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
+public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
+减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
+public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
+数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
+public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
+刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
+public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
+红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
+单例这里我使用了单例模式，类中维护一个红点根节点。
+public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
+添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
+public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
+减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
+public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
+性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
+]]></content>
+  </entry>
+  <entry>
     <title>第一篇博客</title>
     <url>/posts/ff05b5bf.html</url>
     <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
@@ -2775,78 +3174,6 @@ TextMeshPro 文档
 算法原理奇-偶规则（Odd-even Rule）：奇数表示在多边形内，偶数表示在多边形外从任意位置p作任意方向的一条射线，若与该射线相交的多边形边的数目为奇数，则p是多边形内部点，否则是外部点。以上图为例：从红点向任意方向发射射线(上图是向左和向右)，与图形的边的交点总和为奇数时，点在内部；为偶数时，点在外部。（上图向左有5个点，向右有3个点），所以红点在多边形的内部。所以，问题就从判断点在多边形的内部转化为了：判断点朝任意方向的射线与多边形的边的交点个数的奇、偶问题。
 如何判断射线与多边形的交点？从上图可以非常直观地看出，取出多边形中两个相邻的点P1、P2，根据两点得到直线的方程为：Y&#x3D;(y1-y2)&#x2F;(X1-X2)*（X - X1）+Y1。将待监测点P0的X0代入直线方程（如果向上打射线）,计算出X0在该射线上的Y位置，如果Y&gt;Y0则说明：该P0点在线段P1、P2的下方，交点数+1；反之则为下方。
 代码实现public static bool checkPosInPolygon(List&lt;Vector3&gt; PosList, Vector3 checkPos)&#123;    if (PosList == null || PosList.Count &lt;= 0)    &#123;        return false;    &#125;    int num = 0;    for (int i = 0; i &lt; PosList.Count; i++)    &#123;        Vector3 curPos = PosList[i] ;        Vector3 nextPos = PosList[(i + 1) % PosList.Count] ;        if (checkPos.y &gt;= Mathf.Max(curPos.y, nextPos.y) || checkPos.y &lt;= Mathf.Min(curPos.y, nextPos.y))        &#123;            continue;        &#125;        float lineSlope = (curPos.x - nextPos.x) / (curPos.y - nextPos.y);        float linePosx = (checkPos.y - curPos.y) * lineSlope + curPos.x;        if (linePosx &lt; checkPos.x || Mathf.Approximately(linePosx, checkPos.x))        &#123;            num++;        &#125;    &#125;    return (num % 2 != 0);&#125;]]></content>
-  </entry>
-  <entry>
-    <title>通用节点编辑器01-xNode对比</title>
-    <url>/posts/ca3fa1d1.html</url>
-    <content><![CDATA[为什么需要 NodeGraphView项目的需求之前写过一篇引导节点编辑器的文档，但随着项目需求的不断复杂，越发地发觉：原来的节点编辑器仅支持单一业务，不具有通用性，类似于任务、剧情这些系统，又需要重新写一遍序列化&#x2F;反序列化、运行时的逻辑，重复造轮子。需要一个能让所有业务都轻松接入节点编辑器的基建，从而让每种业务图都应具备从编辑、保存、导出到运行时加载和执行的完整链路。
-具体包括：
-
-在 Unity 中编辑节点、端口和连线。
-将编辑器图转换为独立的运行时数据，并由可替换的序列化器保存。
-在运行时反序列化数据，创建对应的 RuntimeNode 并驱动节点跳转。
-支持 Task、对话、剧情、AI 行为等不同业务。
-每种业务可以拥有自己的窗口、工具栏、节点内容、端口规则、导出位置及调试工具。
-
-xNode 能做什么xNode 是一个轻量级 Unity 节点图框架。它提供 NodeGraph、Node、端口和默认编辑器，适合快速制作状态机、对话、决策等节点图。
-xNode 的 Node 和 NodeGraph 都继承自 ScriptableObject，因此可以直接作为 Unity 资产保存；它并不是完全没有序列化。节点也可以在运行时通过业务代码调用 GetValue 等接口求值。官方将它定位为节点图框架，而不是一套通用的图运行时。
-xNode 也可以通过 NodeEditor、NodeGraphEditor 等扩展点定制节点和图的编辑体验。若业务需要独立的编辑器窗口、工具栏、导出流程或调试系统，这些能力需要项目自行设计和补齐。
-xNode 无法直接覆盖的部分对本项目而言，关键问题不是 xNode 能否显示节点，而是以下能力没有作为通用链路提供：
-
-编辑器图到独立 Runtime 文档的转换与导出。
-可替换序列化实现的统一入口。
-通用的运行时节点工厂、生命周期、节点跳转和执行器。
-不同业务各自的编辑器窗口、工具、导出策略和运行时 UI 的组织方式。
-
-因此，使用 xNode 仍然可以完成业务，但每个业务都要自行组织运行时执行与导出逻辑，公共部分容易重复。
-NodeGraphView 的方案NodeGraphView 基于 Unity GraphView 建立编辑器层，并将配置图与运行时图明确拆分：
-NodeGraphAsset    -&gt; NodeGraphDocument    -&gt; NodeGraphRuntimeDocument    -&gt; GraphRunner    -&gt; RuntimeNode
-
-编辑器层负责节点显示、连线、保存和业务自定义；运行时层负责加载、反序列化、节点创建、生命周期和跳转。GraphRuntimeManager 持有 INodeGraphSerializer，业务可以更换序列化实现，而不需要修改图运行时调用方。
-每种业务可以提供自己的：
-GraphAssetGraphControllerGraphWindowEditorNodeNodeViewRuntimeNode业务 UI / 调试工具
-
-例如 Task 图拥有自己的 TaskGraphWindow、TaskGraphController、TaskNode、TaskNodeView、TaskRuntimeNode 和 TaskPanel，同时复用通用的 GraphView 编辑器、序列化入口和 GraphRunner。
-
-]]></content>
-  </entry>
-  <entry>
-    <title>通用节点编辑器02-编辑器部分</title>
-    <url>/posts/80a055ae.html</url>
-    <content><![CDATA[编辑器基类与扩展点编辑器层由图资产、Controller、窗口、图 View、节点外壳和节点内容 View 组成。
-NodeGraphAsset    -&gt; NodeGraphController    -&gt; NodeEditorWindowBase    -&gt; NodeGraphViewBase    -&gt; NodeBase&lt;TData&gt;    -&gt; NodeViewBase&lt;TData&gt;
-
-图资产NodeGraphAsset 是图配置的 ScriptableObject，保存以下内容：
-
-graphId：图的稳定标识。
-graphName：创建时生成的图名称。
-serializedGraph：编辑器图序列化结果。
-
-新建图资产默认保存到：
-Assets/NodeGraphView/Editor Default Resources/GraphData/&#123;GraphName&#125;.asset
-
-ControllerNodeGraphController 是业务图的编辑器策略层，常见覆盖点包括：
-public override Type AssetType =&gt; typeof(TaskGraphAsset);public override Type EditorWindowType =&gt; typeof(TaskGraphWindow);public override Type GraphViewType =&gt; typeof(NodeGraphView.NodeGraphView);public override string GetExportFolderPath(NodeGraphAsset asset)&#123;    return &quot;Assets/Resources/TaskGraphs&quot;;&#125;
-
-Controller 还负责节点创建数据、端口数据、连接规则、图序列化和 Runtime 图导出。
-窗口与图 ViewNodeEditorWindowBase 提供通用窗口生命周期、保存、导出和调试高亮。业务窗口继承它后，可通过 BuildToolbar 加入业务按钮。
-NodeGraphViewBase 负责 GraphView 的节点创建、连线、删除、保存和导出。业务通常不需要重写它，只有在需要特殊交互时才扩展。
-节点外壳与节点内容NodeBase 是所有编辑器节点共用的外壳，负责：
-
-标题编辑。
-节点 ID 显示。
-ID 复制按钮。
-输入与输出端口。
-节点尺寸、样式和右键菜单。
-
-NodeViewBase&lt;TData&gt; 只负责业务节点的内容区。例如 Task 节点的名称和描述编辑字段属于 TaskNodeView。
-public class TaskNode : NodeBase&lt;TaskNodeData&gt;&#123;&#125;public class TaskNodeView : NodeViewBase&lt;TaskNodeData&gt;&#123;    public override void Build(VisualElement root)    &#123;        // 创建业务字段。    &#125;&#125;
-
-Task 节点的代码结构Task 业务在通用编辑器基类上增加自己的资产、Controller、窗口、节点和内容 View。通用层负责图编辑和节点外壳，业务层只描述 Task 的数据、固定端口与内容区。
-classDiagram    class NodeGraphAsset    class TaskGraphAsset    NodeGraphAsset &lt;|-- TaskGraphAsset    class NodeGraphController    class TaskGraphController    NodeGraphController &lt;|-- TaskGraphController    class NodeEditorWindowBase    class TaskGraphWindow    NodeEditorWindowBase &lt;|-- TaskGraphWindow    class NodeGraphViewBase    class NodeBase~TData~ &#123;        +标题编辑        +ID 与复制按钮        +输入输出端口        +尺寸、样式、右键菜单    &#125;    class TaskNode &#123;        +Task 固定端口规则    &#125;    NodeBase~TData~ &lt;|-- TaskNode    class NodeViewBase~TData~ &#123;        +Build(root)    &#125;    class TaskNodeView &#123;        +Task 名称与描述字段    &#125;    NodeViewBase~TData~ &lt;|-- TaskNodeView    class TaskNodeData    TaskNode --&gt; TaskNodeData    TaskNode --&gt; TaskNodeView : 创建内容 View    TaskGraphWindow --&gt; NodeGraphViewBase : 持有    TaskGraphController --&gt; TaskGraphAsset : 管理
-
-图中 NodeBase&lt;TData&gt; 是所有节点共用的 View 外壳；TaskNode 只补充 Task 的端口规则；TaskNodeView 只构建 Task 的业务内容区。这使后续业务可以沿用相同结构，而不需要修改通用编辑器代码。
-]]></content>
   </entry>
   <entry>
     <title>通用节点编辑器03-运行时部分</title>
@@ -2886,67 +3213,36 @@ private readonly INodeGraphSerializer serializer =    new NodeGraphNewtonJsonSer
 ]]></content>
   </entry>
   <entry>
-    <title>通用节点编辑器05-任务系统实例</title>
-    <url>/posts/83c1b684.html</url>
-    <content><![CDATA[Task 节点图示例Task 示例展示了一个完整的业务接入流程：编辑任务节点、导出 Runtime 图、显示任务面板，并根据完成或失败结果继续执行后续节点。
-编辑器部分Task 图包含：
+    <title>通用节点编辑器01-xNode对比</title>
+    <url>/posts/ca3fa1d1.html</url>
+    <content><![CDATA[为什么需要 NodeGraphView项目的需求之前写过一篇引导节点编辑器的文档，但随着项目需求的不断复杂，越发地发觉：原来的节点编辑器仅支持单一业务，不具有通用性，类似于任务、剧情这些系统，又需要重新写一遍序列化&#x2F;反序列化、运行时的逻辑，重复造轮子。需要一个能让所有业务都轻松接入节点编辑器的基建，从而让每种业务图都应具备从编辑、保存、导出到运行时加载和执行的完整链路。
+具体包括：
 
-TaskGraphAsset：Task 图资产。
-TaskGraphController：指定 Runtime 导出目录 Assets/Resources/TaskGraphs。
-TaskGraphWindow：注册 Tools/Node Graph/Task/Create Task Graph 创建入口。
-TaskNode：定义 In、complete 和 failed 端口。
-TaskNodeView：编辑 TaskNodeData 的任务名称和描述。
+在 Unity 中编辑节点、端口和连线。
+将编辑器图转换为独立的运行时数据，并由可替换的序列化器保存。
+在运行时反序列化数据，创建对应的 RuntimeNode 并驱动节点跳转。
+支持 Task、对话、剧情、AI 行为等不同业务。
+每种业务可以拥有自己的窗口、工具栏、节点内容、端口规则、导出位置及调试工具。
 
-任务节点的出口含义：
+xNode 能做什么xNode 是一个轻量级 Unity 节点图框架。它提供 NodeGraph、Node、端口和默认编辑器，适合快速制作状态机、对话、决策等节点图。
+xNode 的 Node 和 NodeGraph 都继承自 ScriptableObject，因此可以直接作为 Unity 资产保存；它并不是完全没有序列化。节点也可以在运行时通过业务代码调用 GetValue 等接口求值。官方将它定位为节点图框架，而不是一套通用的图运行时。
+xNode 也可以通过 NodeEditor、NodeGraphEditor 等扩展点定制节点和图的编辑体验。若业务需要独立的编辑器窗口、工具栏、导出流程或调试系统，这些能力需要项目自行设计和补齐。
+xNode 无法直接覆盖的部分对本项目而言，关键问题不是 xNode 能否显示节点，而是以下能力没有作为通用链路提供：
 
+编辑器图到独立 Runtime 文档的转换与导出。
+可替换序列化实现的统一入口。
+通用的运行时节点工厂、生命周期、节点跳转和执行器。
+不同业务各自的编辑器窗口、工具、导出策略和运行时 UI 的组织方式。
 
+因此，使用 xNode 仍然可以完成业务，但每个业务都要自行组织运行时执行与导出逻辑，公共部分容易重复。
+NodeGraphView 的方案NodeGraphView 基于 Unity GraphView 建立编辑器层，并将配置图与运行时图明确拆分：
+NodeGraphAsset    -&gt; NodeGraphDocument    -&gt; NodeGraphRuntimeDocument    -&gt; GraphRunner    -&gt; RuntimeNode
 
-端口 key
-含义
+编辑器层负责节点显示、连线、保存和业务自定义；运行时层负责加载、反序列化、节点创建、生命周期和跳转。GraphRuntimeManager 持有 INodeGraphSerializer，业务可以更换序列化实现，而不需要修改图运行时调用方。
+每种业务可以提供自己的：
+GraphAssetGraphControllerGraphWindowEditorNodeNodeViewRuntimeNode业务 UI / 调试工具
 
-
-
-complete
-任务完成后的下一节点
-
-
-failed
-任务失败后的下一节点
-
-
-运行时入口TaskGraphExampleRunner 只负责：
-
-创建 TaskPanel。
-从 Resources 加载 Task 图。
-将 TaskPanel 注入每一个 TaskRuntimeNode。
-调用 GraphRunner.Start() 启动图。
-
-graphRunner = GraphRuntimeManager.Instance    .LoadFromResources(resourcesPath);foreach (INodeGraphRuntimeNode node in graphRunner.Nodes)&#123;    if (node is TaskRuntimeNode taskNode)    &#123;        taskNode.SetPanel(taskPanel);    &#125;&#125;graphRunner.Start();
-
-TaskRuntimeNode 驱动业务TaskRuntimeNode.OnEnter() 负责设置面板回调并刷新任务信息：
-panel.SetCallbacks(this);panel.Refresh(    string.IsNullOrEmpty(UserData.name) ? Title : UserData.name,    UserData.description,    HasExit(&quot;complete&quot;),    HasExit(&quot;failed&quot;));
-
-TaskPanel 的完成和失败按钮通过 ITaskPanelCallbacks 回调到当前 RuntimeNode：
-TaskPanel Button    -&gt; TaskRuntimeNode.OnComplete / OnFail    -&gt; SelectExit(&quot;complete&quot; / &quot;failed&quot;)    -&gt; GraphRunner.MoveNext    -&gt; 下一个节点 OnEnter
-
-这保证 UI 只负责展示和触发事件，节点本身决定业务流转。
-TaskPanel ViewTaskPanel 位于 Examples/Task/View，负责：
-
-查找任务名称和描述文本。
-控制完成、失败按钮显示。
-绑定按钮事件。
-显示和隐藏面板。
-
-它不直接操作 GraphRunner，也不决定跳转出口。
-
-完整使用流程
-在菜单中创建 Task Graph。
-添加 Task 节点并配置名称、描述和连线。
-保存图资产。
-点击 Export .bytes，生成 Resources 下的运行时图数据。
-场景中挂载 TaskGraphExampleRunner 和 TaskPanel Prefab。
-配置 resourcesPath，例如 TaskGraphs/NewGraph0。
-进入 Play Mode，TaskPanel 会在 TaskRuntimeNode 进入时显示。
+例如 Task 图拥有自己的 TaskGraphWindow、TaskGraphController、TaskNode、TaskNodeView、TaskRuntimeNode 和 TaskPanel，同时复用通用的 GraphView 编辑器、序列化入口和 GraphRunner。
 
 ]]></content>
   </entry>
@@ -3017,6 +3313,109 @@ Assets/Resources/TaskGraphs/&#123;GraphName&#125;.bytes
 
 Runtime 使用 Resources 路径加载时不带扩展名：
 GraphRuntimeManager.Instance.LoadFromResources(    &quot;TaskGraphs/NewGraph0&quot;);
+]]></content>
+  </entry>
+  <entry>
+    <title>通用节点编辑器02-编辑器部分</title>
+    <url>/posts/80a055ae.html</url>
+    <content><![CDATA[编辑器基类与扩展点编辑器层由图资产、Controller、窗口、图 View、节点外壳和节点内容 View 组成。
+NodeGraphAsset    -&gt; NodeGraphController    -&gt; NodeEditorWindowBase    -&gt; NodeGraphViewBase    -&gt; NodeBase&lt;TData&gt;    -&gt; NodeViewBase&lt;TData&gt;
+
+图资产NodeGraphAsset 是图配置的 ScriptableObject，保存以下内容：
+
+graphId：图的稳定标识。
+graphName：创建时生成的图名称。
+serializedGraph：编辑器图序列化结果。
+
+新建图资产默认保存到：
+Assets/NodeGraphView/Editor Default Resources/GraphData/&#123;GraphName&#125;.asset
+
+ControllerNodeGraphController 是业务图的编辑器策略层，常见覆盖点包括：
+public override Type AssetType =&gt; typeof(TaskGraphAsset);public override Type EditorWindowType =&gt; typeof(TaskGraphWindow);public override Type GraphViewType =&gt; typeof(NodeGraphView.NodeGraphView);public override string GetExportFolderPath(NodeGraphAsset asset)&#123;    return &quot;Assets/Resources/TaskGraphs&quot;;&#125;
+
+Controller 还负责节点创建数据、端口数据、连接规则、图序列化和 Runtime 图导出。
+窗口与图 ViewNodeEditorWindowBase 提供通用窗口生命周期、保存、导出和调试高亮。业务窗口继承它后，可通过 BuildToolbar 加入业务按钮。
+NodeGraphViewBase 负责 GraphView 的节点创建、连线、删除、保存和导出。业务通常不需要重写它，只有在需要特殊交互时才扩展。
+节点外壳与节点内容NodeBase 是所有编辑器节点共用的外壳，负责：
+
+标题编辑。
+节点 ID 显示。
+ID 复制按钮。
+输入与输出端口。
+节点尺寸、样式和右键菜单。
+
+NodeViewBase&lt;TData&gt; 只负责业务节点的内容区。例如 Task 节点的名称和描述编辑字段属于 TaskNodeView。
+public class TaskNode : NodeBase&lt;TaskNodeData&gt;&#123;&#125;public class TaskNodeView : NodeViewBase&lt;TaskNodeData&gt;&#123;    public override void Build(VisualElement root)    &#123;        // 创建业务字段。    &#125;&#125;
+
+Task 节点的代码结构Task 业务在通用编辑器基类上增加自己的资产、Controller、窗口、节点和内容 View。通用层负责图编辑和节点外壳，业务层只描述 Task 的数据、固定端口与内容区。
+classDiagram    class NodeGraphAsset    class TaskGraphAsset    NodeGraphAsset &lt;|-- TaskGraphAsset    class NodeGraphController    class TaskGraphController    NodeGraphController &lt;|-- TaskGraphController    class NodeEditorWindowBase    class TaskGraphWindow    NodeEditorWindowBase &lt;|-- TaskGraphWindow    class NodeGraphViewBase    class NodeBase~TData~ &#123;        +标题编辑        +ID 与复制按钮        +输入输出端口        +尺寸、样式、右键菜单    &#125;    class TaskNode &#123;        +Task 固定端口规则    &#125;    NodeBase~TData~ &lt;|-- TaskNode    class NodeViewBase~TData~ &#123;        +Build(root)    &#125;    class TaskNodeView &#123;        +Task 名称与描述字段    &#125;    NodeViewBase~TData~ &lt;|-- TaskNodeView    class TaskNodeData    TaskNode --&gt; TaskNodeData    TaskNode --&gt; TaskNodeView : 创建内容 View    TaskGraphWindow --&gt; NodeGraphViewBase : 持有    TaskGraphController --&gt; TaskGraphAsset : 管理
+
+图中 NodeBase&lt;TData&gt; 是所有节点共用的 View 外壳；TaskNode 只补充 Task 的端口规则；TaskNodeView 只构建 Task 的业务内容区。这使后续业务可以沿用相同结构，而不需要修改通用编辑器代码。
+]]></content>
+  </entry>
+  <entry>
+    <title>通用节点编辑器05-任务系统实例</title>
+    <url>/posts/83c1b684.html</url>
+    <content><![CDATA[Task 节点图示例Task 示例展示了一个完整的业务接入流程：编辑任务节点、导出 Runtime 图、显示任务面板，并根据完成或失败结果继续执行后续节点。
+编辑器部分Task 图包含：
+
+TaskGraphAsset：Task 图资产。
+TaskGraphController：指定 Runtime 导出目录 Assets/Resources/TaskGraphs。
+TaskGraphWindow：注册 Tools/Node Graph/Task/Create Task Graph 创建入口。
+TaskNode：定义 In、complete 和 failed 端口。
+TaskNodeView：编辑 TaskNodeData 的任务名称和描述。
+
+任务节点的出口含义：
+
+
+
+端口 key
+含义
+
+
+
+complete
+任务完成后的下一节点
+
+
+failed
+任务失败后的下一节点
+
+
+运行时入口TaskGraphExampleRunner 只负责：
+
+创建 TaskPanel。
+从 Resources 加载 Task 图。
+将 TaskPanel 注入每一个 TaskRuntimeNode。
+调用 GraphRunner.Start() 启动图。
+
+graphRunner = GraphRuntimeManager.Instance    .LoadFromResources(resourcesPath);foreach (INodeGraphRuntimeNode node in graphRunner.Nodes)&#123;    if (node is TaskRuntimeNode taskNode)    &#123;        taskNode.SetPanel(taskPanel);    &#125;&#125;graphRunner.Start();
+
+TaskRuntimeNode 驱动业务TaskRuntimeNode.OnEnter() 负责设置面板回调并刷新任务信息：
+panel.SetCallbacks(this);panel.Refresh(    string.IsNullOrEmpty(UserData.name) ? Title : UserData.name,    UserData.description,    HasExit(&quot;complete&quot;),    HasExit(&quot;failed&quot;));
+
+TaskPanel 的完成和失败按钮通过 ITaskPanelCallbacks 回调到当前 RuntimeNode：
+TaskPanel Button    -&gt; TaskRuntimeNode.OnComplete / OnFail    -&gt; SelectExit(&quot;complete&quot; / &quot;failed&quot;)    -&gt; GraphRunner.MoveNext    -&gt; 下一个节点 OnEnter
+
+这保证 UI 只负责展示和触发事件，节点本身决定业务流转。
+TaskPanel ViewTaskPanel 位于 Examples/Task/View，负责：
+
+查找任务名称和描述文本。
+控制完成、失败按钮显示。
+绑定按钮事件。
+显示和隐藏面板。
+
+它不直接操作 GraphRunner，也不决定跳转出口。
+
+完整使用流程
+在菜单中创建 Task Graph。
+添加 Task 节点并配置名称、描述和连线。
+保存图资产。
+点击 Export .bytes，生成 Resources 下的运行时图数据。
+场景中挂载 TaskGraphExampleRunner 和 TaskPanel Prefab。
+配置 resourcesPath，例如 TaskGraphs/NewGraph0。
+进入 Play Mode，TaskPanel 会在 TaskRuntimeNode 进入时显示。
+
 ]]></content>
   </entry>
   <entry>
