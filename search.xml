@@ -1,21 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
-    <title>C#匿名函数与闭包</title>
-    <url>/posts/278e5dd7.html</url>
-    <content><![CDATA[起因最近看到了一段C#程序，一开始就简单的以为只是一个for循环的0~9的打印，但是深入了解之后发现我错了，而且对其中的原理相知甚少。代码如下：
-public static void Main(string[] args)&#123;    Action[] actions = new Action[10];    for (int i = 0; i &lt; 10; i++)    &#123;        actions[i] = () =&gt; &#123;Console.WriteLine(i.ToString()); &#125;;    &#125;    foreach (var action in actions)    &#123;        action();    &#125;&#125;
-这段代码的运行结果输出是10个10，如果做对了，想必已经是了解其中的原理，下面的内容可以不用看了。
-原因原因其实很简单，使用编辑器查看IL代码，可以很清晰的看到：编译器为匿名函数生成了一个名为&lt;&gt;c__DisplayClass0_0的类，并把int i作为了类内的成员变量，并在类中生成了b__0()方法，在方法中打印成员变量i。在函数运行时，new了一个名为cDisplayClass00的实例，并且在for循环中是不断的自增实例中的变量，最后把自己的b__0()方法传入Action中。C#中class是默认分配在堆上的，所以每次增加的i变量都是同一个地址上的数据，最后执行action委托时，调用的也是同一个类的b__0()方法，所以最后的结果自然全是10。
-闭包中存在的问题既然匿名函数在使用时在堆上new了一个实例，分配了内存，所以必定涉及到了GC。那么代码中的哪种写法导会有严重的GC问题，哪种写法又能尽量避免GC。搜索之后，发现猫仙人的这篇文章总结得非常到位：文章传送连接，以下是我对他文章结论的进一步总结，具体论证细节可以点击连接去查看。
-捕获变量的分类外部变量的分类重要分为3种：1、捕获静态变量2、捕获实例字段3、捕获外部方法的局部变量其中分配内存的多少为：3&gt;2&gt;1&gt;无闭包，并且捕获外部方法的局部变量的内存分配量高达2n次，为了记录外部局部变量的值，编译器每次都new了一个新的匿名类实例和Action实例。
-优化方法文章中指出了，可以通过增加参数数量，使用方法参数去传递要捕获的变量，避免掉对外部变量的捕获，同时避免闭包的额外内存分配。对于该文章开头的代码，若想改成输出0~9，就有两种办法，以下给出代码截图。第二种用了优化建议，内存性能要优于第一种。
-捕获外部方法的局部变量编译器new了n个匿名类实例和Action实例
-增加参数变量编译器只new对应的Aciton实例
-总结对于以上验证，可以简单粗暴的认为：runtime直接不使用()&#x3D;&gt;{}这种匿名函数的写法，能非常有效的避免额外内存开销。
-]]></content>
-  </entry>
-  <entry>
     <title>UI背景模糊的两种实现方法</title>
     <url>/posts/8434956c.html</url>
     <content><![CDATA[原理实现模糊的原理比较简单：一个像素本身的颜色通过某种算法，最终计算为周围颜色的一个均值或权重值，这样看起来的图就是模糊的了。通过计算均值颜色的算法选择不同，就产生了不同效果、不同效率的模糊。具体实现算法可以看左神的这篇文章：高品质后处理：十种图像模糊算法的总结与实现，里面把所有的模糊算法的数学原理和效果都列举完了，言简意赅，字字珠玑。下面介绍我在实际工程中的实现UI背景模糊两种实现方法。
@@ -33,232 +18,19 @@ shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#12
 ]]></content>
   </entry>
   <entry>
-    <title>Unity-AssetBundle加载与卸载</title>
-    <url>/posts/38e927b7.html</url>
-    <content><![CDATA[AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。
-下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。
-一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。
-但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。
-这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一定会销毁此前加载的对象。
-二、管理目标：明确谁在使用，什么时候能释放这个场景需要解决的，不只是让内存下降，还包括保证资源在使用期间有效，以及避免下次打开界面时无意间再加载一份。
-具体可以归纳为三个目标：
-
-使用期间保持有效。 界面实例、对象池或其他系统仍在引用资源时，不能提前销毁资源。
-重复进入时可复用。 同一份逻辑资源仍然存活时，应有明确的复用或释放策略。
-退出后能够验证。 能够确认引用已经解除、对象得到回收，而不只是观察进程内存有没有立刻下降。
-
-要做到这些，需要先分清各个 API 实际处理的是哪一部分。
-三、处理过程：把加载、使用和回收串起来1. 先确定内存在哪里以本地 AB 包为例，加载过程及各部分的关系如下：
-
-    flowchart TD
-    D[&quot;磁盘：AB 文件&quot;]
-    B[&quot;Native：包管理结构与读取缓冲&quot;]
-    R[&quot;Native：资源对象与所需 CPU 数据&quot;]
-    MB[&quot;Managed：AssetBundle 包装&quot;]
-    MR[&quot;Managed：Texture2D、Mesh 等包装&quot;]
-    G[&quot;GPU：纹理、顶点与索引缓冲&quot;]
-
-    D --&gt;|LoadFromFile| B
-    MB -.-&gt;|引用底层包对象| B
-    B --&gt;|LoadAsset：从文件读取所需数据| R
-    MR -.-&gt;|引用底层资源对象| R
-    R --&gt;|图形数据上传| G
-  
-
-
-磁盘到 Native： LoadFromFile 建立包的访问入口；LoadAsset 再读取所需资源，创建 Native 对象及数据。打开包不等于全部资源都已加载。
-Managed 是脚本访问入口： 加载接口向 C# 提供相应包装对象；图中虚线表示引用关系，像素、顶点等大块数据不必经过托管堆再上传。
-需要 GPU 使用的数据才上传： 例如纹理像素、Mesh 顶点和索引。上传可能发生在加载期间或分帧进行，并非统一等到首次渲染；CPU 副本是否保留取决于 Read&#x2F;Write 等设置。[2][3]
-
-清理时也要分别处理：资源卸载负责 Native 对象及相关 GPU 资源，GC 负责不可达的托管包装和业务对象。 图中表示逻辑归属，统一内存设备上的 CPU 与 GPU 可能共享物理内存。
-2. 将打开包和加载资源分开处理先看两种常见的加载方式：
-// 先将整个文件读入托管数组，再交给 Unity。byte[] data = File.ReadAllBytes(path);AssetBundle memoryBundle = AssetBundle.LoadFromMemory(data);// 让 Unity 直接从文件加载。AssetBundle fileBundle = AssetBundle.LoadFromFile(path);
-
-使用第一种方式时，byte[] 本身就会占用一份托管内存，Unity 侧还需要加载包所需的内存。加载期间，两部分占用可能同时存在。实际峰值还受压缩格式和引擎实现影响，不能简单固定为“文件大小的两倍”。
-如果包已经在本地，通常优先使用 LoadFromFile 或 LoadFromFileAsync，省去先读取整个托管数组的过程。
-前文已经解释了包的按需读取与解压机制，这里只保留一个与内存管理有关的区别：LoadFromFile 返回的是包的访问入口，LoadAsset 返回的是具体资源对象。打开包不代表包内所有资源都已加载；卸载入口，也不必然销毁已经加载的对象。[1]
-3. 确认资源对象和 GPU 数据的加载过程Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(    &quot;assets/game/textures/warrior_diffuse.png&quot;);
-
-调用 LoadAsset 后，Unity 会创建对应的底层资源对象，并向 C# 返回 Texture2D 包装对象。下文默认相关依赖包已经准备好，依赖解析过程沿用前文，不再展开。
-纹理和 Mesh 还涉及 GPU 数据的上传。这里容易产生一个误解：认为 LoadAsset 只准备 CPU 数据，直到第一次渲染时才上传显存。
-实际并没有这样统一的时间界限。Unity 有同步和异步上传管线，数据可能在加载过程中就上传到 GPU，也可能通过缓冲区分帧传输。具体行为取决于资源设置、加载路径及平台，不能仅凭“还没有渲染过”判断显存占用。[2]
-Mesh.UploadMeshData(true) 可以提交 Mesh 数据，并释放脚本读取所需的 CPU 数据副本；这里释放的是 Native 侧的 CPU 数据，不是 C# 包装，GPU 数据仍然保留。它主要用于明确管理 Mesh 数据，并不是加载 AB 资源时必须补上的步骤。
-Read&#x2F;Write 保留的是什么纹理开启 Read/Write Enabled 后，Unity 会保留可供 CPU 访问的像素数据，以支持 GetPixels 等操作。这份数据会增加常驻内存开销。[3]
-如果纹理只用于渲染，通常应关闭该选项；如果运行时确实需要读取或修改像素，则需要保留。UI 图集、大尺寸贴图尤其值得检查。
-关闭 Read&#x2F;Write 能减少 CPU 副本的占用，但不宜把收益一概写成“总内存减半”。纹理格式、MipMap、流送设置、平台，以及对象自身的开销都会影响最终结果。
-4. 根据使用情况选择卸载方式bundle.Unload(unloadAllLoadedObjects: true);// 或bundle.Unload(unloadAllLoadedObjects: false);
-
-两种调用都会卸载包本身，使这个 AssetBundle 无法继续用于加载资源。区别在于，是否同时销毁此前从包中加载出来的对象。[4]
-Unload(true)：包和已加载资源一起卸载Unload(true) 会释放包自身的 Native 管理数据，并销毁属于这个包的已加载资源对象，释放它们的 Native 数据；纹理、Mesh 等对象对应的 GPU 资源也会进入图形系统的释放流程，即使场景中的其他对象仍在引用它们。
-这里的销毁主要针对引擎对象，不意味着 C# 托管包装已经被回收。包装对象仍由 GC 管理；只要业务代码还持有引用，它就可能继续占用托管堆空间。GPU 资源的实际释放也可能等待渲染任务或驱动处理完成。
-例如，从包里加载 Prefab 后调用 Instantiate，场景中的实例通常还在，但它引用的共享 Mesh、材质、纹理可能已被卸载，导致模型无法正常显示。粉红色通常指向 Shader 缺失、错误或不受支持，不能直接归因于“少了一张纹理”。
-底层对象销毁后，已有的 C# 变量不会自动被重新赋值。Unity 重载了 ==，会将底层对象已经失效的包装对象判为空：[5]
-Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(assetName);bundle.Unload(true);Debug.Log(texture == null);                 // trueDebug.Log(ReferenceEquals(texture, null));  // false：托管引用仍存在
-
-这也是判断 Unity 对象时，== null 与普通 C# 引用判空可能不一致的原因。对象失效后，访问需要底层对象的成员可能报错，并不意味着每次访问都会导致程序崩溃。
-Unload(false)：卸载包，保留已加载资源Unload(false) 释放的是包自身的 Native 管理数据和相关读取资源。已加载纹理、Mesh、材质的 Native 对象与数据，以及它们对应的 GPU 资源仍然保留，可以继续使用。
-它不会直接回收 AssetBundle、Texture2D 等 C# 包装，也不会释放调用方传给 LoadFromMemory 的托管 byte[]。这些托管对象都需要在不再可达后，由 GC 回收。
-但这些资源也不再由原来的包实例管理。后续重新打开同一个包，不会自动把旧资源重新关联回来。
-5. 处理重复加载留下的副本下面这段代码就可能产生两个独立的纹理对象：
-AssetBundle bundleA = AssetBundle.LoadFromFile(path);Texture2D textureA = bundleA.LoadAsset&lt;Texture2D&gt;(assetName);bundleA.Unload(false);AssetBundle bundleB = AssetBundle.LoadFromFile(path);Texture2D textureB = bundleB.LoadAsset&lt;Texture2D&gt;(assetName);
-
-第一次卸载时，textureA 被保留下来。第二次加载时，Unity 不会因为磁盘上的资源路径相同，就自动复用这份旧对象，而是可能创建新的 textureB。[1]
-如果旧纹理仍被 UI、材质、静态字段或资源缓存引用，两份对象就会同时存在。继续反复执行这个流程，资源占用便可能逐轮增加。
-不过，重复副本不一定就是永久泄漏。能否回收，要看资源是否还有使用者，以及是否执行了合适的卸载操作：
-
-对不再需要、且符合 API 限制的单个资源，可以使用 Resources.UnloadAsset。该接口不适用于 GameObject 或 Component。[6]
-清除相关引用后，可以在合适的时机调用 Resources.UnloadUnusedAssets()，清理 Unity 判断为未使用的资源。它有全局检查成本，通常安排在加载界面等能够接受开销的位置。
-
-重新加载包，再对新包调用 Unload(true)，并不能顺带销毁上一次 Unload(false) 留下的旧资源。
-6. 使用 UnloadUnusedAssets 做阶段性清理前面提到，Unload(false) 会留下已加载的资源。等使用者退出后，可以通过 Resources.UnloadUnusedAssets() 清理其中不再使用的部分。它也能处理其他加载路径留下的未使用资源，并不局限于 AB 包。
-这个接口清理的重点是未使用资源的 Native 对象及其数据，并让相应 GPU 资源进入释放流程。 它与 C# GC 是不同的回收机制：即使具体版本的执行过程中伴随托管 GC，也不能据此认为所有托管包装、数组和缓存容器都已回收。仍然可达的托管对象依然会保留。[8]
-“未使用”由谁判断这个接口不接收包名或资源列表。Unity 会检查 GameObject 层级、脚本组件及静态变量中的引用，判断哪些资源仍然可达。[7]
-从行为上，可以把这次清理理解成三个步骤：
-
-查找仍在使用的资源。 从上述引用入口出发，沿对象之间的引用关系，确定需要保留的资源。
-识别未使用资源。 将没有被这些引用关系保留的资源列入清理范围；它不是只检查刚关闭的界面或刚卸载的包。
-卸载资源。 销毁符合条件的 Native 资源对象、释放相关数据，并让对应 GPU 资源进入释放流程。
-
-这是便于理解的概括，并非对引擎内部具体算法和线程分工的保证。开销不仅来自最终释放了多少资源，也来自查找、遍历引用关系以及销毁对象的过程。 即使最后只回收少量内存，也可能已经付出了明显的检查成本。
-因此，界面关闭了，不代表界面用过的纹理就能回收。隐藏的 UI、对象池中的角色、静态字典里的资源缓存，都可能继续持有引用。调用这个接口不会替你清空这些缓存。
-还有一个细节：它不会像 C# GC 那样检查脚本执行栈。 仅被普通方法局部变量引用的资源，不能据此保证保留。需要跨越清理过程继续使用的资源，应由明确的持有者保存，例如存活组件的字段；协程局部变量可能被编译成状态机字段，也不宜一概当作普通栈变量理解。[7]
-各接口到底清理哪一层内存
-
-
-操作
-Native 内存
-GPU 内存
-Managed 托管内存
-
-
-
-bundle.Unload(false)
-释放包自身的管理数据和读取资源；保留已加载资源的 Native 数据
-保留已加载资源的 GPU 数据
-不直接回收包装或输入数组；不再可达后由 GC 回收
-
-
-bundle.Unload(true)
-释放包自身及属于它的已加载资源的 Native 数据
-对应资源进入释放流程
-不直接回收仍被持有的 C# 包装；不再可达后由 GC 回收
-
-
-Resources.UnloadAsset(asset)
-卸载指定资源的 Native 对象和数据，受资源类型限制
-对应资源进入释放流程
-不直接回收仍被持有的包装；不再可达后由 GC 回收
-
-
-Resources.UnloadUnusedAssets()
-清理 Unity 判断为未使用的资源的 Native 对象和数据
-被清理资源对应的 GPU 数据进入释放流程
-不能保证包装和业务对象立即回收；其托管内存仍取决于 GC 可达性及回收时机
-
-
-Object.Destroy(instance)
-按销毁规则释放指定实例及相关引擎对象；通常延迟执行，不会自动卸载共享纹理、材质等资源
-不会仅因销毁一个场景实例就释放其引用的共享资源
-C# 包装及脚本的托管部分在不再可达后由 GC 回收
-
-
-GC.Collect()
-不直接卸载 Unity 资源的 Native 对象
-不直接释放
-触发托管 GC，回收符合条件的不可达对象
-
-
-reference = null &#x2F; cache.Clear()
-不直接释放
-不直接释放
-解除引用；不立即回收对象，清空集合通常也保留其容量
-
-
-表中的 GPU 释放指生命周期上的释放请求，不保证调用返回时驱动已归还物理显存；没有 GPU 数据的资源自然不涉及这一列。上述卸载操作也不会删除磁盘上的 AB 文件或下载缓存。
-例如，LoadFromMemory(data) 使用的 data 是托管数组。卸载包负责释放 Unity 侧的包数据；调用方不再持有 data 后，数组才具备被 GC 回收的条件。这是两笔独立的内存，不能只调用一次 Unload 就认为全部清完。
-因此，清理通常分成两个责任：先按资源生命周期释放 Native 对象及相关 GPU 资源，再解除不需要的托管持有关系，让 GC 回收包装和业务对象。解除引用可以先做，但解除引用本身不等于已经释放 Native 或 GPU 数据。
-将清理安排在场景切换的 Loading 阶段UnloadUnusedAssets() 属于开销可能较大的集中清理操作，建议安排在场景切换的 Loading 界面中执行。 它虽然返回 AsyncOperation，但不意味着所有工作都在后台执行，也不保证每帧的耗时足够小。在正常游玩、镜头运动或 UI 动画期间调用，可能让主线程超过单帧预算，造成掉帧或明显卡顿。
-推荐顺序是：先显示 Loading 界面并让它至少完成一帧显示，再卸载旧场景或销毁旧实例、清除不需要的缓存引用，等待销毁完成后执行清理，最后继续新场景的加载流程。若新旧场景共享资源，应先确定需要保留的资源由常驻持有者引用，避免刚清理完又重新加载。
-Loading 界面用于承接这段等待，并不能消除清理成本；其中的转圈动画或进度条也可能短暂停顿。不要在每次 Release、关闭小弹窗或每隔几秒时调用，实际耗时应在目标设备上通过 Profiler 确认。
-下面保留界面退出的简化示例：假设包已通过 Unload(false) 卸载，调用前 Loading 界面已经显示，且负责执行协程的组件在清理期间保持存活。
-using System.Collections;using UnityEngine;public sealed class PanelResourceOwner : MonoBehaviour&#123;    private GameObject panelInstance;    private Texture2D cachedTexture;    public IEnumerator CloseAndCleanup()    &#123;        if (panelInstance != null)            Destroy(panelInstance);        panelInstance = null;        cachedTexture = null;        // 其他缓存、材质或组件若仍引用资源，也需要先解除持有。        // Destroy 延迟执行，留出时间让实例完成销毁。        yield return null;        // 在 Loading 阶段等待集中清理完成；异步接口仍可能产生耗时峰值。        yield return Resources.UnloadUnusedAssets();    &#125;&#125;
-
-示例中的 Destroy 负责结束界面实例的 Native 生命周期，字段设为 null 负责解除托管引用，UnloadUnusedAssets() 则清理已无使用者的资源 Native 数据及相关 GPU 资源。三步处理的是不同的对象或存储部分。
-这里没有紧接着调用 GC.Collect()。是否主动触发托管 GC，需要根据项目的托管分配和卡顿情况单独判断，并不是资源清理的固定步骤。
-清理完成后，再结束 Loading 阶段、恢复正常交互。是否在每次场景切换都执行，应结合内存峰值与目标设备耗时决定，避免没有回收收益的频繁扫描。
-7. 将持有关系落实到管理器工程上常见的做法，是统一管理包及其依赖，复用已打开的包，在确认没有使用者后调用 Unload(true)。
-下面只展示包层计数的基本逻辑：
-using System;using System.Collections.Generic;using UnityEngine;public sealed class BundleRefCounter&#123;    private sealed class Entry    &#123;        public AssetBundle Bundle;        public int RefCount;    &#125;    private readonly Dictionary&lt;string, Entry&gt; entries =        new Dictionary&lt;string, Entry&gt;();    // 在 Unity 主线程调用。bundleId 由调用方统一，避免路径别名。    public AssetBundle Acquire(string bundleId, string path)    &#123;        if (entries.TryGetValue(bundleId, out Entry entry))        &#123;            entry.RefCount++;            return entry.Bundle;        &#125;        AssetBundle bundle = AssetBundle.LoadFromFile(path);        if (bundle == null)            throw new InvalidOperationException($&quot;加载 AB 包失败：&#123;path&#125;&quot;);        entries.Add(bundleId, new Entry        &#123;            Bundle = bundle,            RefCount = 1        &#125;);        return bundle;    &#125;    public void Release(string bundleId)    &#123;        if (!entries.TryGetValue(bundleId, out Entry entry))            throw new InvalidOperationException($&quot;未持有 AB 包：&#123;bundleId&#125;&quot;);        entry.RefCount--;        if (entry.RefCount &gt; 0)            return;        entry.Bundle.Unload(true);        entries.Remove(bundleId);    &#125;&#125;
-
-这段代码本身并不知道场景里还有谁在使用纹理。计数是否可靠，取决于调用方是否遵守约定：一次 Acquire 所代表的持有期，必须覆盖相关资源的整个使用期。
-例如，加载 Prefab 并生成角色后，不能因为“加载结束了”就立即 Release。角色实例、对象池或缓存仍可能引用包里的共享资源，必须等这些使用者都退出后再归还持有权。调用 Destroy 的对象也可能要到帧末才真正销毁，释放顺序需要考虑这一点。
-实际管理器还需要处理几个问题：
-
-依赖包的持有关系。 依赖链沿用前文的加载流程；这里还需要让每个使用者持有相应依赖，直到使用结束，防止共享材质、Shader 或纹理被提前卸载。
-异步请求合并。 多个请求同时加载同一个包时，应共享进行中的任务；加载失败或取消时，要正确回滚计数。
-资源缓存与包状态一致。 缓存中的资源不能在所属包已经 Unload(true) 后继续被当作有效对象返回。
-
-引用计数不是唯一方案。生命周期边界清晰的项目，也可以在关卡退出后统一卸载该关卡独占的包。无论采用哪种方式，最终都需要能回答同一个问题：这个包里的资源，现在还有谁在用？
-四、结果验证：确认副本不再累积，使用中的资源仍有效管理策略调整后，需要验证的是资源生命周期是否符合预期，而不只是某一帧的进程内存数值。
-对于角色预览界面，可以在目标设备的 Player 中，记录打开前、打开后、关闭清理后的 Memory Profiler 快照，再重复若干次相同操作。
-
-
-
-验证场景
-应观察到的结果
-
-
-
-同时存在多个使用者
-释放其中一个后，其余对象仍能正常显示，共享资源保持有效
-
-
-最后一个使用者退出
-确认销毁完成、缓存清除后，相关资源能够按策略卸载
-
-
-反复打开和关闭界面
-同名纹理、Mesh、材质的实例数不持续逐轮增加；允许策略明确的缓存保留
-
-
-执行 UnloadUnusedAssets()
-未使用资源得到清理，仍被有效使用者持有的资源保留
-
-
-主包释放、其他对象仍使用依赖包
-共享依赖保持有效，直到最后一个持有者退出
-
-
-这里列出的是验证标准，并非项目实测数据。具体节省多少内存、清理耗时多长，需要结合资源规模、Unity 版本与目标设备测量。
-验证时也应分开看 Native 资源数量与占用、Managed 包装及业务容器的占用，以及图形内存。Native 资源已释放但包装仍被静态集合引用，和包装已经回收但共享资源仍在使用，是两种不同情况。
-如果资源实例数仍然上涨，优先检查重复加载与旧缓存；如果资源无法回收，检查对象池、静态字段和存活组件的引用。如果对象数量已经恢复，而进程内存没有立即下降，再分析 Unity 分配器保留内存、尚未回收的托管包装，以及 GPU 侧延迟释放等因素。
-回到最初的预览界面：打开包、加载 Prefab、创建角色、销毁角色、卸载资源，是需要衔接的几个步骤。明确每一步的持有者和结束条件，才能同时避免提前卸载与重复副本。Unload(true)、Unload(false) 和 UnloadUnusedAssets() 也就各自有了明确的使用位置。
-参考资料
-前文：Unity-AssetBundle结构解析
-
-以下链接以 Unity 2022.3 文档为主。不同版本和平台的底层实现可能有所变化，具体占用与耗时应以目标设备实测为准。
-
-Using AssetBundles Natively
-
-Loading texture and mesh data
-
-Texture.isReadable
-
-AssetBundle.Unload
-
-UnityEngine.Object.operator &#x3D;&#x3D;
-
-Resources.UnloadAsset
-
-Resources.UnloadUnusedAssets
-
-Managed memory：GC 与 Native 资源回收的区别
-
-
+    <title>C#匿名函数与闭包</title>
+    <url>/posts/278e5dd7.html</url>
+    <content><![CDATA[起因最近看到了一段C#程序，一开始就简单的以为只是一个for循环的0~9的打印，但是深入了解之后发现我错了，而且对其中的原理相知甚少。代码如下：
+public static void Main(string[] args)&#123;    Action[] actions = new Action[10];    for (int i = 0; i &lt; 10; i++)    &#123;        actions[i] = () =&gt; &#123;Console.WriteLine(i.ToString()); &#125;;    &#125;    foreach (var action in actions)    &#123;        action();    &#125;&#125;
+这段代码的运行结果输出是10个10，如果做对了，想必已经是了解其中的原理，下面的内容可以不用看了。
+原因原因其实很简单，使用编辑器查看IL代码，可以很清晰的看到：编译器为匿名函数生成了一个名为&lt;&gt;c__DisplayClass0_0的类，并把int i作为了类内的成员变量，并在类中生成了b__0()方法，在方法中打印成员变量i。在函数运行时，new了一个名为cDisplayClass00的实例，并且在for循环中是不断的自增实例中的变量，最后把自己的b__0()方法传入Action中。C#中class是默认分配在堆上的，所以每次增加的i变量都是同一个地址上的数据，最后执行action委托时，调用的也是同一个类的b__0()方法，所以最后的结果自然全是10。
+闭包中存在的问题既然匿名函数在使用时在堆上new了一个实例，分配了内存，所以必定涉及到了GC。那么代码中的哪种写法导会有严重的GC问题，哪种写法又能尽量避免GC。搜索之后，发现猫仙人的这篇文章总结得非常到位：文章传送连接，以下是我对他文章结论的进一步总结，具体论证细节可以点击连接去查看。
+捕获变量的分类外部变量的分类重要分为3种：1、捕获静态变量2、捕获实例字段3、捕获外部方法的局部变量其中分配内存的多少为：3&gt;2&gt;1&gt;无闭包，并且捕获外部方法的局部变量的内存分配量高达2n次，为了记录外部局部变量的值，编译器每次都new了一个新的匿名类实例和Action实例。
+优化方法文章中指出了，可以通过增加参数数量，使用方法参数去传递要捕获的变量，避免掉对外部变量的捕获，同时避免闭包的额外内存分配。对于该文章开头的代码，若想改成输出0~9，就有两种办法，以下给出代码截图。第二种用了优化建议，内存性能要优于第一种。
+捕获外部方法的局部变量编译器new了n个匿名类实例和Action实例
+增加参数变量编译器只new对应的Aciton实例
+总结对于以上验证，可以简单粗暴的认为：runtime直接不使用()&#x3D;&gt;{}这种匿名函数的写法，能非常有效的避免额外内存开销。
 ]]></content>
-      <tags>
-        <tag>Unity-AssetsBundle</tag>
-      </tags>
   </entry>
   <entry>
     <title>UniTask学习与使用</title>
@@ -804,564 +576,232 @@ GetAsyncOnTriggerEnterTrigger()
 ]]></content>
   </entry>
   <entry>
-    <title>Unity-AssetBundle分包策略</title>
-    <url>/posts/9b7c4e21.html</url>
-    <content><![CDATA[AssetBundle 分包策略：哪些资源应该放进同一个包前两篇《Unity-AssetBundle结构解析》和《Unity-AssetBundle加载与卸载》，分别讨论了 AB 文件内部的组织方式，以及资源加载后由谁持有、什么时候释放。
-这一篇讨论构建时的问题：哪些资源应该放进同一个包？
-一般项目会先按资源类型划分文件夹，把动画、纹理、预制体、材质、配置和字体分别存放，方便查找和日常管理：
-Assets/Res/├── Animations/├── Textures/├── Prefabs/├── Materials/├── Configs/└── Fonts/
+    <title>Unity-AssetBundle加载与卸载</title>
+    <url>/posts/38e927b7.html</url>
+    <content><![CDATA[AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。
+下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。
+一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。
+但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。
+这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一定会销毁此前加载的对象。
+二、管理目标：明确谁在使用，什么时候能释放这个场景需要解决的，不只是让内存下降，还包括保证资源在使用期间有效，以及避免下次打开界面时无意间再加载一份。
+具体可以归纳为三个目标：
 
-如果直接把每个类型文件夹打成一个包，打包规则会很简单：Animations 对应一个动画包，Textures 对应一个纹理包，Prefabs 对应一个预制体包。
-但随着项目资源增加，这些包也会越来越大。角色、战斗、场景和界面的纹理都可能进入同一个纹理包，各个玩法的预制体也可能进入同一个预制体包。文件夹按类型整理得很清楚，包内却混合了使用范围完全不同的资源。 这种直接按类型目录打包的方式，就会带来大包的问题。
-一、大、小包的问题1. 大包的问题：下载、更新和生命周期相互牵连以整个 Textures 目录打成一个包为例，原本分别用于角色、战斗、场景和界面的纹理被绑在了一起，下载、更新和整包回收也因此相互牵连。
-在常见的“下载完整文件、校验、落盘后加载”的流程里，首次进入一场战斗前，需要先准备相关包。如果当前角色的贴图位于全项目的纹理大包中，用户可能为了这一小部分资源下载整个大包，首次进入的等待就被无关内容拉长了。
-更新也存在类似问题。在以完整 Bundle 为更新单位、没有二进制差分的方案中，只要包内容发生变化，客户端通常就需要下载新版本整包。 如果经常替换的活动图片与长期稳定的场景贴图都在纹理包中，仅修改一张活动图片，就可能让玩家把场景贴图所在的大文件一起重新下载。改动小，下载量却很大。
-这里要区分“重新构建”与“产生新下载”：执行了构建，并不代表所有输出文件都变化；客户端下载哪些文件，取决于清单、文件标识和内容校验规则。依赖包变化是否进一步影响引用它的包，也要检查具体构建管线的产物，不能一概而论。
-生命周期的牵连则发生在运行时。如果常驻界面的纹理与某个关卡的独占贴图都在纹理包中，关卡退出以后，界面仍然在使用该包。采用整包引用计数和 Unload(true) 回收策略时，就无法安全地把这个包整体卸载。此前已加载、且没有被其他机制回收的关卡贴图，可能因此保留得更久。包被各处依赖，整包回收就要等到最后一个使用者退出。
-但不能把这种情况简化成“大包一打开，所有资源都进入内存，而且全部无法释放”。上一篇已经说明：
+使用期间保持有效。 界面实例、对象池或其他系统仍在引用资源时，不能提前销毁资源。
+重复进入时可复用。 同一份逻辑资源仍然存活时，应有明确的复用或释放策略。
+退出后能够验证。 能够确认引用已经解除、对象得到回收，而不只是观察进程内存有没有立刻下降。
 
-打开包与加载具体资源是两步，包内未使用的资源不一定被实例化。
-LZ4 支持按块解压；LZMA 的解压行为不同，首次加载成本还取决于加载 API 和缓存状态。
-包管理数据、已加载的 Native 资源和 GPU 数据有不同的生命周期。
-Unload(false) 可以保留已加载资源并卸载包，但后续复用和回收需要另外管理。
-
-因此，大包的主要风险是准备成本扩大，以及下载、更新和整包回收的边界过粗，并非文件体积直接等于常驻内存。
-2. 碎包的问题：固定开销被重复支付既然一个类型目录打一个包太大，那把目录里的每个资源分别打包呢？这就走向了另一个极端：每张图片、每个材质、每个动画都独立成包。
-此时，加载一个角色就需要准备多个包，一场包含多种角色、怪物和技能特效的战斗，可能需要打开几十甚至上百个包。每个包都有文件访问、读取管理数据和维护状态的成本；远端缓存未命中时，还会增加请求、校验和调度工作。大量小包也会扩大清单、依赖图和加载管理器的维护规模。
-异步加载、缓存和并发请求能够缓解等待，但不能消除这些固定开销。另一方面，包多也不代表每个包都一定触发一次物理磁盘随机读取，实际行为还受操作系统缓存、存储介质和加载实现影响。
-这些资源如果每次都一起加载，拆分就未必减少实际下载或内存占用，却实实在在增加了访问次数。大包的问题是为少量需求付出过多成本，小包的问题是为同一批需求反复支付固定开销。
-二、设计目标：控制牵连范围，也控制访问开销大包与小包的缺点正好形成矛盾：合并能减少包数量，却扩大了下载、更新和整包回收的牵连范围；拆分能缩小这些范围，却增加了访问与管理开销。 因此，分包不能只追求包少，也不能只追求包小。
-需要达到的目标可以归纳为四点：
-
-首次加载少等待。 进入一个关卡或加载一个角色时，尽量只准备当前需要的内容，避免被无关资源拖慢。
-结束使用后能释放。 尽量避免常驻资源与临时资源共包，让关卡、角色等独占资源有清晰的整包回收边界。
-小改动少下载。 高频更新的配置或活动资源发生变化时，尽量不牵连大块稳定内容。
-一次使用少开包。 总是一起使用的小资源适当合并，减少重复的文件访问、校验和加载调度开销。
-
-前面三点要求缩小包的牵连范围，第四点又要求避免拆得过碎。接下来就需要寻找合适的资源边界，让拆分与合并分别服务于这些目标。
-三、设计思路：按使用、释放和更新范围确定边界要同时满足这些目标，首先要判断资源之间的关系，而不只是比较文件大小：
-
-
-
-判断维度
-需要回答的问题
-对包边界的影响
-
-
-
-使用时机
-是否经常在同一次操作中被使用？
-经常一起使用的资源，适合先归为一组
-
-
-释放时机
-是否由相同业务持有，并在相近时机结束使用？
-生命周期相近，便于整包回收
-
-
-更新节奏
-是否通常随同一功能或活动一起变化？
-高频变化内容应与稳定内容隔离
-
-
-共享范围
-是某个功能独占，还是多个功能共同依赖？
-共享资源需要明确归属和使用者
-
-
-一个实用的起点是：同一功能内，经常一起加载、一起结束使用、一起更新的资源，优先放进同一个包。
-这几个条件可能冲突。例如，某个玩法的配置与战斗场景总是一起使用，但活动参数经常调整，场景模型和贴图却长期稳定。此时就值得为了缩小更新范围，将活动配置与场景资源分开，再用测量确认新增包的成本是否可接受。
-据此，可以形成一套基本思路：以功能和使用范围作为初始分组，按生命周期划清释放边界，按更新频率隔离变化内容，再合并其中总是一起使用的小资源。共享依赖则单独检查，防止它把已经拆开的内容重新绑成一个大包。
-四、分包方案：在类型目录下确定合理的包边界开头的类型目录可以继续保留，用于资源查找和日常管理。资源较多时，也可以在类型目录下按用途细分，例如 Textures/Characters、Textures/Levels。
-需要调整的是直接按整个类型目录打包的规则。文件夹分类不要求与 AB 包一一对应。 同一类型的资源可以分到不同包，不同类型的资源也可以因为属于同一功能而放进同一个包。具体边界再结合使用范围、更新频率和释放时机判断。
-1. 按功能分组，减少无关内容的加载与保留为了缩小首次准备的资源范围，并让独占资源能随功能退出而释放，可以先按角色、关卡、玩法等使用范围分组。
-例如，角色独占资源、关卡独占资源和基础配置可以分别归组：
-角色独占资源├── Prefabs/Characters/Knight 中的预制体与模型├── Textures/Characters/Knight 中的贴图└── Animations/Characters/Knight 中的动画关卡独占资源├── Prefabs/Levels/Forest 中的场景物件└── Textures/Levels/Forest 中的环境贴图配置资源├── Configs/Core 中的基础配置└── Configs/Activities 中的活动配置
-
-骑士专用的 Prefab、Mesh、材质、贴图和基础动画，先归入 character.knight.bundle；森林关卡独占的场景资源归入 level.forest.bundle。这些是初始分组，最终归属由打包配置表达，不必强制一个文件夹对应一个包。
-“一个角色或一个关卡先作为一组”适合用作起点，但还要考虑实际行为：
-
-角色的基础模型、专用材质和必用动画，通常适合共包。
-可选皮肤、特殊形态和很少触发的大型技能特效，可以独立，避免加载角色就必须准备全部内容。
-多个关卡共同使用的怪物和战斗特效，应另行处理共享归属。
-大场景可以按进入区域拆分，避免为了出生点附近的内容准备整个地图。
-配置可按基础系统、战斗玩法和活动划分，但若运行时始终一次读取全部配置，也没有必要仅因表多就拆成大量小包。
-
-独立界面也可以采用相同的判断方式。分组应跟随真实的使用与释放范围，而不只是资源类型或文件数量。
-2. 按更新频率拆分，避免小改动牵连大资源为了减少小改动带来的下载量，活动资源适合与稳定资源隔离，还应该避免不同活动之间互相牵连。
-例如，一个限时战斗活动可以进一步分为：
-
-
-
-包
-主要内容
-拆分依据
-
-
-
-activity.autumn.config.bundle
-关卡参数、奖励和活动规则配置
-调整频繁，适合独立更新
-
-
-activity.autumn.level.bundle
-活动场景模型和环境贴图
-内容相对稳定，进入关卡时使用
-
-
-activity.autumn.boss.bundle
-首领模型、动画和专用特效
-进入首领战时才需要
-
-
-这也不是要求每个活动固定拆成三个包。如果活动很小，所有内容都随版本一起替换，合并成一个活动包可能更合适。
-同样，活动配置与基础配置也不一定适合共包：两者虽然都是配置，更新节奏和使用范围却可能不同。如果配置输出为 AB 包内的 TextAsset 或 ScriptableObject，可以采用这样的拆分；如果使用独立配置文件，则应在对应的文件更新策略中处理。
-字体通常比活动资源稳定，适合独立管理，但新增语言、字形或修改字体图集时，它仍然可能更新。分包应依据实际变更记录，而不是假定某一类型永远不变。
-3. 检查共享依赖，避免重复与不必要的牵连只分配入口 Prefab 的包名，还不足以确定最终内容。需要继续检查它们引用的材质、纹理、字体和 Shader。
-在原生 AssetBundle 构建中，如果两个包引用同一个资源，而该资源没有明确分配到独立包，它可能作为隐式依赖被分别包含，导致重复打包。不同框架可能自动提取共享依赖，最终仍应以构建报告为准。[2]
-例如，两个关卡都会出现骑士与哥布林，而它们的材质又依赖同一份 Shader 资源，可以明确整理为：
+要做到这些，需要先分清各个 API 实际处理的是哪一部分。
+三、处理过程：把加载、使用和回收串起来1. 先确定内存在哪里以本地 AB 包为例，加载过程及各部分的关系如下：
 
     flowchart TD
-    Forest[&quot;森林关卡包&quot;] --&gt; Knight[&quot;骑士包&quot;]
-    Dungeon[&quot;地牢关卡包&quot;] --&gt; Knight
-    Forest --&gt; Goblin[&quot;哥布林包&quot;]
-    Dungeon --&gt; Goblin
-    Knight --&gt; Shader[&quot;共享 Shader 包&quot;]
-    Goblin --&gt; Shader
+    D[&quot;磁盘：AB 文件&quot;]
+    B[&quot;Native：包管理结构与读取缓冲&quot;]
+    R[&quot;Native：资源对象与所需 CPU 数据&quot;]
+    MB[&quot;Managed：AssetBundle 包装&quot;]
+    MR[&quot;Managed：Texture2D、Mesh 等包装&quot;]
+    G[&quot;GPU：纹理、顶点与索引缓冲&quot;]
+
+    D --&gt;|LoadFromFile| B
+    MB -.-&gt;|引用底层包对象| B
+    B --&gt;|LoadAsset：从文件读取所需数据| R
+    MR -.-&gt;|引用底层资源对象| R
+    R --&gt;|图形数据上传| G
   
 
-图中的箭头表示构建后确认的序列化依赖关系。如果角色由刷怪配置中的地址指定，再在运行时单独加载，它属于业务加载关系，需要另外记录，不能指望构建清单自动发现。
-共享资源提取也有代价。把一切都提取到一个 shared.bundle，可能重新形成“任何模块都依赖，退出任何模块都无法整包卸载”的大包。
-因此，共享包还要按用途和生命周期划分。例如，常用字体、基础 UI 组件、战斗共享特效，可以属于不同的共享包。不要因为都被多个地方使用，就把它们放在一起。
-可以采用这样的判断顺序：
 
-只有一个功能使用的资源，优先跟随该功能。
-多个功能使用、体积明显或对象身份需要一致的资源，优先明确共享归属。
-很小、稳定且互不同时使用的资源，可评估允许少量重复，换取更少的跨包依赖。
-允许重复必须是有记录的取舍，并核查下载体积和运行时副本，不能由隐式依赖偶然决定。
+磁盘到 Native： LoadFromFile 建立包的访问入口；LoadAsset 再读取所需资源，创建 Native 对象及数据。打开包不等于全部资源都已加载。
+Managed 是脚本访问入口： 加载接口向 C# 提供相应包装对象；图中虚线表示引用关系，像素、顶点等大块数据不必经过托管堆再上传。
+需要 GPU 使用的数据才上传： 例如纹理像素、Mesh 顶点和索引。上传可能发生在加载期间或分帧进行，并非统一等到首次渲染；CPU 副本是否保留取决于 Read&#x2F;Write 等设置。[2][3]
 
-尤其要避免让地牢关卡依赖森林关卡包，只为了取得一个共用怪物。应将怪物移到合理的共享范围，而不是把森林关卡整个变成地牢的依赖。
-依赖方向也应尽量清晰：业务包依赖共享包，共享包不反过来依赖具体业务。发现循环依赖时，要检查是否可以重新归属资源、提取共同部分，或合并本来就无法独立使用的内容。
-4. 图集先按使用范围组织，再决定包归属图集不能仅凭“都是小图标”就合并成一个全局大图集。
-图集中的 Sprite 会共享底层纹理页。加载某个 Sprite 时，通常也需要它对应的图集页，因此图集会让原本独立的小图在加载和内存占用上产生关联。一个 SpriteAtlas 也可能包含多张纹理页，不能一律理解为“一张图用了，整个 Atlas 所有页都必然加载”。
-可以先按用途组织：背包常用图标一组、商城专用图标一组、活动图片一组，少量全局基础图标单独组织。活动横幅尤其不宜混进稳定的基础 UI 图集，否则修改横幅可能导致图集纹理和相关包一起变化。
-当某个界面的图集只有它自己使用，并且更新、释放时机一致时，可以与该界面共包；被多个界面使用时，再考虑独立共享包。没有必要固定成“每个图集必有独立包”。
-SpriteAtlas 的打包模式、Include in Build 设置和构建管线会影响最终依赖与重复情况。不能只检查源目录，还要确认构建后图集纹理究竟进入了哪些包。
-5. 合并零散小资源，控制访问与管理开销为了避免包拆得过碎，可以适当合并零散小资源。但“零散”只是文件组织上的描述，不是足够的分包理由，合并仍然需要限定使用范围。
-某个关卡专用的几段机关动画、几张小贴图和几个小材质，如果总是随关卡一起使用，可以合进关卡包。同一玩法中总是一起读取、更新节奏一致的小配置，也可以合成一个配置包。多个战斗玩法共用的小特效，则可以归入战斗范围内的共享包。
-反过来，把登录提示图、战斗音效、活动图标和过场材质全部塞进 misc.bundle，只会制造新的耦合。
-合并前至少检查三件事：使用范围是否接近，更新节奏是否一致，是否会让一个长生命周期资源拖住大量短生命周期资源。
-6. 最后用体积和访问开销修正粒度完成逻辑分组后，再看实际构建产物的大小、数量和依赖关系。
-如果一个功能包明显偏大，优先寻找有业务意义的切分点：按角色、关卡区域、语言、可选高清资源或进入阶段拆分，而不是直接按固定大小机械切块。
-如果一次进入战斗、加载角色或读取配置要访问大量微小包，就优先合并其中总是一起请求、释放时机接近、更新节奏一致的部分。
-不建议将“每包固定 5 MB”之类数字当作通用标准。压缩后的文件大小影响下载，但不能直接反映资源加载后的内存；同样大小的配置、纹理和音频，也可能有完全不同的读取与使用方式。
-可以为项目设定大包和碎包的检查阈值，但阈值应触发分析，而不是自动决定结果。先解决业务边界，再用目标设备上的数据修正粒度。
-7. 把规则沉淀到构建流程当初始方案稳定后，可以让构建报告持续回答这些问题：
+清理时也要分别处理：资源卸载负责 Native 对象及相关 GPU 资源，GC 负责不可达的托管包装和业务对象。 图中表示逻辑归属，统一内存设备上的 CPU 与 GPU 可能共享物理内存。
+2. 将打开包和加载资源分开处理先看两种常见的加载方式：
+// 先将整个文件读入托管数组，再交给 Unity。byte[] data = File.ReadAllBytes(path);AssetBundle memoryBundle = AssetBundle.LoadFromMemory(data);// 让 Unity 直接从文件加载。AssetBundle fileBundle = AssetBundle.LoadFromFile(path);
 
-哪些资源被重复包含，重复了多少字节？
-哪些包有大量反向依赖，是否混入了无关功能？
-哪些入口需要准备很多包，依赖链是否过深？
-哪些高频更新资源与大块稳定内容共包？
-哪些包体积或依赖关系相比上个版本发生了异常变化？
+使用第一种方式时，byte[] 本身就会占用一份托管内存，Unity 侧还需要加载包所需的内存。加载期间，两部分占用可能同时存在。实际峰值还受压缩格式和引擎实现影响，不能简单固定为“文件大小的两倍”。
+如果包已经在本地，通常优先使用 LoadFromFile 或 LoadFromFileAsync，省去先读取整个托管数组的过程。
+前文已经解释了包的按需读取与解压机制，这里只保留一个与内存管理有关的区别：LoadFromFile 返回的是包的访问入口，LoadAsset 返回的是具体资源对象。打开包不代表包内所有资源都已加载；卸载入口，也不必然销毁已经加载的对象。[1]
+3. 确认资源对象和 GPU 数据的加载过程Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(    &quot;assets/game/textures/warrior_diffuse.png&quot;);
 
-构建环境也应保持可追踪。Unity 版本、导入设置、压缩方式或构建配置变化，都可能扩大产物变化范围。分包只能降低合理边界内的牵连，不能保证任意构建之间都只有被编辑的资源发生变化。
-五、最终落地：目录怎么细分，具体打成哪些包前面的判断可以收敛为一个默认方案：保留类型目录，在类型目录下按角色、关卡、功能和更新范围细分；将选定的子目录作为打包单元，每个单元默认一个包。总是一起使用的小目录，可以在打包配置中明确合并到同一个包。
-因此，Textures 下确实需要继续细分，但不是把所有层级的文件夹各打一个包，也不是无条件把每个最深层目录打一个包。需要明确选定打包边界：选中 Textures/Characters/Knight 作为单元后，其内部子目录默认一起归入这个单元，不再自动生成额外包；需要独立更新的内容则提前移出这个单元。
-1. 最终目录示例假设骑士的基础模型、贴图、材质和动画体积适中、总是一起使用，森林关卡的贴图较大，活动图片更新频繁，可以整理为：
-Assets/Res/├── Animations/│   └── Characters/Knight/├── Textures/│   ├── Characters/Knight/│   ├── Levels/Forest/│   ├── UI/Inventory/│   └── Activities/Autumn/Banners/├── Prefabs/│   ├── Characters/Knight/│   ├── Levels/Forest/│   ├── UI/Inventory/│   └── Battle/SharedEffects/├── Materials/│   ├── Characters/Knight/│   └── Battle/SharedEffects/├── Configs/│   ├── Core/│   ├── Battle/│   └── Activities/Autumn/└── Fonts/    ├── Common/    └── Languages/Japanese/
+调用 LoadAsset 后，Unity 会创建对应的底层资源对象，并向 C# 返回 Texture2D 包装对象。下文默认相关依赖包已经准备好，依赖解析过程沿用前文，不再展开。
+纹理和 Mesh 还涉及 GPU 数据的上传。这里容易产生一个误解：认为 LoadAsset 只准备 CPU 数据，直到第一次渲染时才上传显存。
+实际并没有这样统一的时间界限。Unity 有同步和异步上传管线，数据可能在加载过程中就上传到 GPU，也可能通过缓冲区分帧传输。具体行为取决于资源设置、加载路径及平台，不能仅凭“还没有渲染过”判断显存占用。[2]
+Mesh.UploadMeshData(true) 可以提交 Mesh 数据，并释放脚本读取所需的 CPU 数据副本；这里释放的是 Native 侧的 CPU 数据，不是 C# 包装，GPU 数据仍然保留。它主要用于明确管理 Mesh 数据，并不是加载 AB 资源时必须补上的步骤。
+Read&#x2F;Write 保留的是什么纹理开启 Read/Write Enabled 后，Unity 会保留可供 CPU 访问的像素数据，以支持 GetPixels 等操作。这份数据会增加常驻内存开销。[3]
+如果纹理只用于渲染，通常应关闭该选项；如果运行时确实需要读取或修改像素，则需要保留。UI 图集、大尺寸贴图尤其值得检查。
+关闭 Read&#x2F;Write 能减少 CPU 副本的占用，但不宜把收益一概写成“总内存减半”。纹理格式、MipMap、流送设置、平台，以及对象自身的开销都会影响最终结果。
+4. 根据使用情况选择卸载方式bundle.Unload(unloadAllLoadedObjects: true);// 或bundle.Unload(unloadAllLoadedObjects: false);
 
-Characters、Levels、Activities 等中间目录只用于分类，不直接打包。类型根目录不放待打包的散文件；新增资源必须先确定归属，再进入相应的打包单元。
-2. 目录与最终包的对应关系下表中的路径均相对于 Assets/Res/。包名用于说明归属，实际文件名可以由构建流程生成。
+两种调用都会卸载包本身，使这个 AssetBundle 无法继续用于加载资源。区别在于，是否同时销毁此前从包中加载出来的对象。[4]
+Unload(true)：包和已加载资源一起卸载Unload(true) 会释放包自身的 Native 管理数据，并销毁属于这个包的已加载资源对象，释放它们的 Native 数据；纹理、Mesh 等对象对应的 GPU 资源也会进入图形系统的释放流程，即使场景中的其他对象仍在引用它们。
+这里的销毁主要针对引擎对象，不意味着 C# 托管包装已经被回收。包装对象仍由 GC 管理；只要业务代码还持有引用，它就可能继续占用托管堆空间。GPU 资源的实际释放也可能等待渲染任务或驱动处理完成。
+例如，从包里加载 Prefab 后调用 Instantiate，场景中的实例通常还在，但它引用的共享 Mesh、材质、纹理可能已被卸载，导致模型无法正常显示。粉红色通常指向 Shader 缺失、错误或不受支持，不能直接归因于“少了一张纹理”。
+底层对象销毁后，已有的 C# 变量不会自动被重新赋值。Unity 重载了 ==，会将底层对象已经失效的包装对象判为空：[5]
+Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(assetName);bundle.Unload(true);Debug.Log(texture == null);                 // trueDebug.Log(ReferenceEquals(texture, null));  // false：托管引用仍存在
 
+这也是判断 Unity 对象时，== null 与普通 C# 引用判空可能不一致的原因。对象失效后，访问需要底层对象的成员可能报错，并不意味着每次访问都会导致程序崩溃。
+Unload(false)：卸载包，保留已加载资源Unload(false) 释放的是包自身的 Native 管理数据和相关读取资源。已加载纹理、Mesh、材质的 Native 对象与数据，以及它们对应的 GPU 资源仍然保留，可以继续使用。
+它不会直接回收 AssetBundle、Texture2D 等 C# 包装，也不会释放调用方传给 LoadFromMemory 的托管 byte[]。这些托管对象都需要在不再可达后，由 GC 回收。
+但这些资源也不再由原来的包实例管理。后续重新打开同一个包，不会自动把旧资源重新关联回来。
+5. 处理重复加载留下的副本下面这段代码就可能产生两个独立的纹理对象：
+AssetBundle bundleA = AssetBundle.LoadFromFile(path);Texture2D textureA = bundleA.LoadAsset&lt;Texture2D&gt;(assetName);bundleA.Unload(false);AssetBundle bundleB = AssetBundle.LoadFromFile(path);Texture2D textureB = bundleB.LoadAsset&lt;Texture2D&gt;(assetName);
 
+第一次卸载时，textureA 被保留下来。第二次加载时，Unity 不会因为磁盘上的资源路径相同，就自动复用这份旧对象，而是可能创建新的 textureB。[1]
+如果旧纹理仍被 UI、材质、静态字段或资源缓存引用，两份对象就会同时存在。继续反复执行这个流程，资源占用便可能逐轮增加。
+不过，重复副本不一定就是永久泄漏。能否回收，要看资源是否还有使用者，以及是否执行了合适的卸载操作：
 
-目录范围
-最终包
-本例采用的规则
-后续资源添加与调整
+对不再需要、且符合 API 限制的单个资源，可以使用 Resources.UnloadAsset。该接口不适用于 GameObject 或 Component。[6]
+清除相关引用后，可以在合适的时机调用 Resources.UnloadUnusedAssets()，清理 Unity 判断为未使用的资源。它有全局检查成本，通常安排在加载界面等能够接受开销的位置。
 
+重新加载包，再对新包调用 Unload(true)，并不能顺带销毁上一次 Unload(false) 留下的旧资源。
+6. 使用 UnloadUnusedAssets 做阶段性清理前面提到，Unload(false) 会留下已加载的资源。等使用者退出后，可以通过 Resources.UnloadUnusedAssets() 清理其中不再使用的部分。它也能处理其他加载路径留下的未使用资源，并不局限于 AB 包。
+这个接口清理的重点是未使用资源的 Native 对象及其数据，并让相应 GPU 资源进入释放流程。 它与 C# GC 是不同的回收机制：即使具体版本的执行过程中伴随托管 GC，也不能据此认为所有托管包装、数组和缓存容器都已回收。仍然可达的托管对象依然会保留。[8]
+“未使用”由谁判断这个接口不接收包名或资源列表。Unity 会检查 GameObject 层级、脚本组件及静态变量中的引用，判断哪些资源仍然可达。[7]
+从行为上，可以把这次清理理解成三个步骤：
 
+查找仍在使用的资源。 从上述引用入口出发，沿对象之间的引用关系，确定需要保留的资源。
+识别未使用资源。 将没有被这些引用关系保留的资源列入清理范围；它不是只检查刚关闭的界面或刚卸载的包。
+卸载资源。 销毁符合条件的 Native 资源对象、释放相关数据，并让对应 GPU 资源进入释放流程。
 
-Prefabs/Characters/Knight/、Textures/Characters/Knight/、Materials/Characters/Knight/、Animations/Characters/Knight/
-character.knight.bundle
-四个目录明确合并成一个角色包，专用资源随角色一起加载和释放
-骑士基础资源加入对应目录，沿用同一包；新角色建立独立目录和包，可选皮肤另设目录和包
-
-
-Prefabs/Levels/Forest/
-level.forest.prefabs.bundle
-场景物件单独一个包
-同一区域物件加入现有目录；新关卡另建目录和包；关卡过大时按区域拆分，替换原来的整体打包范围
+这是便于理解的概括，并非对引擎内部具体算法和线程分工的保证。开销不仅来自最终释放了多少资源，也来自查找、遍历引用关系以及销毁对象的过程。 即使最后只回收少量内存，也可能已经付出了明显的检查成本。
+因此，界面关闭了，不代表界面用过的纹理就能回收。隐藏的 UI、对象池中的角色、静态字典里的资源缓存，都可能继续持有引用。调用这个接口不会替你清空这些缓存。
+还有一个细节：它不会像 C# GC 那样检查脚本执行栈。 仅被普通方法局部变量引用的资源，不能据此保证保留。需要跨越清理过程继续使用的资源，应由明确的持有者保存，例如存活组件的字段；协程局部变量可能被编译成状态机字段，也不宜一概当作普通栈变量理解。[7]
+各接口到底清理哪一层内存
 
 
-Textures/Levels/Forest/
-level.forest.textures.bundle
-较大的关卡贴图目录独立成包，不与其他关卡贴图混合
-普通新增贴图沿用该包；需分区加载时，按 Entrance、BossArea 等子目录分别打包，取消原整体目录的打包范围
-
-
-Prefabs/UI/Inventory/、Textures/UI/Inventory/
-ui.inventory.bundle
-本例假设界面较小且资源独占，两个目录合并成一个界面包
-新增独占资源加入对应目录；独立界面另建包；可选高清预览等大资源单独拆出
-
-
-Textures/Activities/Autumn/Banners/
-activity.autumn.banners.bundle
-高频更新图片单独一个包，与稳定贴图隔离
-同批替换图片沿用该包；其他活动另建目录和包；需要单独轮换的大图再拆为独立单元
-
-
-Prefabs/Battle/SharedEffects/、Materials/Battle/SharedEffects/
-battle.shared.effects.bundle
-本例中体积较小、共同使用的特效与专用材质合并
-同范围的小特效继续加入；大型或仅特定玩法使用的特效另建包，避免共享包持续膨胀
-
-
-Configs/Core/
-config.core.bundle
-一组基础配置一个包，不按每张表拆包
-同加载、同更新的基础配置继续加入；高频变化或仅特定功能使用的配置移至独立目录和包
-
-
-Configs/Battle/
-config.battle.bundle
-战斗配置单独一个包
-始终一起读取的战斗表继续共包；按需读取且规模较大的玩法配置再按玩法拆分
-
-
-Configs/Activities/Autumn/
-config.activity.autumn.bundle
-当前活动配置一个包，避免牵连基础配置与其他活动
-当前活动配置沿用该包；新活动建立独立目录和包，不并入基础配置包
-
-
-Fonts/Common/
-font.common.bundle
-常用字体独立一个包，作为共享依赖
-必需的常用字体继续加入；可选语言或特定功能字体另建目录和包
-
-
-Fonts/Languages/Japanese/
-font.japanese.bundle
-可选语言字体独立一个包，按语言需求准备
-日语字体沿用该包；新增语言建立各自目录和包
-
-
-本例的配置假定为需要进入 AB 的 TextAsset 或 ScriptableObject。角色模型与 Mesh 也假定由角色目录中的源资产提供；实际项目若另设 Models 目录，应将对应目录加入角色包的归属配置。
-这些目录划分不会自动产生跨目录合包。四个骑士目录要生成同一个包，必须在构建配置中把它们明确映射到同一个 Bundle。 如果只是对每个目录分别打包，它们仍然会生成四个包。
-每份资源应有唯一的最终包归属。被角色、特效或关卡共同引用的材质、纹理和 Shader，要先识别为共享依赖，再明确其归属，不能为了凑齐目录内容而重复收进多个包。图集纹理的实际归属还要结合前文的图集规则检查。
-六、怎么判断拆分与合并是否值得分包之后，需要回答的仍然是开头的矛盾：拆小后节省的下载、更新和资源保留成本，是否值得新增的文件访问与包管理开销；合并后减少的访问次数，又是否以过多无关内容为代价。
-这些是设计预期，是否有效，需要构建对比和目标设备测量。下面的例子只说明验证方法，不代表实测成绩。
-1. 同时观察入口包及其全部依赖假设关卡入口包只有 1 MB，但它依赖一个 100 MB 的公共包。若本地缓存都未命中，且两个包都需要完整下载，那么首次进入仍需准备约 101 MB，而不是 1 MB。
-评估一个功能时，应统计“入口包与递归依赖包的去重集合”。再根据本地缓存和已经加载的包，计算本次真正新增的下载与加载成本。仅靠静态依赖清单仍不足以涵盖运行时按地址加载的可选资源，需要结合实际请求记录补充。
-2. 比较调整前后的同一组操作
-
-
-验证操作
-记录内容
-判断依据
+操作
+Native 内存
+GPU 内存
+Managed 托管内存
 
 
 
-无本地下载缓存，首次进入战斗关卡
-新增下载字节、请求数、从进入到可操作的耗时
-首次准备范围是否缩小，实际等待是否改善
+bundle.Unload(false)
+释放包自身的管理数据和读取资源；保留已加载资源的 Native 数据
+保留已加载资源的 GPU 数据
+不直接回收包装或输入数组；不再可达后由 GC 回收
 
 
-已有文件缓存，再次加载同一组角色
-打开包耗时、文件访问、资源加载和主线程峰值
-分包是否引入了过多固定开销
+bundle.Unload(true)
+释放包自身及属于它的已加载资源的 Native 数据
+对应资源进入释放流程
+不直接回收仍被持有的 C# 包装；不再可达后由 GC 回收
 
 
-基础系统仍运行，退出战斗关卡
-包持有关系、已加载资源及内存快照
-关卡独占资源是否按策略释放，常驻资源是否仍有效
+Resources.UnloadAsset(asset)
+卸载指定资源的 Native 对象和数据，受资源类型限制
+对应资源进入释放流程
+不直接回收仍被持有的包装；不再可达后由 GC 回收
 
 
-反复进入两个共享怪物的关卡
-包重载次数、资源副本、帧耗时
-是否产生卸载后立即重载的抖动
+Resources.UnloadUnusedAssets()
+清理 Unity 判断为未使用的资源的 Native 对象和数据
+被清理资源对应的 GPU 数据进入释放流程
+不能保证包装和业务对象立即回收；其托管内存仍取决于 GC 可达性及回收时机
 
 
-一次读取玩法所需的多份配置
-访问包数、总耗时和加载次数
-配置是否拆得过碎，合并是否更划算
+Object.Destroy(instance)
+按销毁规则释放指定实例及相关引擎对象；通常延迟执行，不会自动卸载共享纹理、材质等资源
+不会仅因销毁一个场景实例就释放其引用的共享资源
+C# 包装及脚本的托管部分在不再可达后由 GC 回收
 
 
-仅修改活动配置，发布下一版
-变化包列表、实际新增下载量
-更新是否主要限制在预期范围
+GC.Collect()
+不直接卸载 Unity 资源的 Native 对象
+不直接释放
+触发托管 GC，回收符合条件的不可达对象
 
 
-检查共享材质、Shader 和战斗特效
-构建重复报告、运行时资源实例
-是否避免无意重复，实际归属是否符合设计
+reference = null &#x2F; cache.Clear()
+不直接释放
+不直接释放
+解除引用；不立即回收对象，清空集合通常也保留其容量
 
 
-运行时检查应在相同目标设备、相同构建配置和可比较的缓存条件下进行，并重复采样。Unity Profiler 用于分析加载和帧耗时，Memory Profiler 用于检查资源对象、占用及持有关系。不能只看退出关卡后进程内存是否立即下降。
-如果玩家连续进入的两个关卡都会使用同一种怪物，刚退出前一关就立即释放怪物包，可能导致下一关重新加载。此时可以保留有限时间的缓存，或在更大的业务阶段结束后释放。缓存策略与包边界需要配合，不能只靠继续拆包解决。
-3. 用一次小修改验证更新边界可以保留基线版本 A，仅修改一份活动奖励配置后构建版本 B，比较两个版本的清单、文件 Hash 和下载计划。
-假设配置原来与场景资源共处在 80 MB 的包内，拆分后位于 200 KB 的配置包内；在没有差分下载、且只有这个包变化的前提下，该次更新的资源文件下载量就从 80 MB 缩小到 200 KB。这里的数字是示意，不包含清单和协议等额外开销。
-如果修改一份配置却导致多个稳定包变化，应进一步检查引用关系、资源归属以及构建环境差异。验证的重点是解释实际变化的文件，而不只是确认分包配置里写了几个名字。
-实际落地时，可以先采用这样的顺序：按功能确定独占资源，按更新节奏隔离变化内容，按依赖关系处理共享资源，再在相近的使用与释放范围内合并小资源，最后用构建和运行数据调整粒度。
-决定哪些资源放进同一个包，最终是在判断：它们是否值得一起准备、是否适合一起保留，以及一次修改是否应该让它们一起更新。把本来就一起使用的小资源合并，把使用、释放和更新范围明显不同的内容拆开，才能同时控制大包的牵连与小包的开销。
+表中的 GPU 释放指生命周期上的释放请求，不保证调用返回时驱动已归还物理显存；没有 GPU 数据的资源自然不涉及这一列。上述卸载操作也不会删除磁盘上的 AB 文件或下载缓存。
+例如，LoadFromMemory(data) 使用的 data 是托管数组。卸载包负责释放 Unity 侧的包数据；调用方不再持有 data 后，数组才具备被 GC 回收的条件。这是两笔独立的内存，不能只调用一次 Unload 就认为全部清完。
+因此，清理通常分成两个责任：先按资源生命周期释放 Native 对象及相关 GPU 资源，再解除不需要的托管持有关系，让 GC 回收包装和业务对象。解除引用可以先做，但解除引用本身不等于已经释放 Native 或 GPU 数据。
+将清理安排在场景切换的 Loading 阶段UnloadUnusedAssets() 属于开销可能较大的集中清理操作，建议安排在场景切换的 Loading 界面中执行。 它虽然返回 AsyncOperation，但不意味着所有工作都在后台执行，也不保证每帧的耗时足够小。在正常游玩、镜头运动或 UI 动画期间调用，可能让主线程超过单帧预算，造成掉帧或明显卡顿。
+推荐顺序是：先显示 Loading 界面并让它至少完成一帧显示，再卸载旧场景或销毁旧实例、清除不需要的缓存引用，等待销毁完成后执行清理，最后继续新场景的加载流程。若新旧场景共享资源，应先确定需要保留的资源由常驻持有者引用，避免刚清理完又重新加载。
+Loading 界面用于承接这段等待，并不能消除清理成本；其中的转圈动画或进度条也可能短暂停顿。不要在每次 Release、关闭小弹窗或每隔几秒时调用，实际耗时应在目标设备上通过 Profiler 确认。
+下面保留界面退出的简化示例：假设包已通过 Unload(false) 卸载，调用前 Loading 界面已经显示，且负责执行协程的组件在清理期间保持存活。
+using System.Collections;using UnityEngine;public sealed class PanelResourceOwner : MonoBehaviour&#123;    private GameObject panelInstance;    private Texture2D cachedTexture;    public IEnumerator CloseAndCleanup()    &#123;        if (panelInstance != null)            Destroy(panelInstance);        panelInstance = null;        cachedTexture = null;        // 其他缓存、材质或组件若仍引用资源，也需要先解除持有。        // Destroy 延迟执行，留出时间让实例完成销毁。        yield return null;        // 在 Loading 阶段等待集中清理完成；异步接口仍可能产生耗时峰值。        yield return Resources.UnloadUnusedAssets();    &#125;&#125;
+
+示例中的 Destroy 负责结束界面实例的 Native 生命周期，字段设为 null 负责解除托管引用，UnloadUnusedAssets() 则清理已无使用者的资源 Native 数据及相关 GPU 资源。三步处理的是不同的对象或存储部分。
+这里没有紧接着调用 GC.Collect()。是否主动触发托管 GC，需要根据项目的托管分配和卡顿情况单独判断，并不是资源清理的固定步骤。
+清理完成后，再结束 Loading 阶段、恢复正常交互。是否在每次场景切换都执行，应结合内存峰值与目标设备耗时决定，避免没有回收收益的频繁扫描。
+7. 将持有关系落实到管理器工程上常见的做法，是统一管理包及其依赖，复用已打开的包，在确认没有使用者后调用 Unload(true)。
+下面只展示包层计数的基本逻辑：
+using System;using System.Collections.Generic;using UnityEngine;public sealed class BundleRefCounter&#123;    private sealed class Entry    &#123;        public AssetBundle Bundle;        public int RefCount;    &#125;    private readonly Dictionary&lt;string, Entry&gt; entries =        new Dictionary&lt;string, Entry&gt;();    // 在 Unity 主线程调用。bundleId 由调用方统一，避免路径别名。    public AssetBundle Acquire(string bundleId, string path)    &#123;        if (entries.TryGetValue(bundleId, out Entry entry))        &#123;            entry.RefCount++;            return entry.Bundle;        &#125;        AssetBundle bundle = AssetBundle.LoadFromFile(path);        if (bundle == null)            throw new InvalidOperationException($&quot;加载 AB 包失败：&#123;path&#125;&quot;);        entries.Add(bundleId, new Entry        &#123;            Bundle = bundle,            RefCount = 1        &#125;);        return bundle;    &#125;    public void Release(string bundleId)    &#123;        if (!entries.TryGetValue(bundleId, out Entry entry))            throw new InvalidOperationException($&quot;未持有 AB 包：&#123;bundleId&#125;&quot;);        entry.RefCount--;        if (entry.RefCount &gt; 0)            return;        entry.Bundle.Unload(true);        entries.Remove(bundleId);    &#125;&#125;
+
+这段代码本身并不知道场景里还有谁在使用纹理。计数是否可靠，取决于调用方是否遵守约定：一次 Acquire 所代表的持有期，必须覆盖相关资源的整个使用期。
+例如，加载 Prefab 并生成角色后，不能因为“加载结束了”就立即 Release。角色实例、对象池或缓存仍可能引用包里的共享资源，必须等这些使用者都退出后再归还持有权。调用 Destroy 的对象也可能要到帧末才真正销毁，释放顺序需要考虑这一点。
+实际管理器还需要处理几个问题：
+
+依赖包的持有关系。 依赖链沿用前文的加载流程；这里还需要让每个使用者持有相应依赖，直到使用结束，防止共享材质、Shader 或纹理被提前卸载。
+异步请求合并。 多个请求同时加载同一个包时，应共享进行中的任务；加载失败或取消时，要正确回滚计数。
+资源缓存与包状态一致。 缓存中的资源不能在所属包已经 Unload(true) 后继续被当作有效对象返回。
+
+引用计数不是唯一方案。生命周期边界清晰的项目，也可以在关卡退出后统一卸载该关卡独占的包。无论采用哪种方式，最终都需要能回答同一个问题：这个包里的资源，现在还有谁在用？
+四、结果验证：确认副本不再累积，使用中的资源仍有效管理策略调整后，需要验证的是资源生命周期是否符合预期，而不只是某一帧的进程内存数值。
+对于角色预览界面，可以在目标设备的 Player 中，记录打开前、打开后、关闭清理后的 Memory Profiler 快照，再重复若干次相同操作。
+
+
+
+验证场景
+应观察到的结果
+
+
+
+同时存在多个使用者
+释放其中一个后，其余对象仍能正常显示，共享资源保持有效
+
+
+最后一个使用者退出
+确认销毁完成、缓存清除后，相关资源能够按策略卸载
+
+
+反复打开和关闭界面
+同名纹理、Mesh、材质的实例数不持续逐轮增加；允许策略明确的缓存保留
+
+
+执行 UnloadUnusedAssets()
+未使用资源得到清理，仍被有效使用者持有的资源保留
+
+
+主包释放、其他对象仍使用依赖包
+共享依赖保持有效，直到最后一个持有者退出
+
+
+这里列出的是验证标准，并非项目实测数据。具体节省多少内存、清理耗时多长，需要结合资源规模、Unity 版本与目标设备测量。
+验证时也应分开看 Native 资源数量与占用、Managed 包装及业务容器的占用，以及图形内存。Native 资源已释放但包装仍被静态集合引用，和包装已经回收但共享资源仍在使用，是两种不同情况。
+如果资源实例数仍然上涨，优先检查重复加载与旧缓存；如果资源无法回收，检查对象池、静态字段和存活组件的引用。如果对象数量已经恢复，而进程内存没有立即下降，再分析 Unity 分配器保留内存、尚未回收的托管包装，以及 GPU 侧延迟释放等因素。
+回到最初的预览界面：打开包、加载 Prefab、创建角色、销毁角色、卸载资源，是需要衔接的几个步骤。明确每一步的持有者和结束条件，才能同时避免提前卸载与重复副本。Unload(true)、Unload(false) 和 UnloadUnusedAssets() 也就各自有了明确的使用位置。
 参考资料
 前文：Unity-AssetBundle结构解析
-前文：Unity-AssetBundle加载与卸载
 
-以下为 Unity 2022.3 官方文档。具体构建结果还需结合使用的构建管线、资源框架和平台检查。
+以下链接以 Unity 2022.3 文档为主。不同版本和平台的底层实现可能有所变化，具体占用与耗时应以目标设备实测为准。
 
-AssetBundle dependencies
-AssetBundle troubleshooting
-AssetBundle compression
 Using AssetBundles Natively
-Sprite Atlas
+
+Loading texture and mesh data
+
+Texture.isReadable
+
+AssetBundle.Unload
+
+UnityEngine.Object.operator &#x3D;&#x3D;
+
+Resources.UnloadAsset
+
+Resources.UnloadUnusedAssets
+
+Managed memory：GC 与 Native 资源回收的区别
+
 
 ]]></content>
       <tags>
         <tag>Unity-AssetsBundle</tag>
       </tags>
-  </entry>
-  <entry>
-    <title>UniTask 0GC实现原理</title>
-    <url>/posts/6045236e.html</url>
-    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
-Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
-UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
-
-用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
-
-下面从源码角度拆开看。
-1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
-await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
-
-前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
-例如：
-await someUniTask;
-
-编译器大致会按下面的模式展开：
-var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
-
-而：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
-所以 UniTask 的优化也分成两部分：
-
-实现并优化 await UniTask 的 awaiter 语法糖。
-实现并优化 async UniTask 的 builder 语法糖。
-
-2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
-public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
-
-GetAwaiter() 返回的 Awaiter 是结构体：
-public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
-
-它提供 awaiter pattern 需要的成员：
-public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
-
-这些成员分别对应 await 的几个阶段：
-GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
-
-因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
-也就是说，下面这句：
-await UniTask.Yield();
-
-在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
-UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
-3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
-第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
-第二，Awaiter 内部只保存一个 UniTask 值：
-readonly UniTask task;
-
-第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
-task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
-
-第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
-internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
-
-这样可以避免每次 await 都创建一个新的包装委托。
-第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
-所以 await UniTask 的低分配来自几个点叠加：
-UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
-
-4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
-
-UniTask&lt;T&gt; 也是结构体：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
-
-这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
-如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
-如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
-也就是说：
-同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
-
-这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
-5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
-[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
-
-它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
-例如：
-async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
-
-编译器大致会生成类似这样的状态机代码：
-var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
-
-遇到 await 时：
-builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
-
-方法正常完成：
-builder.SetResult();
-
-方法抛异常：
-builder.SetException(exception);
-
-注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
-6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
-public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
-
-它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
-它真正做的是：
-
-作为编译器 async 语法的入口。
-启动状态机。
-在第一次异步挂起时，创建或复用一个 runner。
-把 runner 的 MoveNext 注册给 awaiter。
-在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
-通过 Task 属性把最终的 UniTask 返回给调用方。
-
-关键代码在 AwaitUnsafeOnCompleted：
-public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
-
-这里有两个重点：
-第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
-第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
-7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
-internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
-
-它的职责非常集中：
-
-保存编译器生成的状态机副本。
-提供 MoveNext 给 awaiter 作为 continuation。
-实现 IUniTaskSource，让外部 UniTask 可以 await 它。
-保存完成、异常、取消状态。
-完成后清空并回收到对象池。
-
-第一次挂起时，builder 调用：
-AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
-
-内部会先从池里取：
-if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
-
-这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
-awaiter 完成后，会调用：
-runnerPromise.MoveNext
-
-实际进入：
-void Run()&#123;    stateMachine.MoveNext();&#125;
-
-这就恢复了 async 方法后续逻辑。
-8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
-AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
-public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
-
-调用方拿到的 UniTask 内部指向这个 runner：
-UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
-
-core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
-
-当前状态。
-continuation。
-异常或取消信息。
-version token。
-
-正常完成时：
-public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
-
-异常时：
-public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
-
-调用方 await 完成后会进入：
-public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
-
-TryReturn() 会清理状态并回池：
-core.Reset();stateMachine = default;pool.TryPush(this);
-
-这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
-9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
-典型结构是：
-static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
-
-使用时：
-pool.TryPop(out var result)pool.TryPush(this)
-
-因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
-这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
-10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
-await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
-
-UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
-PlayerLoopHelper.AddAction(timing, result);
-
-YieldPromise 本身也是可池化的：
-sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
-
-在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
-public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
-
-完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
-所以在类似 UI 填充动画这样的循环中：
-while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
-
-预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
-11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
-AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
-
-因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
-async UniTaskVoid 使用的是：
-AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
-
-UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
-简单说：
-UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
-
-12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
-
-第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
-CancellationTokenSource、CreateLinkedTokenSource 会分配。
-取消时可能创建 OperationCanceledException。
-异常路径会捕获异常信息。
-闭包、lambda 捕获、LINQ、装箱仍然会分配。
-Debug.Log、字符串拼接、Unity 日志系统可能分配。
-Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
-
-因此更严谨的说法是：
-
-UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
-
-13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
-
-总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
-
-UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
-[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
-AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
-AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
-UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
-TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
-PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
-awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
-
-最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
-]]></content>
   </entry>
   <entry>
     <title>Unity-YooAssets打包流程：Builtin管线</title>
@@ -1798,165 +1238,582 @@ Runtime/FileSystem/DefaultBuildinFileSystem/CatalogTools.cs
       </tags>
   </entry>
   <entry>
-    <title>Unity-AssetBundle结构解析</title>
-    <url>/posts/d5e3da58.html</url>
-    <content><![CDATA[Unity AssetBundle 结构解析笔记
-基于 AssetStudio 逆向源码（BundleFile.cs &#x2F; SerializedFile.cs）与 YooAssets 源码整理。Unity 未公开官方格式文档，本文以逆向工程实现为准（Unity 2022.3 为 UnityFS 主流版本）。
+    <title>UniTask 0GC实现原理</title>
+    <url>/posts/6045236e.html</url>
+    <content><![CDATA[UniTask 为什么能做到低 GC：从 async 状态机到 PlayerLoop 的实现原理在 Unity 里写异步逻辑，最常见的方案有三种：Coroutine、Task、UniTask。
+Coroutine 写起来简单，但 IEnumerator、yield return、各种等待对象容易带来分配。标准 Task 更适合通用 .NET 异步模型，但它的线程池、同步上下文、Task 对象模型并不是为 Unity 主线程每帧调度设计的。
+UniTask 的目标不是让所有代码“绝对 0GC”，而是让高频异步路径，尤其是每帧等待、Unity PlayerLoop 等场景，尽量避免持续分配。它的核心思路可以概括为：
 
-0. 概述
-.assetbundle 文件是 Unity 的私有格式，YooAssets &#x2F; Addressables 等框架都只是调用 BuildPipeline.BuildAssetBundles 产出后在外层做 hash &#x2F; 加密 &#x2F; 清单，不改变文件内部结构。
-完整的资源体系是三层结构：外层是一个自定义压缩归档（UnityFS），里面躺着若干个 Unity 序列化文件（SerializedFile，即资产真正存放的地方）；bundle 之上还有一层独立文件 manifest（清单），记录所有 bundle 的组织关系。
+用值类型表示 Task，用自定义 async method builder 接管编译器状态机，用可池化的 source&#x2F;runner 承载挂起状态，用 Unity PlayerLoop 驱动 continuation。
+
+下面从源码角度拆开看。
+1. 先看 async&#x2F;await 的两套语法糖分析 UniTask 的 0GC 之前，最好先把 C# 的 async/await 语法糖拆开。这里其实有两套互相配合的编译器约定：
+await someValue    依赖 awaiter pattern:    GetAwaiter / IsCompleted / GetResult / OnCompletedasync SomeTaskLike SomeMethod()    依赖 async method builder pattern:    [AsyncMethodBuilder] / Create / Start / Task / SetResult / SetException / AwaitUnsafeOnCompleted
+
+前者决定“一个对象能不能被 await”。后者决定“一个方法能不能写成 async 并返回某种 task-like 类型”。
+例如：
+await someUniTask;
+
+编译器大致会按下面的模式展开：
+var awaiter = someUniTask.GetAwaiter();if (!awaiter.IsCompleted)&#123;    // 保存当前状态机状态    // 把状态机 MoveNext 注册给 awaiter    builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);    return;&#125;awaiter.GetResult();
+
+而：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器会根据 UniTask 上的 [AsyncMethodBuilder] 找到 AsyncUniTaskMethodBuilder，然后生成状态机，并在状态机里调用 builder 的 Start、AwaitUnsafeOnCompleted、SetResult、SetException 和 Task。
+所以 UniTask 的优化也分成两部分：
+
+实现并优化 await UniTask 的 awaiter 语法糖。
+实现并优化 async UniTask 的 builder 语法糖。
+
+2. UniTask 如何实现 await 语法糖await someUniTask 能成立，是因为 UniTask 提供了 GetAwaiter()：
+public Awaiter GetAwaiter()&#123;    return new Awaiter(this);&#125;
+
+GetAwaiter() 返回的 Awaiter 是结构体：
+public readonly struct Awaiter : ICriticalNotifyCompletion&#123;    readonly UniTask task;&#125;
+
+它提供 awaiter pattern 需要的成员：
+public bool IsCompleted &#123; get; &#125;public void GetResult()public void OnCompleted(Action continuation)public void UnsafeOnCompleted(Action continuation)
+
+这些成员分别对应 await 的几个阶段：
+GetAwaiter()    获取 awaiterIsCompleted    判断是否已经完成；如果完成，可以同步继续执行OnCompleted / UnsafeOnCompleted    未完成时注册 continuationGetResult()    await 完成后取结果；如果有异常，也在这里抛出
+
+因为 Awaiter 实现了 ICriticalNotifyCompletion，编译器会优先使用 builder 的 AwaitUnsafeOnCompleted，而不是 AwaitOnCompleted。
+也就是说，下面这句：
+await UniTask.Yield();
+
+在未完成时，最终会走到 AsyncUniTaskMethodBuilder.AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里的 runnerPromise.MoveNext 就是恢复 async 状态机的 continuation。
+UnsafeOnCompleted 内部不会创建标准 Task，而是把 continuation 注册给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+这让 UniTask 可以用自己的 source、自己的 completion core、自己的 PlayerLoop 调度控制 continuation。
+3. UniTask 如何优化 await 路径理解了 await 语法糖后，再看 UniTask 为什么低分配就更清楚了。
+第一，GetAwaiter() 返回的是结构体 Awaiter，不是堆对象。
+第二，Awaiter 内部只保存一个 UniTask 值：
+readonly UniTask task;
+
+第三，OnCompleted &#x2F; UnsafeOnCompleted 不创建标准 Task，而是把 continuation 转交给 IUniTaskSource：
+task.source.OnCompleted(    AwaiterActions.InvokeContinuationDelegate,    continuation,    task.token);
+
+第四，AwaiterActions.InvokeContinuationDelegate 是静态缓存的委托：
+internal static readonly Action&lt;object&gt; InvokeContinuationDelegate = Continuation;
+
+这样可以避免每次 await 都创建一个新的包装委托。
+第五，真正承载异步状态的 source&#x2F;runner 通常是池化对象。例如 async 方法挂起时使用 AsyncUniTask&lt;TStateMachine&gt;，每帧等待时使用 YieldPromise。
+所以 await UniTask 的低分配来自几个点叠加：
+UniTask 是结构体Awaiter 是结构体continuation 走 IUniTaskSource静态委托减少包装分配source/runner 池化复用
+
+4. UniTask 本身是值类型UniTask 定义在 UniTask/Runtime/UniTask.cs：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))][StructLayout(LayoutKind.Auto)]public readonly partial struct UniTask&#123;    readonly IUniTaskSource source;    readonly short token;&#125;
+
+UniTask&lt;T&gt; 也是结构体：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder&lt;&gt;))][StructLayout(LayoutKind.Auto)]public readonly struct UniTask&lt;T&gt;&#123;    readonly IUniTaskSource&lt;T&gt; source;    readonly T result;    readonly short token;&#125;
+
+这和 Task 最大的区别是：UniTask 本身不是堆对象。它只是一个很小的值类型句柄。
+如果任务已经同步完成，UniTask&lt;T&gt; 可以直接把结果存在 result 字段里，不需要创建额外的 promise&#x2F;source 对象。
+如果任务异步挂起，UniTask 才通过 source + token 指向一个真正保存异步状态的对象。
+也就是说：
+同步完成:UniTask&lt;T&gt; 直接保存 result异步挂起:UniTask&lt;T&gt; 保存 IUniTaskSource&lt;T&gt; + token
+
+这一步解决的是“返回一个异步结果时，不必天然创建 Task 对象”。
+5. AsyncMethodBuilder 让 UniTask 接入 C# async 语法UniTask 上的这个特性很关键：
+[AsyncMethodBuilder(typeof(AsyncUniTaskMethodBuilder))]
+
+它告诉 C# 编译器：当方法返回 async UniTask 时，不要使用默认的 AsyncTaskMethodBuilder，而要使用 UniTask 自己的 AsyncUniTaskMethodBuilder。
+例如：
+async UniTask FooAsync()&#123;    await UniTask.Yield();&#125;
+
+编译器大致会生成类似这样的状态机代码：
+var builder = AsyncUniTaskMethodBuilder.Create();builder.Start(ref stateMachine);return builder.Task;
+
+遇到 await 时：
+builder.AwaitUnsafeOnCompleted(ref awaiter, ref stateMachine);
+
+方法正常完成：
+builder.SetResult();
+
+方法抛异常：
+builder.SetException(exception);
+
+注意，Create、Start、Task、SetResult、SetException、AwaitUnsafeOnCompleted 这些方法并没有额外标记。它们是 C# async method builder pattern 的约定方法。编译器通过固定名称和签名识别它们。
+6. AsyncUniTaskMethodBuilder 的职责AsyncUniTaskMethodBuilder 定义在 AsyncUniTaskMethodBuilder.cs：
+public struct AsyncUniTaskMethodBuilder&#123;    IStateMachineRunnerPromise runnerPromise;    Exception ex;&#125;
+
+它本身也是结构体。它的职责不是“生成状态机”。状态机是编译器生成的。
+它真正做的是：
+
+作为编译器 async 语法的入口。
+启动状态机。
+在第一次异步挂起时，创建或复用一个 runner。
+把 runner 的 MoveNext 注册给 awaiter。
+在 async 方法完成或异常时，把结果写入 runner&#x2F;promise。
+通过 Task 属性把最终的 UniTask 返回给调用方。
+
+关键代码在 AwaitUnsafeOnCompleted：
+public void AwaitUnsafeOnCompleted&lt;TAwaiter, TStateMachine&gt;(    ref TAwaiter awaiter,    ref TStateMachine stateMachine)    where TAwaiter : ICriticalNotifyCompletion    where TStateMachine : IAsyncStateMachine&#123;    if (runnerPromise == null)    &#123;        AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);    &#125;    awaiter.UnsafeOnCompleted(runnerPromise.MoveNext);&#125;
+
+这里有两个重点：
+第一，只有当真的遇到未完成的 await，需要挂起时，才会创建或复用 AsyncUniTask&lt;TStateMachine&gt;。
+第二，awaiter 完成后要调用的 continuation，就是 runnerPromise.MoveNext，也就是继续执行编译器生成的 async 状态机。
+7. AsyncUniTask 是可池化的状态机运行容器AsyncUniTask&lt;TStateMachine&gt; 定义在 StateMachineRunner.cs：
+internal sealed class AsyncUniTask&lt;TStateMachine&gt; :    IStateMachineRunnerPromise,    IUniTaskSource,    ITaskPoolNode&lt;AsyncUniTask&lt;TStateMachine&gt;&gt;    where TStateMachine : IAsyncStateMachine&#123;    static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;    public Action MoveNext &#123; get; &#125;    TStateMachine stateMachine;    UniTaskCompletionSourceCore&lt;AsyncUnit&gt; core;&#125;
+
+它的职责非常集中：
+
+保存编译器生成的状态机副本。
+提供 MoveNext 给 awaiter 作为 continuation。
+实现 IUniTaskSource，让外部 UniTask 可以 await 它。
+保存完成、异常、取消状态。
+完成后清空并回收到对象池。
+
+第一次挂起时，builder 调用：
+AsyncUniTask&lt;TStateMachine&gt;.SetStateMachine(ref stateMachine, ref runnerPromise);
+
+内部会先从池里取：
+if (!pool.TryPop(out var result))&#123;    result = new AsyncUniTask&lt;TStateMachine&gt;();&#125;runnerPromiseFieldRef = result;result.stateMachine = stateMachine;
+
+这里池化的是 AsyncUniTask&lt;TStateMachine&gt; 这个 runner 对象，不是状态机本身。状态机是编译器生成的 struct，runner 保存的是它的一份拷贝。
+awaiter 完成后，会调用：
+runnerPromise.MoveNext
+
+实际进入：
+void Run()&#123;    stateMachine.MoveNext();&#125;
+
+这就恢复了 async 方法后续逻辑。
+8. IUniTaskSource 是 UniTask 的真正结果源UniTask 只是一个值类型句柄，真正的异步状态保存在 IUniTaskSource 里。
+AsyncUniTask&lt;TStateMachine&gt; 实现了 IUniTaskSource：
+public UniTask Task&#123;    get    &#123;        return new UniTask(this, core.Version);    &#125;&#125;
+
+调用方拿到的 UniTask 内部指向这个 runner：
+UniTask  source -&gt; AsyncUniTask&lt;TStateMachine&gt;  token  -&gt; core.Version
+
+core 是 UniTaskCompletionSourceCore&lt;AsyncUnit&gt;，它负责保存：
+
+当前状态。
+continuation。
+异常或取消信息。
+version token。
+
+正常完成时：
+public void SetResult()&#123;    core.TrySetResult(AsyncUnit.Default);&#125;
+
+异常时：
+public void SetException(Exception exception)&#123;    core.TrySetException(exception);&#125;
+
+调用方 await 完成后会进入：
+public void GetResult(short token)&#123;    try    &#123;        core.GetResult(token);    &#125;    finally    &#123;        TryReturn();    &#125;&#125;
+
+TryReturn() 会清理状态并回池：
+core.Reset();stateMachine = default;pool.TryPush(this);
+
+这就是 UniTask 降低 GC 的核心之一：异步状态承载对象可以复用。
+9. TaskPool 用链表池复用 runner&#x2F;sourceUniTask 的很多内部 promise&#x2F;source 都实现了 ITaskPoolNode&lt;T&gt;，然后通过 TaskPool&lt;T&gt; 复用。
+典型结构是：
+static TaskPool&lt;AsyncUniTask&lt;TStateMachine&gt;&gt; pool;AsyncUniTask&lt;TStateMachine&gt; nextNode;public ref AsyncUniTask&lt;TStateMachine&gt; NextNode =&gt; ref nextNode;
+
+使用时：
+pool.TryPop(out var result)pool.TryPush(this)
+
+因此第一次运行可能会分配对象，但后续同类型 async 状态机再次挂起时，就可以复用池里的 runner。
+这也是为什么说 UniTask 更准确的描述是“低 GC”或“稳定运行阶段 0GC”，而不是所有场景绝对 0GC。
+10. PlayerLoop 替代 Coroutine 调度以常见的每帧等待为例：
+await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+
+UniTask 不需要 IEnumerator 和 yield return null。它会创建或复用一个 YieldPromise，然后把它加入 Unity PlayerLoop：
+PlayerLoopHelper.AddAction(timing, result);
+
+YieldPromise 本身也是可池化的：
+sealed class YieldPromise :    IUniTaskSource,    IPlayerLoopItem,    ITaskPoolNode&lt;YieldPromise&gt;
+
+在 PlayerLoop 某个阶段，runner 会调用它的 MoveNext()：
+public bool MoveNext()&#123;    if (cancellationToken.IsCancellationRequested)    &#123;        core.TrySetCanceled(cancellationToken);        return false;    &#125;    core.TrySetResult(null);    return false;&#125;
+
+完成后，await continuation 恢复 async 状态机，YieldPromise 自己也会 reset 并回到池里。
+所以在类似 UI 填充动画这样的循环中：
+while (elapsed &lt; duration)&#123;    await UniTask.Yield(PlayerLoopTiming.Update, ct);    elapsed += Time.deltaTime;&#125;
+
+预热之后，每帧等待可以复用 YieldPromise，状态机 runner 也可以复用，从而避免每帧稳定产生 GC。
+11. UniTaskVoid 和 UniTask 的差别async UniTask 使用的是：
+AsyncUniTaskMethodBuilderIStateMachineRunnerPromiseAsyncUniTask&lt;TStateMachine&gt;
+
+因为它需要返回一个可被 await 的 UniTask，所以 runner 必须同时是 promise&#x2F;source。
+async UniTaskVoid 使用的是：
+AsyncUniTaskVoidMethodBuilderIStateMachineRunnerAsyncUniTaskVoid&lt;TStateMachine&gt;
+
+UniTaskVoid 是 fire-and-forget，不需要给调用方返回可 await 的结果，因此只需要保存状态机、提供 MoveNext、结束后回池即可。
+简单说：
+UniTask:需要 IUniTaskSource，调用方可以 awaitUniTaskVoid:不返回结果，主要用于 fire-and-forget
+
+12. 哪些地方仍然可能产生 GCUniTask 不是魔法。以下场景仍然可能分配：
+
+第一次使用某种 runner&#x2F;source，池里没有对象，需要 new。
+CancellationTokenSource、CreateLinkedTokenSource 会分配。
+取消时可能创建 OperationCanceledException。
+异常路径会捕获异常信息。
+闭包、lambda 捕获、LINQ、装箱仍然会分配。
+Debug.Log、字符串拼接、Unity 日志系统可能分配。
+Preserve、SuppressCancellationThrow 等包装操作在某些 pending 场景可能创建包装 source。
+
+因此更严谨的说法是：
+
+UniTask 通过值类型 task、池化 promise&#x2F;runner、PlayerLoop 调度和不捕获上下文，避免高频异步路径持续分配；在预热后的稳定路径上可以做到接近或达到 0GC。
+
+13. 整体流程图async UniTask FooAsync()    |    | 编译器看到 [AsyncMethodBuilder]    vAsyncUniTaskMethodBuilder    |    | Start(ref stateMachine)    v编译器生成的状态机 MoveNext()    |    | 遇到未完成 await    vAwaitUnsafeOnCompleted(...)    |    | 从 TaskPool 取或 new    vAsyncUniTask&lt;TStateMachine&gt;    |    | 保存 stateMachine 副本    | 暴露 MoveNext    | 实现 IUniTaskSource    v返回 UniTask(source=this, token=core.Version)    |    | awaiter 完成    vrunnerPromise.MoveNext()    |    | async 方法继续执行    vSetResult / SetException    |    | 调用方 GetResult    vcore.Reset()stateMachine = defaultrunner 回到 TaskPool
+
+总结UniTask 实现低 GC 的关键不是某一个技巧，而是一整套配合：
+
+UniTask &#x2F; UniTask&lt;T&gt; 是结构体，避免默认 Task 对象。
+[AsyncMethodBuilder] 让 async UniTask 使用自定义 builder。
+AsyncUniTaskMethodBuilder 在第一次挂起时才创建或复用 runner。
+AsyncUniTask&lt;TStateMachine&gt; 保存编译器状态机副本，并实现 IUniTaskSource。
+UniTaskCompletionSourceCore&lt;T&gt; 保存状态、结果、异常和 continuation。
+TaskPool&lt;T&gt; 复用 runner、promise、yield source 等对象。
+PlayerLoopHelper 把异步等待接入 Unity PlayerLoop，避免 Coroutine 等待对象。
+awaiter 和 builder 尽量不捕获上下文，减少 continuation 注册成本。
+
+最终效果是：UniTask 把标准 async&#x2F;await 的语法保留下来，但绕开了标准 Task 的大量通用运行时成本，并把 Unity 高频异步等待改造成了值类型句柄 + 池化 source + PlayerLoop 调度的模型。
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity-YooAssets运行时加载与卸载</title>
+    <url>/posts/b5aa1459.html</url>
+    <content><![CDATA[YooAssets 运行时加载与卸载：从构建产物到资源生命周期上一篇《YooAssets 打包流程：Builtin 管线》介绍了 Collector 的资源如何经过依赖分析，最终生成 AssetBundle、资源清单和版本文件。
+现在，把这些文件放进安装包或上传到资源服务器。业务代码只传入一个 &quot;Knight&quot;，YooAssets 就能返回骑士预制体。但这中间还有几个问题：
+
+运行时怎样使用打包生成的文件，找到资源及其依赖？
+AssetHandle、Provider、Loader 三层分别做什么，为什么需要拆成三层？
+调用 Release 后发生了什么，什么时候才会真正卸载资源？
+
+继续沿用上一篇的例子：骑士和法师分别放在两个 Bundle 中，共用一个包含材质和贴图的依赖包。两个界面同时需要骑士，另一个系统需要法师。加载时要复用资源，关闭一个界面时，又不能破坏其他使用者。
+本文先建立 Package 的运行环境，再沿着这次资源请求，从清单查询一直追踪到最后一次卸载。
+
+本文依据项目使用的 YooAsset 2.3.19 源码，讨论常规 AssetBundle 的异步加载与默认卸载机制。公开句柄类型名为 AssetHandle；本文所说的 Loader 层，在该版本中主要由 LoadBundleFileOperation 实现。示例用于说明调用关系和引用计数，未执行对应运行时实验。
+
+一、加载之前，先初始化 PackagePackage 对应 Collector 配置与构建时选择的资源包，名称需要保持一致。下面以 DefaultPackage、版本 1.0.0 为例，按顺序说明每一步使用的文件；文件名采用默认的空清单前缀，若配置了 PackageManifestPrefix，版本、校验和清单文件名还会带上该前缀。
+
+初始化全局环境：调用 YooAssets.Initialize()，建立异步操作调度与更新驱动。这一步不读取 Package 的构建产物。
+创建 Package：调用 YooAssets.CreatePackage(&quot;DefaultPackage&quot;)，在内存中创建并注册资源包；此时不读取版本、清单或 AB，后续业务复用该对象。
+配置运行模式：离线使用 OfflinePlayModeParameters 和内置文件系统；联机使用 HostPlayModeParameters，通常组合内置与缓存文件系统，并提供远端地址服务。这一步只是准备参数，还没有读取资源文件。编辑器模拟模式则使用 EditorSimulateModeParameters，本文后续以真实 AB 加载为主。
+初始化 Package：调用 package.InitializeAsync(parameters)，建立资源管理器与文件系统。默认内置文件系统读取安装包中的 BuildinCatalog.bytes，得到内置 Bundle 的文件目录；缓存文件系统扫描、校验已有的本地缓存文件。若额外开启复制内置清单配置，还会读取内置 .version，并按该版本复制 .hash 和 .bytes 到指定目录。
+确定资源版本：调用 RequestPackageVersionAsync()，读取 DefaultPackage.version 中的版本字符串，例如 1.0.0。离线模式读取内置版本文件，常见联机配置从远端请求该文件；若业务直接指定版本，可跳过本次版本文件读取。
+启用资源清单：调用 UpdatePackageManifestAsync(&quot;1.0.0&quot;)，取得 DefaultPackage_1.0.0.hash 与 DefaultPackage_1.0.0.bytes，用前者校验后者，再反序列化并激活清单。离线模式读取内置文件；常见联机配置使用缓存，缺失时从远端下载。
+下载与加载资源：按清单需要预下载或按需获取实际的 AssetBundle 文件，再由 LoadAssetAsync 打开主包和依赖包、加载其中的 Unity 对象。AB 的实际文件名由清单记录，取决于构建时的命名方式。
+
+Package 初始化成功表示运行环境已经建立，启用清单后才具备资源查询能力。 每个异步步骤都应检查状态，成功后再继续。使用 package.LoadAssetAsync 可直接指定 Package；使用 YooAssets.LoadAssetAsync 等静态快捷接口时，还需通过 YooAssets.SetDefaultPackage(package) 指定默认 Package。
+二、从资源地址找到 Bundle1. 清单连接地址、资源路径和 Bundle清单启用后，LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;) 会通过 PackageManifest 将业务地址解析为资源路径，再查出主 Bundle 和依赖 Bundle。
+在这个例子中，可以把清单的查询结果简化为：
+业务地址：Knight    → 资源路径：Assets/Game/Characters/Knight.prefab    → 主 Bundle：characters_knight.bundle    → 依赖 Bundle：shared_materials.bundle
+
+PackageManifest 中的 AssetList 描述可寻址资源，BundleList 描述 Bundle 文件。普通单资源加载通过资源记录中的 BundleID 找到主包，通过 DependBundleIDs 找到依赖包；Bundle 记录再提供文件标识、大小、CRC 等信息。
+运行时不再重新遍历 Collector，也不再调用编辑器 API 分析预制体依赖。构建阶段已经把收集与依赖分析的结果固化进清单，运行时按清单执行。
+这也解释了前面两篇之间的连接：Collector 决定收集什么，构建流程确定包归属，运行时消费这些结果。
+2. 文件系统决定去哪里拿 Bundle确定 Bundle 后，还需要回答“这个文件在哪里”。这部分由运行模式配置的文件系统处理。
 
 
-1. 整体布局先建立全局图景，再逐层展开（第 2、3、4 节）：
-┌───────────────────────────────────────────────┐│ .assetbundle 文件（容器层，UnityFS 归档格式）   ││                                               ││  ┌─────────────────────────────────────────┐  ││  │ Header（明文，~几十字节）                │  ││  │   签名 / 版本 / 大小 / flags             │  ││  ├─────────────────────────────────────────┤  ││  │ BlocksInfo（目录块，被压缩）             │  ││  │   ① 存储块表 StorageBlock[]             │  ││  │   ② 条目表     Node[]                   │  ││  ├─────────────────────────────────────────┤  ││  │ Storage Blocks（数据区，逐块压缩）       │  ││  │   解压后按条目表切出：                   │  ││  │   · CAB-xxxx    → SerializedFile        │  ││  │   · CAB-xx.resS → 大资源原始字节流      │  ││  │     （贴图、网格、音频数据）             │  ││  └─────────────────────────────────────────┘  │└───────────────────────────────────────────────┘                    │ 解压、按目录切分                    ▼┌───────────────────────────────────────────────┐│ CAB-xxxx（内容层，SerializedFile）             ││  ├─ 文件头（版本 / 平台 / 偏移）               ││  ├─ ① 类型表   m_Types[]（classID + TypeTree）││  ├─ ② 对象表   m_Objects[]（pathID + 偏移）   ││  ├─ ③ 外部引用 m_Externals[]（跨文件依赖）     ││  └─ 数据区（按 TypeTree 序列化的资产字节）      │└───────────────────────────────────────────────┘                    ▲ 之上还压着一层总目录                    │┌───────────────────────────────────────────────┐│ 清单层（独立文件，Unity 原生）                 ││  .manifest 文本（每 bundle 一份）              ││  AssetBundleManifest 对象（总清单：依赖闭包）   │└───────────────────────────────────────────────┘
 
-一句话总览：
-
-容器层回答”这个压缩包里有哪些虚拟文件、怎么解压”
-内容层回答”这个文件里有哪些资产对象、是什么类型、依赖谁”
-清单层回答”整个世界有哪些 bundle、互相什么关系、hash 几何”
-
-
-2. 容器层详情：UnityFS 归档格式2.1 文件头（明文，逐字段）signature                : string   // &quot;UnityFS&quot;（老格式另有 UnityWeb / UnityRaw / UnityArchive）version                  : uint     // 归档格式版本号（v &gt;= 7 会做 16 字节对齐）unityVersion             : string   // 如 &quot;2022.3.20f1&quot;unityRevision            : string   // 引擎修订号size                     : long     // 整个 bundle 文件大小compressedBlocksInfoSize : uint     // 目录块（压缩后）大小uncompressedBlocksInfoSize: uint    // 目录块（解压后）大小flags                    : uint     // 位标志，见下
-
-flags 位含义：
+常见模式
+文件来源
 
 
 
-位
-含义
+编辑器模拟模式
+通过编辑器文件系统访问资源，不能替代真实 AB 加载验证
+
+
+离线模式
+使用随安装包携带的内置资源
+
+
+联机模式
+组合内置文件系统与缓存文件系统，必要时从服务器下载
+
+
+在常见联机配置中，PlayModeImpl 按文件系统顺序判断 Bundle 的归属。内置文件系统通常通过 Catalog 判断是否包含该 Bundle；其余交由缓存文件系统处理。
+缓存文件系统发现文件已经存在时，直接使用缓存。文件缺失时，默认可以按需下载；若配置禁止按需下载，则加载会失败，需要提前完成下载。
+对于常规未加密磁盘 AB，文件准备好后，底层会调用 AssetBundle.LoadFromFileAsync 打开它。加密文件则经过配置的解密服务处理。
+到这一步拿到的是可读取的 AssetBundle，里面的骑士预制体还没有完成加载。
+三、为什么要分成 Handle、Provider、Loader 三层假设两个界面同时请求骑士：
+AssetHandle firstHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);AssetHandle secondHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);
+
+这两次调用应该分别记录使用者的持有关系，同时复用底层的资源加载。如果把“谁在使用”“加载哪个对象”“打开哪个文件”混在一起，复用和释放就很难协调。
+YooAssets 用三层分别管理它们：
 
 
 
-低 6 位
-BlocksInfo 的压缩类型：None&#x3D;0 &#x2F; Lzma &#x2F; Lz4 &#x2F; Lz4HC
-
-
-0x80
-BlocksInfo 在文件末尾
-
-
-0x200
-BlockInfo 需要起始对齐
-
-
-2.2 BlocksInfo（目录块）本身按头部 flags 压缩，解压后是两张表：
-// ① 存储块表：数据区怎么切、怎么压StorageBlock &#123;    uint   uncompressedSize;    uint   compressedSize;    ushort flags;      // 低6位 = 压缩类型；0x40 = Streamed（流式大资源）&#125;// ② 条目表：解压后数据流中&quot;虚拟文件&quot;的目录Node &#123;    long   offset;     // 在解压后数据流中的偏移    long   size;    uint   flags;    string path;       // 如 &quot;CAB-8f3a...&quot;、&quot;CAB-xxxx.resS&quot;&#125;
-
-2.3 解压流程（AssetStudio 实现）
-按头部 flags 解压 BlocksInfo（None &#x2F; LZMA &#x2F; LZ4 三分支；LZ4 解压后校验字节数）
-按 StorageBlock 表逐块解压数据区，拼进统一 blocksStream（超过 2GB 落盘临时文件）
-按 Node 目录从 blocksStream 切出各 SerializedFile 和 .resS
-
-2.4 压缩方式与加载行为（LZMA vs LZ4）数据段存放的是 Assets 序列化后的原始字节，选哪种压缩方式直接决定了运行时的加载行为：
-LZMA —— 整体压缩
-
-对序列化后的完整字节数组作为一个整体压缩，压得最紧（体积最小）
-代价是失去随机访问能力：算法依赖前后文，要读其中任何一小段都得从头解压整个流
-适合”下载完就用完”的场景，即远程资源包的传输形态
-
-LZ4 &#x2F; LZ4HC —— 分块压缩
-
-数据区切成多个 StorageBlock 逐块独立压缩，块之间无依赖
-LoadFromFile() &#x2F; LoadFromStream() 时只把 Header（含 BlocksInfo 目录）读入内存建立索引，数据段继续留在磁盘上
-LoadAsset() 时才发生真正的磁盘读取：按目录定位资源所在的块，只把对应的块解压加载进内存，其余块不动
-这就是懒加载 &#x2F; 懒解压的物理基础，首包和本地缓存用它（加载快）
-
-选型口诀：下载选 LZMA（省流量），加载选 LZ4（省时间）。两者不冲突——把远程 LZMA 包下载后转存为 LZ4 缓存，一次付解压成本，之后每次加载都快。
-
-3. 内容层详情：SerializedFile（CAB-xxxx）3.1 文件头m_MetadataSize   : uint    // 元数据段大小（大文件版本升级为 long）m_FileSize       : uintm_Version        : uint    // SerializedFileFormatVersion，后续所有字段按它分支m_DataOffset     : uint    // 数据区起始；Object 的 byteStart 都要加上它m_Endianess      : byte    // + 3 字节保留// —— 元数据段开头 ——unityVersion     : string  // 引擎版本字符串，决定大量字段取舍m_TargetPlatform : int     // 目标平台m_EnableTypeTree : bool
-
-3.2 三张核心表// ① 类型表：这个文件里出现过哪些类型SerializedType &#123;    int    classID;            // 类型编号：28=Texture2D, 43=Mesh, 1=GameObject ...    bool   m_IsStrippedType;    byte[] m_ScriptID;         // 16 字节    byte[] m_OldTypeHash;      // 16 字节    TypeTree typeTree;         // 字段布局描述（未剥离时存在）&#125;// ② 对象表：资产本体清单ObjectInfo &#123;    long m_PathID;             // 文件内唯一 ID（外部引用靠它定位）    long byteStart;            // + m_DataOffset 后的绝对偏移    uint byteSize;    int  typeID;               // 新格式 = m_Types 的下标；老格式 = classID 本身&#125;// → typeID 查 m_Types 拿 SerializedType（含 TypeTree），//   按 TypeTree 从 byteStart 反序列化出对象// ③ 外部引用表：依赖的物理载体FileIdentifier &#123;    Guid   guid;    int    type;    string pathName;           // 指向其它 CAB / &quot;archive:/xxx.resS&quot;&#125;
-
-另有 m_ScriptTypes（脚本类型，localSerializedFileIndex + localIdentifierInFile）和 m_RefTypes（引用类型，新版本）。
-3.3 跨文件依赖机制（bundle 依赖的物理来源）
-Material 引用另一个 bundle 的 Texture 时，序列化里存的是 (externals 表下标, pathID) 二元组，不是路径。
-解析引用 &#x3D; 按 pathName 找到对应 SerializedFile → 按其 Objects 表的 pathID 找到对象。
-因此运行时必须先把被引用的 bundle 全部加载，引用才解析得通——Unity 运行时加载器和 AssetStudio 的 ObjectsDic 做的是同一件事。
-打包工具（YooAssets 依赖 Task &#x2F; Unity BuildPipeline）算出的依赖图，最终就是落成这张 externals 表。
-
-
-4. 清单层：Unity 原生 AssetBundleManifest4.1 构建产物的完整目录形态BuildPipeline.BuildAssetBundles 的输出目录里，除了 bundle 本体，还多出两类清单文件：
-OutputDir/（假设目录名叫 &quot;AssetBundles&quot;） ├─ ui_main.bundle                 ← bundle 本体 ├─ ui_main.bundle.manifest        ← ① 每个 bundle 一份同名文本清单（YAML，人可读） ├─ tex_shared.bundle ├─ tex_shared.bundle.manifest ├─ AssetBundles                   ← ② 一个特殊的 bundle（名字 = 输出目录名） │                                    里面只装一个 AssetBundleManifest 对象（总清单） └─ AssetBundles.manifest          ←    总清单的可读文本形态
-
-4.2 每个 bundle 的 .manifest 文本记录”这个 bundle 是什么、装了什么、是否变了”（字段以 2022 版格式为例，各版本略有出入）：
-ManifestFileVersion: 0CRC: 3053085495              # 校验码：下载完整性校验（传给 UnityWebRequestAssetBundle）Hash:  serializedVersion: 2  Hash: 442f1a3b...          # AssetFileHash：内容指纹，增量更新的比对依据TypeTreeHash:  serializedVersion: 2  Hash: 3b8b2c11...          # TypeTree 变化也会导致兼容性变化Assets:                      # 这个 bundle 里装了哪些资产- Assets/UI/mat_main.matDependencies: []             # 单包清单不记 bundle 间依赖，依赖在总清单里
-
-4.3 总清单 AssetBundleManifest 对象AssetBundles 这个特殊 bundle 里只有一个对象：AssetBundleManifest，内容就是全部 bundle 的依赖表（其 .manifest 文本可直接读）：
-ManifestFileVersion: 0AssetBundleManifest:  AssetBundleInfos:  - Info_0:      Name: ui_main.bundle      Dependencies:              # 闭包：直接 + 间接依赖已拍平        Dependencies_0: tex_shared.bundle        Dependencies_1: shader_common.bundle  - Info_1:      Name: tex_shared.bundle      Dependencies: &#123;&#125;
-
-4.4 运行时怎么用（原生三步流程里清单的角色）// ① 加载总清单var manifestBundle = AssetBundle.LoadFromFile(&quot;OutputDir/AssetBundles&quot;);var manifest = manifestBundle.LoadAsset&lt;AssetBundleManifest&gt;(&quot;AssetBundleManifest&quot;);// ② 查依赖 → 决定&quot;备哪些 bundle&quot;（这就是三步流程的第一步）string[] deps = manifest.GetAllDependencies(&quot;ui_main.bundle&quot;);// ③ 辅助查询manifest.GetAllAssetBundles();               // 全部 bundle 名manifest.GetAssetBundleHash(&quot;ui_main.bundle&quot;); // 内容 hash（配合缓存判断要不要重下）// CRC 在各 bundle 的 .manifest 文本里 → 传给 UnityWebRequestAssetBundle.GetAssetBundle(url, hash, crc)
-
-4.5 框架清单与原生清单的关系原生清单是给原生 API 直载用的；YooAssets 等热更框架构建自己的清单文件（如 PackageManifest：增加地址寻址、tags、每 bundle 的 FileHash&#x2F;FileCRC&#x2F;size&#x2F;加密标记，按版本组织文件，配合 ActiveManifest 原子切换），原生清单在这条路上不再出场。但两者扮演的角色相同——清单管导航（决定备谁&#x2F;下谁），bundle 内的 externals 管粘合（解析对象引用）。
-
-5. 一个最小 bundle 的字节级示例
-字段值为构造的合理示意值（非真实 dump），真实文件用十六进制查看器对照即可。场景：YooAssets 用 PackExplicit 打出一个只含 1 个 Material 的 bundle，该 Material 的贴图分两种情况——在本包内 &#x2F; 在另一个 bundle 里。
-
-5.1 容器层（.assetbundle 文件本体）Offset   内容                                       含义------  ------------------------------------------  ------------------------------0x00    55 6E 69 74 79 46 53 00                    &quot;UnityFS\0&quot; 签名0x08    07 00 00 00                                version = 7（构建会 16 字节对齐）0x0C    &quot;2022.3.20f1\0&quot;                            unityVersion0x18    &quot;5.2.2f1\0&quot;                                unityRevision0x20    00 40 03 00 00 00 00 00                    size = 0x34000（整包约 208KB）0x28    84 02 00 00                                compressedBlocksInfoSize = 6440x2C    00 0A 00 00                                uncompressedBlocksInfoSize = 25600x30    43 00 00 00                                flags = 0x43（低6位=3 → Lz4HC）0x34    ……（644 字节，LZ4 压缩）……                  BlocksInfo（压缩态）0x2CC   ……（数据块，逐块 LZ4 压缩）……               Storage Blocks        解压拼流后按条目表切出：        · CAB-1a2b3c4d      （SerializedFile）        · CAB-1a2b3c4d.resS （贴图原始字节，流式）
-
-5.2 BlocksInfo 解压后的两张表存储块表（2 块）：  [0] uncompressedSize=0x2A000  compressedSize=0x21800  flags=3(Lz4HC)  [1] uncompressedSize=0x1800   compressedSize=0x1500   flags=3(Lz4HC)条目表（2 个虚拟文件）：  [0] offset=0x00000  size=0x2000   path=&quot;CAB-1a2b3c4d&quot;  [1] offset=0x02000  size=0x29800  path=&quot;CAB-1a2b3c4d.resS&quot;
-
-5.3 CAB-1a2b3c4d（SerializedFile）内部文件头：  m_MetadataSize / m_FileSize / m_Version / m_DataOffset  unityVersion=&quot;2022.3.20f1&quot;   m_TargetPlatform=(Android)   m_EnableTypeTree=1m_Types（2 种类型）：  [0] classID=21 (Material)  [1] classID=28 (Texture2D)m_Objects（2 个资产）：  pathID=1 → typeID=0(Material)   byteStart=0x1000  byteSize=0x400  pathID=2 → typeID=1(Texture2D)  byteStart=0x1400  byteSize=0x100m_Externals（外部引用）：  [0] pathName=&quot;archive:/CAB-1a2b3c4d.resS&quot;     ← 本包内的流式数据文件
-
-Material 的序列化数据里的引用怎么写（这就是第 3.3 节的落地）：
-情况 A：贴图也在本包（上面的 Texture2D, pathID=2）  m_TexEnvs[0].m_Texture = &#123; m_FileID = 0,        m_PathID = 2 &#125;                            └ 0 = 本文件，直接按对象表找情况 B：贴图在另一个 bundle（bundle_b 的 CAB-5e6f7a8b）  m_Externals[0] 的 pathName 改为指向 &quot;CAB-5e6f7a8b&quot;  m_TexEnvs[0].m_Texture = &#123; m_FileID = 1,        m_PathID = 7 &#125;                            └ 1 = externals[0]，即 bundle_b 里的 pathID=7
-
-情况 B 就是”必须先加载依赖 bundle”的全部真相：加载这个 Material 时，运行时读到 m_FileID=1 → 查 externals[0] → 发现指向 bundle_b 的 CAB →bundle_b 没加载就解析不了 → 于是先加载 bundle_b。YooAssets 构建时依赖 Task 扫到的”bundle_a 依赖 bundle_b”，来源就是这里；而加载前决定”要备上 bundle_b”的依据，则是总清单（AssetBundleManifest）里 bundle_a 的 Dependencies 列表——导航与粘合的分工（第 4 节）。
-
-6. 结构决定行为：机制背后的因果理解了上面三层结构后，很多”行业常识”其实是结构直接推导出的必然结果：
-① 为什么加载资源前必须先加载整条依赖链？因为引用的存储形态是 (externals 表下标, pathID)——它指向”另一个已在内存中的 SerializedFile 的某个对象”。引用解析发生在加载期，被引用的 bundle 不在内存，这个二元组就无从解析，加载直接失败。”备哪些 bundle”由清单的闭包列表导航（4.3 节），”接上引用”由 externals 粘合。
-② 为什么 bundle 是最小热更单位，做不到文件级热更？因为资源不是独立文件，是嵌在 SerializedFile 里的 Object（有偏移、有序）。改一个资源 → 它所在 Object 变 → 整个 SerializedFile 的字节布局变 → 整个 bundle 重写 → hash 必变。清单里的 Hash（原生 manifest 的 AssetFileHash）正是客户端比对增量更新的依据。
-③ 为什么 bundle 切太碎会导致资源冗余？因为 externals 引用要求”被引用的文件同时可用”。跨 bundle、跨 Package 引用一个资源，意味着两边必须同时加载、生命周期绑定。为了避免这种绑定，打包工具会把共享资源拷贝一份打进每个引用方 bundle——拷贝就是冗余（磁盘翻倍、内存翻倍、Unity 视为两个不同的 asset 实例）。
-④ 为什么加载单个资源不用解压整个 bundle？因为数据区是块级压缩 + 偏移索引：条目 → offset → 只解它落在的那几个 StorageBlock。这是远程包用 LZMA（小）下载、本地缓存转 LZ4（快）能成立的结构基础。
-⑤ 为什么 Unload(true) 会”连坐”销毁整个 bundle 的资源？因为 Object 的内存对象与所在 SerializedFile 的生命周期绑定，Unity 不做单 Object 级回收——文件卸了，从它反序列化出来的资产就失去来源。这也是”bundle 划分要按生命周期一致性”的底层原因：混在一个 bundle 里的资源，要么一起活着，要么一起消失。
-⑥ 为什么 GUID &#x2F; TypeTree 不可省？
-
-FileIdentifier 里的 GUID 是资产间引用的稳定标识（路径会变、GUID 不变），重命名资源不断引用靠它。
-TypeTree 是”字段布局说明书”：没有它，同一份二进制在新版本 Unity 里无法解析。打包时剥离 TypeTree 换体积，运行时靠引擎内置的类型布局兜底——这也是 bundle 与 Unity 版本强绑定的原因之一。
-
-⑦ 为什么热更要”先更新清单再下载”？因为客户端需要先知道”世界长什么样”（新清单）才能对比出”我缺哪些 bundle”（本地清单 vs 远端清单的 Hash 差集）。清单不动、bundle 白下——原子切换清单（框架层）或统一版本目录（原生层）都保证了对比期间旧世界照常可玩。
-
-7. 完整读包流程打开 .assetbundle → 验签名 &quot;UnityFS&quot;，读头部 → 解压 BlocksInfo → 得到块表 + 条目目录 → 逐块解压数据区 → 按 Node 切出 CAB-xxxx / .resS → 每个 CAB 读出头 + 三张表（Types / Objects / Externals） → 看某个资产：查对象表 → typeID 找类型 → 按 TypeTree 反序列化 byteStart 处数据 → 遇到外部引用 → 顺藤摸瓜到另一个文件的 pathID
-
-
-8. 加密 bundle 的观察方法框架的加密几乎都是对标准 UnityFS 做包装（因为 Unity 加载器最终要能读，算法必须加载时可逆）：
-
-头部插入偏移字节：文件头塞一段随机长度垃圾字节，加载时跳过（YooAssets offset 加密即此思路）
-头部若干字节 XOR&#x2F;变换：破坏签名识别
-全文件流式变换（少见，加载慢）
-
-观察步骤：找到解密实现 → 用同样算法逆处理 → 得到标准 UnityFS → 丢进 AssetStudio &#x2F; UnityPy 查看；或直接构建一个不加密的包用于研究。
-
-9. 与 YooAssets 概念的对应
-
-
-概念
-说明
+层次
+管理的对象
+核心职责
 
 
 
-.manifest 文本 &#x2F; AssetBundleManifest 对象
-Unity 原生清单层（第 4 节）；YooAssets 用自己的 PackageManifest 承担同一角色
+AssetHandle
+一次加载调用的持有关系
+向业务提供状态、结果与释放入口
 
 
-bundle &#x3D; 最小热更单位
-改一个资源 → Object 变 → SerializedFile 变 → 整包重写，hash 必变
+Provider
+一项资源加载操作
+等待主包和依赖包，加载具体 Unity 对象，复用加载结果
 
 
-切太细导致冗余
-资源不在本 bundle 就只能 externals 跨文件引用；要避免跨包引用就得拷贝进每个引用方
+Loader
+一个 Bundle 的加载与持有状态
+通过文件系统打开 Bundle，为多个 Provider 复用
 
 
-AssetBundle.Unload(true) 连坐
-Object 的内存对象与所在 SerializedFile 生命周期绑定，Unity 不做单 Object 级回收
+1. Handle：每次调用都有自己的持有关系每次 LoadAssetAsync 都会创建一个新的 AssetHandle。业务通过它等待完成、获取 AssetObject，并在不再使用时调用 Release()。
+即使两个 Handle 指向同一个 Provider，它们仍然是两份独立的持有关系。释放第一个，不会直接释放第二个仍在使用的结果。
+但普通 C# 变量赋值不产生新的持有关系：
+AssetHandle anotherHandle = firstHandle;
+
+这里两个变量指向同一个 Handle，引用计数不会增加。若两个模块需要独立释放，应分别发起加载请求，并各自保存自己的 Handle。
+2. Provider：复用一次资源加载ResourceManager 维护 ProviderDic。对于普通 LoadAssetAsync，会根据加载方式和 AssetInfo 的内部标识查找 Provider；找到可复用的 Provider 后，给它创建新的 Handle。
+该内部标识由资源路径和请求类型等信息组成，不能直接理解为资源 .meta 中的 GUID。因此，本文讨论的复用前提是：同一个 Package 中，以相同加载方式和类型请求同一个资源。 场景、子资源、整包资源加载有各自的处理方式。
+普通资源由 AssetProvider 负责。它需要完成两件事：先等主 Bundle 和依赖 Bundle 都准备好，再从主 Bundle 中加载目标对象。
+重复请求可以共享正在进行的加载，也可以共享已经完成的结果。
+3. Loader：复用 Bundle 文件ResourceManager 还维护 LoaderDic，以 BundleName 查找 Loader。
+骑士与法师是两个不同资源，需要不同 Provider，但它们依赖同一个材质包。这个共享包只需要一个 Loader，由两个 Provider 共同持有。
+同样，同一个 Bundle 内的两个不同预制体可以拥有不同 Provider，同时共享主包 Loader。资源复用和 Bundle 复用发生在不同层，不能只用“同一个资源有没有加载过”来判断。
+四、一次 LoadAssetAsync 怎样到达 Unity把前面的索引查询与三层结构连起来，一次普通资源加载可以分成五步。
+1. 用地址查到 AssetInfoResourcePackage.LoadAssetAsync&lt;T&gt; 先将 location 转换为 AssetInfo，得到真实资源路径、请求类型以及清单中的资源记录。
+2. 获取或创建 Provider，并返回 HandleResourceManager 查找对应 Provider。若需要新建，Provider 会取得主包和依赖包的 Loader，并分别增加它们的引用计数。
+无论复用还是新建 Provider，本次调用都会拿到自己的 Handle，并使 Provider 的引用计数加一。
+3. Loader 准备主包和依赖包Provider 启动相关 Loader，等待加载结果。Loader 通过文件系统获取文件并打开 Bundle，产出 BundleResult。
+共享 Loader 让多个 Provider 等待同一个包的加载结果，不需要各自重复下载或打开。
+4. Provider 从主包加载 Unity 对象主包和依赖包全部成功后，AssetProvider 调用主包结果的 LoadAssetAsync。对于 AssetBundle，最终落到 Unity API：
+assetBundle.LoadAssetAsync(assetInfo.AssetPath, assetInfo.AssetType);
+
+这里传给 Unity 的是解析后的资源路径和类型。业务传入的 &quot;Knight&quot; 已经在前面完成了映射。
+依赖包提前准备好，是为了让 Unity 加载预制体时能够解析材质、贴图等跨包引用。
+5. 通过 Handle 交付结果Provider 保存加载结果并结束操作，Handle 随之表现为完成。业务仍需检查 Status：完成也可能意味着加载失败。
+
+    graph TD
+    A[业务调用 LoadAssetAsync] --&gt; B[清单解析地址与资源路径]
+    B --&gt; C[获取或创建 Provider]
+    C --&gt; D[创建并返回本次 Handle]
+    C --&gt; E[主包 Loader]
+    C --&gt; F[依赖包 Loader]
+    E --&gt; G[文件系统准备文件并打开 Bundle]
+    F --&gt; G
+    G --&gt; H[Provider 等待全部 Bundle 成功]
+    H --&gt; I[主包调用 Unity LoadAssetAsync]
+    I --&gt; J[Provider 保存 Unity 对象]
+    J --&gt; K[Handle 提供状态和结果]
+  
+
+至此，拿到的是骑士预制体资源。若要在场景里显示骑士，还需要实例化；资源加载完成与实例创建是两个阶段。
+五、共享资源时，引用计数究竟记在哪里现在让两个界面分别加载骑士，再让另一个系统加载法师。全部加载完成后，关系如下：
+
+    graph TD
+    H1[界面 A 的 Knight Handle] --&gt; P1[Knight Provider]
+    H2[界面 B 的 Knight Handle] --&gt; P1
+    H3[Mage Handle] --&gt; P2[Mage Provider]
+    P1 --&gt; L1[Knight Loader]
+    P1 --&gt; LS[Shared Loader]
+    P2 --&gt; L2[Mage Loader]
+    P2 --&gt; LS
+  
+
+这里存在两种引用计数：
 
 
-10. 参考实现（事实上的格式文档）
-AssetStudio（C#）：BundleFile.cs &#x2F; SerializedFile.cs，github.com&#x2F;Perfare&#x2F;AssetStudio
-UnityPy（Python）：结构清晰，适合快速对照
-AssetRipper（C#）：覆盖 Unity 版本最全，细节最严谨
-YooAssets（C#）：PackageManifest.cs &#x2F; ResourcePackage.cs，框架清单与原生清单对照的活样本，github.com&#x2F;tuyoogameYooAsset
+
+对象
+引用计数
+计数来源
+
+
+
+Knight Provider
+2
+两个 Knight Handle
+
+
+Mage Provider
+1
+一个 Mage Handle
+
+
+Knight Loader
+1
+Knight Provider
+
+
+Mage Loader
+1
+Mage Provider
+
+
+Shared Loader
+2
+Knight Provider 与 Mage Provider
+
+
+Handle 增加 Provider 的引用；新建的 Provider 增加相关 Loader 的引用。 第二个骑士 Handle 复用了已有 Provider，因此不会再给骑士包和共享包各增加一次 Loader 引用。
+这就是三层结构的价值：业务持有者可以有很多个，实际资源加载和文件加载仍然按各自粒度复用。
+六、Release 为什么不等于立即卸载1. Release 先结束当前调用者的持有关系AssetHandle.Release() 沿用 HandleBase 的实现，主要做三件事：
+
+从 Provider 移除当前 Handle，并减少 Provider 引用计数。
+当 Provider 引用计数归零时，尝试触发配置允许的自动卸载。
+断开 Handle 与 Provider 的关系，使当前 Handle 失效。
+
+它首先表达的是“这个调用者不再需要资源”。它不直接等价于销毁实例，也不直接等价于卸载 Bundle。
+当前版本初始化参数中的 AutoUnloadBundleWhenUnused 默认是 false。默认配置下，即使最后一个 Handle 已经释放，Provider 和 Loader 仍可能保留，等待后续清理。
+因此，常见做法是在界面、关卡或资源批次的生命周期结束时释放各自 Handle，再在适当时机调用：
+yield return package.UnloadUnusedAssetsAsync();
+
+如果开启自动卸载，最后一个 Handle 释放时会尝试清理相关 Bundle；能否卸载仍然取决于加载状态和其他引用。
+2. 清理先销毁 Provider，再处理 LoaderUnloadUnusedAssetsOperation 每轮清理按以下顺序进行：
+扫描 Loader，尝试销毁其管理的无用 Provider    → Provider 销毁时，减少主包和依赖包的 Loader 引用    → 收集满足销毁条件的 Loader    → 卸载 Bundle，并移除 Loader
+
+Provider 必须已经不处于加载阶段，并且没有 Handle 引用，才能正常销毁。销毁时，它才会归还自己对主包、依赖包 Loader 的持有。
+这意味着：Provider 引用归零，与 Loader 引用减少之间，还隔着 Provider 的清理。 不能在每次 Handle 释放后，直接把同一次操作理解为“Bundle 引用也减一”。
+3. Loader 归零后，还要检查依赖顺序Loader 的正常销毁也有条件：没有正在进行的文件加载、引用计数归零，并满足包之间的依赖卸载约束。
+清单初始化时会根据 Bundle 依赖建立反向引用关系。默认实现检查依赖当前包的其他 Bundle 是否已经销毁，以避免先卸掉仍被其他包依赖的包。
+例如骑士包依赖共享材质包，需要先处理骑士包，再处理共享包。深层依赖可能需要多轮扫描，UnloadUnusedAssetsAsync 默认执行 10 轮。
+这个参数是扫描次数，不是“无论资源何时加载完，都等待到全部释放”的保证。循环依赖也可能阻碍正常卸载，需要从分包关系上排查。
+4. 用骑士与法师验证释放结果假设上述资源均已加载完成，每个阶段释放后都执行一次无用资源清理：
+
+
+
+操作
+Provider 的变化
+Bundle 的变化
+
+
+
+界面 A 释放骑士 Handle
+Knight Provider 从 2 变为 1
+骑士包和共享包继续保留
+
+
+界面 B 释放骑士 Handle
+Knight Provider 归零，清理时销毁
+骑士包可卸载；共享包仍由 Mage Provider 持有
+
+
+法师系统释放 Handle
+Mage Provider 归零，清理时销毁
+法师包可卸载，共享包在依赖条件满足后也可卸载
+
+
+如果只执行 Release，没有执行清理，也没有开启自动卸载，就不能预期表格中的 Bundle 立即卸载。
+另外，加载中释放 Handle 不等于取消加载。特别是共享 Provider 时，其他调用者仍可能需要结果。加载尚未结束的 Provider 会暂时保留，之后需要有清理机会；一次过早的清理完成，不代表这些资源以后会自动消失。
+七、实例还活着时，为什么不能提前释放 Handle在《AssetBundle 加载与卸载》中，我们区分过 AssetBundle.Unload(false) 与 AssetBundle.Unload(true)。
+本版本普通 AssetBundle 的卸载最终由 AssetBundleResult.UnloadBundleFile 调用 AssetBundle.Unload(true)。这会卸载从包中加载的资源对象。
+因此，不能只根据“预制体已经实例化”就释放它的 Handle。实例仍可能引用包里的材质和贴图；这些资源卸载后，场景里的实例会出现引用失效。
+1. 实例化不会自动增加 Handle 引用无论使用 Object.Instantiate，还是 AssetHandle.InstantiateSync()，都不能理解为“新实例自动持有了一份 Handle”。实例创建本身没有建立这样的引用关系。
+反方向也一样：Destroy(instance) 不会自动替业务释放加载 Handle。
+需要让 Handle 的持有时间覆盖实例实际使用资源的时间。最简单的关系是：一个拥有者负责加载、保存 Handle、创建实例，并在实例结束使用后释放 Handle。
+2. 一个最小的生命周期示例下面是协程中的加载片段。假设 Package 已初始化、清单已启用，&quot;Knight&quot; 是有效加载地址：
+// 为本次使用保留独立的加载句柄。AssetHandle knightHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);yield return knightHandle;// 等待结束不代表加载成功，失败也需要归还句柄。if (knightHandle.Status != EOperationStatus.Succeed)&#123;    Debug.LogError(knightHandle.LastError);    knightHandle.Release();    yield break;&#125;// 使用期间由同一拥有者保存实例与句柄。GameObject knightInstance = knightHandle.InstantiateSync();
+
+到界面关闭或角色真正离场时，同一拥有者再执行以下结束使用片段。这里的变量代表之前保存的实例与 Handle：
+// Destroy 延迟生效，先让实例完成销毁。UnityEngine.Object.Destroy(knightInstance);yield return null;// 归还本次使用权，再在合适的清理节点卸载无用资源。knightHandle.Release();yield return package.UnloadUnusedAssetsAsync();
+
+这两个片段展示的是生命周期边界，不是要求每销毁一个实例就扫描整个 Package。实际项目可以在界面批次关闭、关卡退出等节点统一清理，也要为加载失败、业务取消和拥有者提前销毁保留释放路径。
+如果使用对象池，SetActive(false) 只是停用实例，实例仍可能持有材质与贴图。池中仍保留对象时，应继续保留相应资源持有关系，直到池被真正清空。
+同样，把 AssetObject 保存到普通字段，不会替代 Handle 的引用计数；把 Handle 变量设为 null，也不能代替显式 Release()。
+八、区分四种容易混淆的“清理”
+
+
+操作
+实际作用
+
+
+
+Destroy(instance)
+销毁业务创建的 Unity 实例
+
+
+handle.Release()
+结束本次加载调用的持有关系
+
+
+package.UnloadUnusedAssetsAsync()
+清理满足条件的 Provider、Loader，并卸载对应 Bundle
+
+
+清理下载缓存
+删除磁盘上的缓存文件，需要使用相应缓存管理流程
+
+
+Bundle 从内存卸载后，下载缓存通常仍在磁盘上，下一次加载可以继续使用。Unity 的 Resources.UnloadUnusedAssets 和 C# GC 也属于不同层次，不能替代 YooAssets 的 Handle 释放。
+另外还有两个使用边界：
+
+场景使用场景自己的卸载入口。 SceneHandle.UnloadAsync() 负责场景卸载流程，不能仅以普通 Release() 替代场景卸载。
+UnloadAllAssetsAsync 用于整体清理。 它会强制销毁资源管理对象，使仍被业务保存的 Handle 失效。应在停止相关加载与使用后，用于整个 Package 的退出或重置，不能当成关闭普通界面的常规手段。
+
+九、回到开头的三个问题运行时如何使用构建产物？
+版本文件决定使用哪一版清单，清单将加载地址映射到资源路径、主包与依赖包，文件系统再根据内置目录、缓存和远端配置取得 Bundle。Collector 的工作已经在构建阶段完成。
+为什么分成三层？
+Handle 记录调用者的持有关系，Provider 复用具体资源的加载，Loader 复用 Bundle 文件的加载。同一资源的多个使用者可以共享 Provider，不同资源也可以共享 Loader。
+什么时候真正卸载？
+Release 先归还调用者的使用权；Provider 无人使用且加载结束后，清理流程释放其 Loader 引用；Loader 再满足引用与依赖约束，才真正卸载 Bundle。业务应让 Handle 的生命周期覆盖所有实际使用该资源的实例。
+从第四篇的资源分类、第五篇的构建，到这里的运行时加载，整条链路就连接起来了：配置决定资源范围，构建固化包与依赖关系，运行时按清单加载，再按持有关系释放。
+源码阅读入口以下路径均相对于 YooAsset 包根目录，适合按本文顺序阅读：
+
+
+
+关注点
+源码路径
+
+
+
+初始化参数与运行模式
+Runtime/InitializeParameters.cs
+
+
+文件系统创建参数
+Runtime/FileSystem/FileSystemParameters.cs
+
+
+文件系统初始化过程
+Runtime/ResourcePackage/Operation/InitializationOperation.cs
+
+
+对外加载与初始化入口
+Runtime/ResourcePackage/ResourcePackage.cs
+
+
+资源索引与反向依赖
+Runtime/ResourcePackage/PackageManifest.cs
+
+
+文件系统选择
+Runtime/ResourcePackage/PlayMode/PlayModeImpl.cs
+
+
+Provider 与 Loader 的复用
+Runtime/ResourceManager/ResourceManager.cs
+
+
+Provider 的加载阶段与引用
+Runtime/ResourceManager/Provider/ProviderOperation.cs
+
+
+普通资源加载
+Runtime/ResourceManager/Provider/AssetProvider.cs
+
+
+Bundle 加载与销毁判断
+Runtime/ResourceManager/Operation/Internal/LoadBundleFileOperation.cs
+
+
+Handle 释放
+Runtime/ResourceManager/Handle/HandleBase.cs
+
+
+无用资源清理顺序
+Runtime/ResourceManager/Operation/UnloadUnusedAssetsOperation.cs
+
+
+Unity AssetBundle 的加载结果与卸载
+Runtime/FileSystem/BundleResult/AssetBundleResult/AssetBundleResult.cs
+
 
 ]]></content>
       <tags>
@@ -2363,6 +2220,503 @@ Editor/AssetBundleBuilder/BuildBundleInfo.cs
       </tags>
   </entry>
   <entry>
+    <title>Unity-AssetBundle分包策略</title>
+    <url>/posts/9b7c4e21.html</url>
+    <content><![CDATA[AssetBundle 分包策略：哪些资源应该放进同一个包前两篇《Unity-AssetBundle结构解析》和《Unity-AssetBundle加载与卸载》，分别讨论了 AB 文件内部的组织方式，以及资源加载后由谁持有、什么时候释放。
+这一篇讨论构建时的问题：哪些资源应该放进同一个包？
+一般项目会先按资源类型划分文件夹，把动画、纹理、预制体、材质、配置和字体分别存放，方便查找和日常管理：
+Assets/Res/├── Animations/├── Textures/├── Prefabs/├── Materials/├── Configs/└── Fonts/
+
+如果直接把每个类型文件夹打成一个包，打包规则会很简单：Animations 对应一个动画包，Textures 对应一个纹理包，Prefabs 对应一个预制体包。
+但随着项目资源增加，这些包也会越来越大。角色、战斗、场景和界面的纹理都可能进入同一个纹理包，各个玩法的预制体也可能进入同一个预制体包。文件夹按类型整理得很清楚，包内却混合了使用范围完全不同的资源。 这种直接按类型目录打包的方式，就会带来大包的问题。
+一、大、小包的问题1. 大包的问题：下载、更新和生命周期相互牵连以整个 Textures 目录打成一个包为例，原本分别用于角色、战斗、场景和界面的纹理被绑在了一起，下载、更新和整包回收也因此相互牵连。
+在常见的“下载完整文件、校验、落盘后加载”的流程里，首次进入一场战斗前，需要先准备相关包。如果当前角色的贴图位于全项目的纹理大包中，用户可能为了这一小部分资源下载整个大包，首次进入的等待就被无关内容拉长了。
+更新也存在类似问题。在以完整 Bundle 为更新单位、没有二进制差分的方案中，只要包内容发生变化，客户端通常就需要下载新版本整包。 如果经常替换的活动图片与长期稳定的场景贴图都在纹理包中，仅修改一张活动图片，就可能让玩家把场景贴图所在的大文件一起重新下载。改动小，下载量却很大。
+这里要区分“重新构建”与“产生新下载”：执行了构建，并不代表所有输出文件都变化；客户端下载哪些文件，取决于清单、文件标识和内容校验规则。依赖包变化是否进一步影响引用它的包，也要检查具体构建管线的产物，不能一概而论。
+生命周期的牵连则发生在运行时。如果常驻界面的纹理与某个关卡的独占贴图都在纹理包中，关卡退出以后，界面仍然在使用该包。采用整包引用计数和 Unload(true) 回收策略时，就无法安全地把这个包整体卸载。此前已加载、且没有被其他机制回收的关卡贴图，可能因此保留得更久。包被各处依赖，整包回收就要等到最后一个使用者退出。
+但不能把这种情况简化成“大包一打开，所有资源都进入内存，而且全部无法释放”。上一篇已经说明：
+
+打开包与加载具体资源是两步，包内未使用的资源不一定被实例化。
+LZ4 支持按块解压；LZMA 的解压行为不同，首次加载成本还取决于加载 API 和缓存状态。
+包管理数据、已加载的 Native 资源和 GPU 数据有不同的生命周期。
+Unload(false) 可以保留已加载资源并卸载包，但后续复用和回收需要另外管理。
+
+因此，大包的主要风险是准备成本扩大，以及下载、更新和整包回收的边界过粗，并非文件体积直接等于常驻内存。
+2. 碎包的问题：固定开销被重复支付既然一个类型目录打一个包太大，那把目录里的每个资源分别打包呢？这就走向了另一个极端：每张图片、每个材质、每个动画都独立成包。
+此时，加载一个角色就需要准备多个包，一场包含多种角色、怪物和技能特效的战斗，可能需要打开几十甚至上百个包。每个包都有文件访问、读取管理数据和维护状态的成本；远端缓存未命中时，还会增加请求、校验和调度工作。大量小包也会扩大清单、依赖图和加载管理器的维护规模。
+异步加载、缓存和并发请求能够缓解等待，但不能消除这些固定开销。另一方面，包多也不代表每个包都一定触发一次物理磁盘随机读取，实际行为还受操作系统缓存、存储介质和加载实现影响。
+这些资源如果每次都一起加载，拆分就未必减少实际下载或内存占用，却实实在在增加了访问次数。大包的问题是为少量需求付出过多成本，小包的问题是为同一批需求反复支付固定开销。
+二、设计目标：控制牵连范围，也控制访问开销大包与小包的缺点正好形成矛盾：合并能减少包数量，却扩大了下载、更新和整包回收的牵连范围；拆分能缩小这些范围，却增加了访问与管理开销。 因此，分包不能只追求包少，也不能只追求包小。
+需要达到的目标可以归纳为四点：
+
+首次加载少等待。 进入一个关卡或加载一个角色时，尽量只准备当前需要的内容，避免被无关资源拖慢。
+结束使用后能释放。 尽量避免常驻资源与临时资源共包，让关卡、角色等独占资源有清晰的整包回收边界。
+小改动少下载。 高频更新的配置或活动资源发生变化时，尽量不牵连大块稳定内容。
+一次使用少开包。 总是一起使用的小资源适当合并，减少重复的文件访问、校验和加载调度开销。
+
+前面三点要求缩小包的牵连范围，第四点又要求避免拆得过碎。接下来就需要寻找合适的资源边界，让拆分与合并分别服务于这些目标。
+三、设计思路：按使用、释放和更新范围确定边界要同时满足这些目标，首先要判断资源之间的关系，而不只是比较文件大小：
+
+
+
+判断维度
+需要回答的问题
+对包边界的影响
+
+
+
+使用时机
+是否经常在同一次操作中被使用？
+经常一起使用的资源，适合先归为一组
+
+
+释放时机
+是否由相同业务持有，并在相近时机结束使用？
+生命周期相近，便于整包回收
+
+
+更新节奏
+是否通常随同一功能或活动一起变化？
+高频变化内容应与稳定内容隔离
+
+
+共享范围
+是某个功能独占，还是多个功能共同依赖？
+共享资源需要明确归属和使用者
+
+
+一个实用的起点是：同一功能内，经常一起加载、一起结束使用、一起更新的资源，优先放进同一个包。
+这几个条件可能冲突。例如，某个玩法的配置与战斗场景总是一起使用，但活动参数经常调整，场景模型和贴图却长期稳定。此时就值得为了缩小更新范围，将活动配置与场景资源分开，再用测量确认新增包的成本是否可接受。
+据此，可以形成一套基本思路：以功能和使用范围作为初始分组，按生命周期划清释放边界，按更新频率隔离变化内容，再合并其中总是一起使用的小资源。共享依赖则单独检查，防止它把已经拆开的内容重新绑成一个大包。
+四、分包方案：在类型目录下确定合理的包边界开头的类型目录可以继续保留，用于资源查找和日常管理。资源较多时，也可以在类型目录下按用途细分，例如 Textures/Characters、Textures/Levels。
+需要调整的是直接按整个类型目录打包的规则。文件夹分类不要求与 AB 包一一对应。 同一类型的资源可以分到不同包，不同类型的资源也可以因为属于同一功能而放进同一个包。具体边界再结合使用范围、更新频率和释放时机判断。
+1. 按功能分组，减少无关内容的加载与保留为了缩小首次准备的资源范围，并让独占资源能随功能退出而释放，可以先按角色、关卡、玩法等使用范围分组。
+例如，角色独占资源、关卡独占资源和基础配置可以分别归组：
+角色独占资源├── Prefabs/Characters/Knight 中的预制体与模型├── Textures/Characters/Knight 中的贴图└── Animations/Characters/Knight 中的动画关卡独占资源├── Prefabs/Levels/Forest 中的场景物件└── Textures/Levels/Forest 中的环境贴图配置资源├── Configs/Core 中的基础配置└── Configs/Activities 中的活动配置
+
+骑士专用的 Prefab、Mesh、材质、贴图和基础动画，先归入 character.knight.bundle；森林关卡独占的场景资源归入 level.forest.bundle。这些是初始分组，最终归属由打包配置表达，不必强制一个文件夹对应一个包。
+“一个角色或一个关卡先作为一组”适合用作起点，但还要考虑实际行为：
+
+角色的基础模型、专用材质和必用动画，通常适合共包。
+可选皮肤、特殊形态和很少触发的大型技能特效，可以独立，避免加载角色就必须准备全部内容。
+多个关卡共同使用的怪物和战斗特效，应另行处理共享归属。
+大场景可以按进入区域拆分，避免为了出生点附近的内容准备整个地图。
+配置可按基础系统、战斗玩法和活动划分，但若运行时始终一次读取全部配置，也没有必要仅因表多就拆成大量小包。
+
+独立界面也可以采用相同的判断方式。分组应跟随真实的使用与释放范围，而不只是资源类型或文件数量。
+2. 按更新频率拆分，避免小改动牵连大资源为了减少小改动带来的下载量，活动资源适合与稳定资源隔离，还应该避免不同活动之间互相牵连。
+例如，一个限时战斗活动可以进一步分为：
+
+
+
+包
+主要内容
+拆分依据
+
+
+
+activity.autumn.config.bundle
+关卡参数、奖励和活动规则配置
+调整频繁，适合独立更新
+
+
+activity.autumn.level.bundle
+活动场景模型和环境贴图
+内容相对稳定，进入关卡时使用
+
+
+activity.autumn.boss.bundle
+首领模型、动画和专用特效
+进入首领战时才需要
+
+
+这也不是要求每个活动固定拆成三个包。如果活动很小，所有内容都随版本一起替换，合并成一个活动包可能更合适。
+同样，活动配置与基础配置也不一定适合共包：两者虽然都是配置，更新节奏和使用范围却可能不同。如果配置输出为 AB 包内的 TextAsset 或 ScriptableObject，可以采用这样的拆分；如果使用独立配置文件，则应在对应的文件更新策略中处理。
+字体通常比活动资源稳定，适合独立管理，但新增语言、字形或修改字体图集时，它仍然可能更新。分包应依据实际变更记录，而不是假定某一类型永远不变。
+3. 检查共享依赖，避免重复与不必要的牵连只分配入口 Prefab 的包名，还不足以确定最终内容。需要继续检查它们引用的材质、纹理、字体和 Shader。
+在原生 AssetBundle 构建中，如果两个包引用同一个资源，而该资源没有明确分配到独立包，它可能作为隐式依赖被分别包含，导致重复打包。不同框架可能自动提取共享依赖，最终仍应以构建报告为准。[2]
+例如，两个关卡都会出现骑士与哥布林，而它们的材质又依赖同一份 Shader 资源，可以明确整理为：
+
+    flowchart TD
+    Forest[&quot;森林关卡包&quot;] --&gt; Knight[&quot;骑士包&quot;]
+    Dungeon[&quot;地牢关卡包&quot;] --&gt; Knight
+    Forest --&gt; Goblin[&quot;哥布林包&quot;]
+    Dungeon --&gt; Goblin
+    Knight --&gt; Shader[&quot;共享 Shader 包&quot;]
+    Goblin --&gt; Shader
+  
+
+图中的箭头表示构建后确认的序列化依赖关系。如果角色由刷怪配置中的地址指定，再在运行时单独加载，它属于业务加载关系，需要另外记录，不能指望构建清单自动发现。
+共享资源提取也有代价。把一切都提取到一个 shared.bundle，可能重新形成“任何模块都依赖，退出任何模块都无法整包卸载”的大包。
+因此，共享包还要按用途和生命周期划分。例如，常用字体、基础 UI 组件、战斗共享特效，可以属于不同的共享包。不要因为都被多个地方使用，就把它们放在一起。
+可以采用这样的判断顺序：
+
+只有一个功能使用的资源，优先跟随该功能。
+多个功能使用、体积明显或对象身份需要一致的资源，优先明确共享归属。
+很小、稳定且互不同时使用的资源，可评估允许少量重复，换取更少的跨包依赖。
+允许重复必须是有记录的取舍，并核查下载体积和运行时副本，不能由隐式依赖偶然决定。
+
+尤其要避免让地牢关卡依赖森林关卡包，只为了取得一个共用怪物。应将怪物移到合理的共享范围，而不是把森林关卡整个变成地牢的依赖。
+依赖方向也应尽量清晰：业务包依赖共享包，共享包不反过来依赖具体业务。发现循环依赖时，要检查是否可以重新归属资源、提取共同部分，或合并本来就无法独立使用的内容。
+4. 图集先按使用范围组织，再决定包归属图集不能仅凭“都是小图标”就合并成一个全局大图集。
+图集中的 Sprite 会共享底层纹理页。加载某个 Sprite 时，通常也需要它对应的图集页，因此图集会让原本独立的小图在加载和内存占用上产生关联。一个 SpriteAtlas 也可能包含多张纹理页，不能一律理解为“一张图用了，整个 Atlas 所有页都必然加载”。
+可以先按用途组织：背包常用图标一组、商城专用图标一组、活动图片一组，少量全局基础图标单独组织。活动横幅尤其不宜混进稳定的基础 UI 图集，否则修改横幅可能导致图集纹理和相关包一起变化。
+当某个界面的图集只有它自己使用，并且更新、释放时机一致时，可以与该界面共包；被多个界面使用时，再考虑独立共享包。没有必要固定成“每个图集必有独立包”。
+SpriteAtlas 的打包模式、Include in Build 设置和构建管线会影响最终依赖与重复情况。不能只检查源目录，还要确认构建后图集纹理究竟进入了哪些包。
+5. 合并零散小资源，控制访问与管理开销为了避免包拆得过碎，可以适当合并零散小资源。但“零散”只是文件组织上的描述，不是足够的分包理由，合并仍然需要限定使用范围。
+某个关卡专用的几段机关动画、几张小贴图和几个小材质，如果总是随关卡一起使用，可以合进关卡包。同一玩法中总是一起读取、更新节奏一致的小配置，也可以合成一个配置包。多个战斗玩法共用的小特效，则可以归入战斗范围内的共享包。
+反过来，把登录提示图、战斗音效、活动图标和过场材质全部塞进 misc.bundle，只会制造新的耦合。
+合并前至少检查三件事：使用范围是否接近，更新节奏是否一致，是否会让一个长生命周期资源拖住大量短生命周期资源。
+6. 最后用体积和访问开销修正粒度完成逻辑分组后，再看实际构建产物的大小、数量和依赖关系。
+如果一个功能包明显偏大，优先寻找有业务意义的切分点：按角色、关卡区域、语言、可选高清资源或进入阶段拆分，而不是直接按固定大小机械切块。
+如果一次进入战斗、加载角色或读取配置要访问大量微小包，就优先合并其中总是一起请求、释放时机接近、更新节奏一致的部分。
+不建议将“每包固定 5 MB”之类数字当作通用标准。压缩后的文件大小影响下载，但不能直接反映资源加载后的内存；同样大小的配置、纹理和音频，也可能有完全不同的读取与使用方式。
+可以为项目设定大包和碎包的检查阈值，但阈值应触发分析，而不是自动决定结果。先解决业务边界，再用目标设备上的数据修正粒度。
+7. 把规则沉淀到构建流程当初始方案稳定后，可以让构建报告持续回答这些问题：
+
+哪些资源被重复包含，重复了多少字节？
+哪些包有大量反向依赖，是否混入了无关功能？
+哪些入口需要准备很多包，依赖链是否过深？
+哪些高频更新资源与大块稳定内容共包？
+哪些包体积或依赖关系相比上个版本发生了异常变化？
+
+构建环境也应保持可追踪。Unity 版本、导入设置、压缩方式或构建配置变化，都可能扩大产物变化范围。分包只能降低合理边界内的牵连，不能保证任意构建之间都只有被编辑的资源发生变化。
+五、最终落地：目录怎么细分，具体打成哪些包前面的判断可以收敛为一个默认方案：保留类型目录，在类型目录下按角色、关卡、功能和更新范围细分；将选定的子目录作为打包单元，每个单元默认一个包。总是一起使用的小目录，可以在打包配置中明确合并到同一个包。
+因此，Textures 下确实需要继续细分，但不是把所有层级的文件夹各打一个包，也不是无条件把每个最深层目录打一个包。需要明确选定打包边界：选中 Textures/Characters/Knight 作为单元后，其内部子目录默认一起归入这个单元，不再自动生成额外包；需要独立更新的内容则提前移出这个单元。
+1. 最终目录示例假设骑士的基础模型、贴图、材质和动画体积适中、总是一起使用，森林关卡的贴图较大，活动图片更新频繁，可以整理为：
+Assets/Res/├── Animations/│   └── Characters/Knight/├── Textures/│   ├── Characters/Knight/│   ├── Levels/Forest/│   ├── UI/Inventory/│   └── Activities/Autumn/Banners/├── Prefabs/│   ├── Characters/Knight/│   ├── Levels/Forest/│   ├── UI/Inventory/│   └── Battle/SharedEffects/├── Materials/│   ├── Characters/Knight/│   └── Battle/SharedEffects/├── Configs/│   ├── Core/│   ├── Battle/│   └── Activities/Autumn/└── Fonts/    ├── Common/    └── Languages/Japanese/
+
+Characters、Levels、Activities 等中间目录只用于分类，不直接打包。类型根目录不放待打包的散文件；新增资源必须先确定归属，再进入相应的打包单元。
+2. 目录与最终包的对应关系下表中的路径均相对于 Assets/Res/。包名用于说明归属，实际文件名可以由构建流程生成。
+
+
+
+目录范围
+最终包
+本例采用的规则
+后续资源添加与调整
+
+
+
+Prefabs/Characters/Knight/、Textures/Characters/Knight/、Materials/Characters/Knight/、Animations/Characters/Knight/
+character.knight.bundle
+四个目录明确合并成一个角色包，专用资源随角色一起加载和释放
+骑士基础资源加入对应目录，沿用同一包；新角色建立独立目录和包，可选皮肤另设目录和包
+
+
+Prefabs/Levels/Forest/
+level.forest.prefabs.bundle
+场景物件单独一个包
+同一区域物件加入现有目录；新关卡另建目录和包；关卡过大时按区域拆分，替换原来的整体打包范围
+
+
+Textures/Levels/Forest/
+level.forest.textures.bundle
+较大的关卡贴图目录独立成包，不与其他关卡贴图混合
+普通新增贴图沿用该包；需分区加载时，按 Entrance、BossArea 等子目录分别打包，取消原整体目录的打包范围
+
+
+Prefabs/UI/Inventory/、Textures/UI/Inventory/
+ui.inventory.bundle
+本例假设界面较小且资源独占，两个目录合并成一个界面包
+新增独占资源加入对应目录；独立界面另建包；可选高清预览等大资源单独拆出
+
+
+Textures/Activities/Autumn/Banners/
+activity.autumn.banners.bundle
+高频更新图片单独一个包，与稳定贴图隔离
+同批替换图片沿用该包；其他活动另建目录和包；需要单独轮换的大图再拆为独立单元
+
+
+Prefabs/Battle/SharedEffects/、Materials/Battle/SharedEffects/
+battle.shared.effects.bundle
+本例中体积较小、共同使用的特效与专用材质合并
+同范围的小特效继续加入；大型或仅特定玩法使用的特效另建包，避免共享包持续膨胀
+
+
+Configs/Core/
+config.core.bundle
+一组基础配置一个包，不按每张表拆包
+同加载、同更新的基础配置继续加入；高频变化或仅特定功能使用的配置移至独立目录和包
+
+
+Configs/Battle/
+config.battle.bundle
+战斗配置单独一个包
+始终一起读取的战斗表继续共包；按需读取且规模较大的玩法配置再按玩法拆分
+
+
+Configs/Activities/Autumn/
+config.activity.autumn.bundle
+当前活动配置一个包，避免牵连基础配置与其他活动
+当前活动配置沿用该包；新活动建立独立目录和包，不并入基础配置包
+
+
+Fonts/Common/
+font.common.bundle
+常用字体独立一个包，作为共享依赖
+必需的常用字体继续加入；可选语言或特定功能字体另建目录和包
+
+
+Fonts/Languages/Japanese/
+font.japanese.bundle
+可选语言字体独立一个包，按语言需求准备
+日语字体沿用该包；新增语言建立各自目录和包
+
+
+本例的配置假定为需要进入 AB 的 TextAsset 或 ScriptableObject。角色模型与 Mesh 也假定由角色目录中的源资产提供；实际项目若另设 Models 目录，应将对应目录加入角色包的归属配置。
+这些目录划分不会自动产生跨目录合包。四个骑士目录要生成同一个包，必须在构建配置中把它们明确映射到同一个 Bundle。 如果只是对每个目录分别打包，它们仍然会生成四个包。
+每份资源应有唯一的最终包归属。被角色、特效或关卡共同引用的材质、纹理和 Shader，要先识别为共享依赖，再明确其归属，不能为了凑齐目录内容而重复收进多个包。图集纹理的实际归属还要结合前文的图集规则检查。
+六、怎么判断拆分与合并是否值得分包之后，需要回答的仍然是开头的矛盾：拆小后节省的下载、更新和资源保留成本，是否值得新增的文件访问与包管理开销；合并后减少的访问次数，又是否以过多无关内容为代价。
+这些是设计预期，是否有效，需要构建对比和目标设备测量。下面的例子只说明验证方法，不代表实测成绩。
+1. 同时观察入口包及其全部依赖假设关卡入口包只有 1 MB，但它依赖一个 100 MB 的公共包。若本地缓存都未命中，且两个包都需要完整下载，那么首次进入仍需准备约 101 MB，而不是 1 MB。
+评估一个功能时，应统计“入口包与递归依赖包的去重集合”。再根据本地缓存和已经加载的包，计算本次真正新增的下载与加载成本。仅靠静态依赖清单仍不足以涵盖运行时按地址加载的可选资源，需要结合实际请求记录补充。
+2. 比较调整前后的同一组操作
+
+
+验证操作
+记录内容
+判断依据
+
+
+
+无本地下载缓存，首次进入战斗关卡
+新增下载字节、请求数、从进入到可操作的耗时
+首次准备范围是否缩小，实际等待是否改善
+
+
+已有文件缓存，再次加载同一组角色
+打开包耗时、文件访问、资源加载和主线程峰值
+分包是否引入了过多固定开销
+
+
+基础系统仍运行，退出战斗关卡
+包持有关系、已加载资源及内存快照
+关卡独占资源是否按策略释放，常驻资源是否仍有效
+
+
+反复进入两个共享怪物的关卡
+包重载次数、资源副本、帧耗时
+是否产生卸载后立即重载的抖动
+
+
+一次读取玩法所需的多份配置
+访问包数、总耗时和加载次数
+配置是否拆得过碎，合并是否更划算
+
+
+仅修改活动配置，发布下一版
+变化包列表、实际新增下载量
+更新是否主要限制在预期范围
+
+
+检查共享材质、Shader 和战斗特效
+构建重复报告、运行时资源实例
+是否避免无意重复，实际归属是否符合设计
+
+
+运行时检查应在相同目标设备、相同构建配置和可比较的缓存条件下进行，并重复采样。Unity Profiler 用于分析加载和帧耗时，Memory Profiler 用于检查资源对象、占用及持有关系。不能只看退出关卡后进程内存是否立即下降。
+如果玩家连续进入的两个关卡都会使用同一种怪物，刚退出前一关就立即释放怪物包，可能导致下一关重新加载。此时可以保留有限时间的缓存，或在更大的业务阶段结束后释放。缓存策略与包边界需要配合，不能只靠继续拆包解决。
+3. 用一次小修改验证更新边界可以保留基线版本 A，仅修改一份活动奖励配置后构建版本 B，比较两个版本的清单、文件 Hash 和下载计划。
+假设配置原来与场景资源共处在 80 MB 的包内，拆分后位于 200 KB 的配置包内；在没有差分下载、且只有这个包变化的前提下，该次更新的资源文件下载量就从 80 MB 缩小到 200 KB。这里的数字是示意，不包含清单和协议等额外开销。
+如果修改一份配置却导致多个稳定包变化，应进一步检查引用关系、资源归属以及构建环境差异。验证的重点是解释实际变化的文件，而不只是确认分包配置里写了几个名字。
+实际落地时，可以先采用这样的顺序：按功能确定独占资源，按更新节奏隔离变化内容，按依赖关系处理共享资源，再在相近的使用与释放范围内合并小资源，最后用构建和运行数据调整粒度。
+决定哪些资源放进同一个包，最终是在判断：它们是否值得一起准备、是否适合一起保留，以及一次修改是否应该让它们一起更新。把本来就一起使用的小资源合并，把使用、释放和更新范围明显不同的内容拆开，才能同时控制大包的牵连与小包的开销。
+参考资料
+前文：Unity-AssetBundle结构解析
+前文：Unity-AssetBundle加载与卸载
+
+以下为 Unity 2022.3 官方文档。具体构建结果还需结合使用的构建管线、资源框架和平台检查。
+
+AssetBundle dependencies
+AssetBundle troubleshooting
+AssetBundle compression
+Using AssetBundles Natively
+Sprite Atlas
+
+]]></content>
+      <tags>
+        <tag>Unity-AssetsBundle</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Unity的==与空并运算符(？.)</title>
+    <url>/posts/1bd27c8e.html</url>
+    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
+Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
+Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
+差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
+在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
+Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
+]]></content>
+  </entry>
+  <entry>
+    <title>Unity-AssetBundle结构解析</title>
+    <url>/posts/d5e3da58.html</url>
+    <content><![CDATA[Unity AssetBundle 结构解析笔记
+基于 AssetStudio 逆向源码（BundleFile.cs &#x2F; SerializedFile.cs）与 YooAssets 源码整理。Unity 未公开官方格式文档，本文以逆向工程实现为准（Unity 2022.3 为 UnityFS 主流版本）。
+
+0. 概述
+.assetbundle 文件是 Unity 的私有格式，YooAssets &#x2F; Addressables 等框架都只是调用 BuildPipeline.BuildAssetBundles 产出后在外层做 hash &#x2F; 加密 &#x2F; 清单，不改变文件内部结构。
+完整的资源体系是三层结构：外层是一个自定义压缩归档（UnityFS），里面躺着若干个 Unity 序列化文件（SerializedFile，即资产真正存放的地方）；bundle 之上还有一层独立文件 manifest（清单），记录所有 bundle 的组织关系。
+
+
+1. 整体布局先建立全局图景，再逐层展开（第 2、3、4 节）：
+┌───────────────────────────────────────────────┐│ .assetbundle 文件（容器层，UnityFS 归档格式）   ││                                               ││  ┌─────────────────────────────────────────┐  ││  │ Header（明文，~几十字节）                │  ││  │   签名 / 版本 / 大小 / flags             │  ││  ├─────────────────────────────────────────┤  ││  │ BlocksInfo（目录块，被压缩）             │  ││  │   ① 存储块表 StorageBlock[]             │  ││  │   ② 条目表     Node[]                   │  ││  ├─────────────────────────────────────────┤  ││  │ Storage Blocks（数据区，逐块压缩）       │  ││  │   解压后按条目表切出：                   │  ││  │   · CAB-xxxx    → SerializedFile        │  ││  │   · CAB-xx.resS → 大资源原始字节流      │  ││  │     （贴图、网格、音频数据）             │  ││  └─────────────────────────────────────────┘  │└───────────────────────────────────────────────┘                    │ 解压、按目录切分                    ▼┌───────────────────────────────────────────────┐│ CAB-xxxx（内容层，SerializedFile）             ││  ├─ 文件头（版本 / 平台 / 偏移）               ││  ├─ ① 类型表   m_Types[]（classID + TypeTree）││  ├─ ② 对象表   m_Objects[]（pathID + 偏移）   ││  ├─ ③ 外部引用 m_Externals[]（跨文件依赖）     ││  └─ 数据区（按 TypeTree 序列化的资产字节）      │└───────────────────────────────────────────────┘                    ▲ 之上还压着一层总目录                    │┌───────────────────────────────────────────────┐│ 清单层（独立文件，Unity 原生）                 ││  .manifest 文本（每 bundle 一份）              ││  AssetBundleManifest 对象（总清单：依赖闭包）   │└───────────────────────────────────────────────┘
+
+一句话总览：
+
+容器层回答”这个压缩包里有哪些虚拟文件、怎么解压”
+内容层回答”这个文件里有哪些资产对象、是什么类型、依赖谁”
+清单层回答”整个世界有哪些 bundle、互相什么关系、hash 几何”
+
+
+2. 容器层详情：UnityFS 归档格式2.1 文件头（明文，逐字段）signature                : string   // &quot;UnityFS&quot;（老格式另有 UnityWeb / UnityRaw / UnityArchive）version                  : uint     // 归档格式版本号（v &gt;= 7 会做 16 字节对齐）unityVersion             : string   // 如 &quot;2022.3.20f1&quot;unityRevision            : string   // 引擎修订号size                     : long     // 整个 bundle 文件大小compressedBlocksInfoSize : uint     // 目录块（压缩后）大小uncompressedBlocksInfoSize: uint    // 目录块（解压后）大小flags                    : uint     // 位标志，见下
+
+flags 位含义：
+
+
+
+位
+含义
+
+
+
+低 6 位
+BlocksInfo 的压缩类型：None&#x3D;0 &#x2F; Lzma &#x2F; Lz4 &#x2F; Lz4HC
+
+
+0x80
+BlocksInfo 在文件末尾
+
+
+0x200
+BlockInfo 需要起始对齐
+
+
+2.2 BlocksInfo（目录块）本身按头部 flags 压缩，解压后是两张表：
+// ① 存储块表：数据区怎么切、怎么压StorageBlock &#123;    uint   uncompressedSize;    uint   compressedSize;    ushort flags;      // 低6位 = 压缩类型；0x40 = Streamed（流式大资源）&#125;// ② 条目表：解压后数据流中&quot;虚拟文件&quot;的目录Node &#123;    long   offset;     // 在解压后数据流中的偏移    long   size;    uint   flags;    string path;       // 如 &quot;CAB-8f3a...&quot;、&quot;CAB-xxxx.resS&quot;&#125;
+
+2.3 解压流程（AssetStudio 实现）
+按头部 flags 解压 BlocksInfo（None &#x2F; LZMA &#x2F; LZ4 三分支；LZ4 解压后校验字节数）
+按 StorageBlock 表逐块解压数据区，拼进统一 blocksStream（超过 2GB 落盘临时文件）
+按 Node 目录从 blocksStream 切出各 SerializedFile 和 .resS
+
+2.4 压缩方式与加载行为（LZMA vs LZ4）数据段存放的是 Assets 序列化后的原始字节，选哪种压缩方式直接决定了运行时的加载行为：
+LZMA —— 整体压缩
+
+对序列化后的完整字节数组作为一个整体压缩，压得最紧（体积最小）
+代价是失去随机访问能力：算法依赖前后文，要读其中任何一小段都得从头解压整个流
+适合”下载完就用完”的场景，即远程资源包的传输形态
+
+LZ4 &#x2F; LZ4HC —— 分块压缩
+
+数据区切成多个 StorageBlock 逐块独立压缩，块之间无依赖
+LoadFromFile() &#x2F; LoadFromStream() 时只把 Header（含 BlocksInfo 目录）读入内存建立索引，数据段继续留在磁盘上
+LoadAsset() 时才发生真正的磁盘读取：按目录定位资源所在的块，只把对应的块解压加载进内存，其余块不动
+这就是懒加载 &#x2F; 懒解压的物理基础，首包和本地缓存用它（加载快）
+
+选型口诀：下载选 LZMA（省流量），加载选 LZ4（省时间）。两者不冲突——把远程 LZMA 包下载后转存为 LZ4 缓存，一次付解压成本，之后每次加载都快。
+
+3. 内容层详情：SerializedFile（CAB-xxxx）3.1 文件头m_MetadataSize   : uint    // 元数据段大小（大文件版本升级为 long）m_FileSize       : uintm_Version        : uint    // SerializedFileFormatVersion，后续所有字段按它分支m_DataOffset     : uint    // 数据区起始；Object 的 byteStart 都要加上它m_Endianess      : byte    // + 3 字节保留// —— 元数据段开头 ——unityVersion     : string  // 引擎版本字符串，决定大量字段取舍m_TargetPlatform : int     // 目标平台m_EnableTypeTree : bool
+
+3.2 三张核心表// ① 类型表：这个文件里出现过哪些类型SerializedType &#123;    int    classID;            // 类型编号：28=Texture2D, 43=Mesh, 1=GameObject ...    bool   m_IsStrippedType;    byte[] m_ScriptID;         // 16 字节    byte[] m_OldTypeHash;      // 16 字节    TypeTree typeTree;         // 字段布局描述（未剥离时存在）&#125;// ② 对象表：资产本体清单ObjectInfo &#123;    long m_PathID;             // 文件内唯一 ID（外部引用靠它定位）    long byteStart;            // + m_DataOffset 后的绝对偏移    uint byteSize;    int  typeID;               // 新格式 = m_Types 的下标；老格式 = classID 本身&#125;// → typeID 查 m_Types 拿 SerializedType（含 TypeTree），//   按 TypeTree 从 byteStart 反序列化出对象// ③ 外部引用表：依赖的物理载体FileIdentifier &#123;    Guid   guid;    int    type;    string pathName;           // 指向其它 CAB / &quot;archive:/xxx.resS&quot;&#125;
+
+另有 m_ScriptTypes（脚本类型，localSerializedFileIndex + localIdentifierInFile）和 m_RefTypes（引用类型，新版本）。
+3.3 跨文件依赖机制（bundle 依赖的物理来源）
+Material 引用另一个 bundle 的 Texture 时，序列化里存的是 (externals 表下标, pathID) 二元组，不是路径。
+解析引用 &#x3D; 按 pathName 找到对应 SerializedFile → 按其 Objects 表的 pathID 找到对象。
+因此运行时必须先把被引用的 bundle 全部加载，引用才解析得通——Unity 运行时加载器和 AssetStudio 的 ObjectsDic 做的是同一件事。
+打包工具（YooAssets 依赖 Task &#x2F; Unity BuildPipeline）算出的依赖图，最终就是落成这张 externals 表。
+
+
+4. 清单层：Unity 原生 AssetBundleManifest4.1 构建产物的完整目录形态BuildPipeline.BuildAssetBundles 的输出目录里，除了 bundle 本体，还多出两类清单文件：
+OutputDir/（假设目录名叫 &quot;AssetBundles&quot;） ├─ ui_main.bundle                 ← bundle 本体 ├─ ui_main.bundle.manifest        ← ① 每个 bundle 一份同名文本清单（YAML，人可读） ├─ tex_shared.bundle ├─ tex_shared.bundle.manifest ├─ AssetBundles                   ← ② 一个特殊的 bundle（名字 = 输出目录名） │                                    里面只装一个 AssetBundleManifest 对象（总清单） └─ AssetBundles.manifest          ←    总清单的可读文本形态
+
+4.2 每个 bundle 的 .manifest 文本记录”这个 bundle 是什么、装了什么、是否变了”（字段以 2022 版格式为例，各版本略有出入）：
+ManifestFileVersion: 0CRC: 3053085495              # 校验码：下载完整性校验（传给 UnityWebRequestAssetBundle）Hash:  serializedVersion: 2  Hash: 442f1a3b...          # AssetFileHash：内容指纹，增量更新的比对依据TypeTreeHash:  serializedVersion: 2  Hash: 3b8b2c11...          # TypeTree 变化也会导致兼容性变化Assets:                      # 这个 bundle 里装了哪些资产- Assets/UI/mat_main.matDependencies: []             # 单包清单不记 bundle 间依赖，依赖在总清单里
+
+4.3 总清单 AssetBundleManifest 对象AssetBundles 这个特殊 bundle 里只有一个对象：AssetBundleManifest，内容就是全部 bundle 的依赖表（其 .manifest 文本可直接读）：
+ManifestFileVersion: 0AssetBundleManifest:  AssetBundleInfos:  - Info_0:      Name: ui_main.bundle      Dependencies:              # 闭包：直接 + 间接依赖已拍平        Dependencies_0: tex_shared.bundle        Dependencies_1: shader_common.bundle  - Info_1:      Name: tex_shared.bundle      Dependencies: &#123;&#125;
+
+4.4 运行时怎么用（原生三步流程里清单的角色）// ① 加载总清单var manifestBundle = AssetBundle.LoadFromFile(&quot;OutputDir/AssetBundles&quot;);var manifest = manifestBundle.LoadAsset&lt;AssetBundleManifest&gt;(&quot;AssetBundleManifest&quot;);// ② 查依赖 → 决定&quot;备哪些 bundle&quot;（这就是三步流程的第一步）string[] deps = manifest.GetAllDependencies(&quot;ui_main.bundle&quot;);// ③ 辅助查询manifest.GetAllAssetBundles();               // 全部 bundle 名manifest.GetAssetBundleHash(&quot;ui_main.bundle&quot;); // 内容 hash（配合缓存判断要不要重下）// CRC 在各 bundle 的 .manifest 文本里 → 传给 UnityWebRequestAssetBundle.GetAssetBundle(url, hash, crc)
+
+4.5 框架清单与原生清单的关系原生清单是给原生 API 直载用的；YooAssets 等热更框架构建自己的清单文件（如 PackageManifest：增加地址寻址、tags、每 bundle 的 FileHash&#x2F;FileCRC&#x2F;size&#x2F;加密标记，按版本组织文件，配合 ActiveManifest 原子切换），原生清单在这条路上不再出场。但两者扮演的角色相同——清单管导航（决定备谁&#x2F;下谁），bundle 内的 externals 管粘合（解析对象引用）。
+
+5. 一个最小 bundle 的字节级示例
+字段值为构造的合理示意值（非真实 dump），真实文件用十六进制查看器对照即可。场景：YooAssets 用 PackExplicit 打出一个只含 1 个 Material 的 bundle，该 Material 的贴图分两种情况——在本包内 &#x2F; 在另一个 bundle 里。
+
+5.1 容器层（.assetbundle 文件本体）Offset   内容                                       含义------  ------------------------------------------  ------------------------------0x00    55 6E 69 74 79 46 53 00                    &quot;UnityFS\0&quot; 签名0x08    07 00 00 00                                version = 7（构建会 16 字节对齐）0x0C    &quot;2022.3.20f1\0&quot;                            unityVersion0x18    &quot;5.2.2f1\0&quot;                                unityRevision0x20    00 40 03 00 00 00 00 00                    size = 0x34000（整包约 208KB）0x28    84 02 00 00                                compressedBlocksInfoSize = 6440x2C    00 0A 00 00                                uncompressedBlocksInfoSize = 25600x30    43 00 00 00                                flags = 0x43（低6位=3 → Lz4HC）0x34    ……（644 字节，LZ4 压缩）……                  BlocksInfo（压缩态）0x2CC   ……（数据块，逐块 LZ4 压缩）……               Storage Blocks        解压拼流后按条目表切出：        · CAB-1a2b3c4d      （SerializedFile）        · CAB-1a2b3c4d.resS （贴图原始字节，流式）
+
+5.2 BlocksInfo 解压后的两张表存储块表（2 块）：  [0] uncompressedSize=0x2A000  compressedSize=0x21800  flags=3(Lz4HC)  [1] uncompressedSize=0x1800   compressedSize=0x1500   flags=3(Lz4HC)条目表（2 个虚拟文件）：  [0] offset=0x00000  size=0x2000   path=&quot;CAB-1a2b3c4d&quot;  [1] offset=0x02000  size=0x29800  path=&quot;CAB-1a2b3c4d.resS&quot;
+
+5.3 CAB-1a2b3c4d（SerializedFile）内部文件头：  m_MetadataSize / m_FileSize / m_Version / m_DataOffset  unityVersion=&quot;2022.3.20f1&quot;   m_TargetPlatform=(Android)   m_EnableTypeTree=1m_Types（2 种类型）：  [0] classID=21 (Material)  [1] classID=28 (Texture2D)m_Objects（2 个资产）：  pathID=1 → typeID=0(Material)   byteStart=0x1000  byteSize=0x400  pathID=2 → typeID=1(Texture2D)  byteStart=0x1400  byteSize=0x100m_Externals（外部引用）：  [0] pathName=&quot;archive:/CAB-1a2b3c4d.resS&quot;     ← 本包内的流式数据文件
+
+Material 的序列化数据里的引用怎么写（这就是第 3.3 节的落地）：
+情况 A：贴图也在本包（上面的 Texture2D, pathID=2）  m_TexEnvs[0].m_Texture = &#123; m_FileID = 0,        m_PathID = 2 &#125;                            └ 0 = 本文件，直接按对象表找情况 B：贴图在另一个 bundle（bundle_b 的 CAB-5e6f7a8b）  m_Externals[0] 的 pathName 改为指向 &quot;CAB-5e6f7a8b&quot;  m_TexEnvs[0].m_Texture = &#123; m_FileID = 1,        m_PathID = 7 &#125;                            └ 1 = externals[0]，即 bundle_b 里的 pathID=7
+
+情况 B 就是”必须先加载依赖 bundle”的全部真相：加载这个 Material 时，运行时读到 m_FileID=1 → 查 externals[0] → 发现指向 bundle_b 的 CAB →bundle_b 没加载就解析不了 → 于是先加载 bundle_b。YooAssets 构建时依赖 Task 扫到的”bundle_a 依赖 bundle_b”，来源就是这里；而加载前决定”要备上 bundle_b”的依据，则是总清单（AssetBundleManifest）里 bundle_a 的 Dependencies 列表——导航与粘合的分工（第 4 节）。
+
+6. 结构决定行为：机制背后的因果理解了上面三层结构后，很多”行业常识”其实是结构直接推导出的必然结果：
+① 为什么加载资源前必须先加载整条依赖链？因为引用的存储形态是 (externals 表下标, pathID)——它指向”另一个已在内存中的 SerializedFile 的某个对象”。引用解析发生在加载期，被引用的 bundle 不在内存，这个二元组就无从解析，加载直接失败。”备哪些 bundle”由清单的闭包列表导航（4.3 节），”接上引用”由 externals 粘合。
+② 为什么 bundle 是最小热更单位，做不到文件级热更？因为资源不是独立文件，是嵌在 SerializedFile 里的 Object（有偏移、有序）。改一个资源 → 它所在 Object 变 → 整个 SerializedFile 的字节布局变 → 整个 bundle 重写 → hash 必变。清单里的 Hash（原生 manifest 的 AssetFileHash）正是客户端比对增量更新的依据。
+③ 为什么 bundle 切太碎会导致资源冗余？因为 externals 引用要求”被引用的文件同时可用”。跨 bundle、跨 Package 引用一个资源，意味着两边必须同时加载、生命周期绑定。为了避免这种绑定，打包工具会把共享资源拷贝一份打进每个引用方 bundle——拷贝就是冗余（磁盘翻倍、内存翻倍、Unity 视为两个不同的 asset 实例）。
+④ 为什么加载单个资源不用解压整个 bundle？因为数据区是块级压缩 + 偏移索引：条目 → offset → 只解它落在的那几个 StorageBlock。这是远程包用 LZMA（小）下载、本地缓存转 LZ4（快）能成立的结构基础。
+⑤ 为什么 Unload(true) 会”连坐”销毁整个 bundle 的资源？因为 Object 的内存对象与所在 SerializedFile 的生命周期绑定，Unity 不做单 Object 级回收——文件卸了，从它反序列化出来的资产就失去来源。这也是”bundle 划分要按生命周期一致性”的底层原因：混在一个 bundle 里的资源，要么一起活着，要么一起消失。
+⑥ 为什么 GUID &#x2F; TypeTree 不可省？
+
+FileIdentifier 里的 GUID 是资产间引用的稳定标识（路径会变、GUID 不变），重命名资源不断引用靠它。
+TypeTree 是”字段布局说明书”：没有它，同一份二进制在新版本 Unity 里无法解析。打包时剥离 TypeTree 换体积，运行时靠引擎内置的类型布局兜底——这也是 bundle 与 Unity 版本强绑定的原因之一。
+
+⑦ 为什么热更要”先更新清单再下载”？因为客户端需要先知道”世界长什么样”（新清单）才能对比出”我缺哪些 bundle”（本地清单 vs 远端清单的 Hash 差集）。清单不动、bundle 白下——原子切换清单（框架层）或统一版本目录（原生层）都保证了对比期间旧世界照常可玩。
+
+7. 完整读包流程打开 .assetbundle → 验签名 &quot;UnityFS&quot;，读头部 → 解压 BlocksInfo → 得到块表 + 条目目录 → 逐块解压数据区 → 按 Node 切出 CAB-xxxx / .resS → 每个 CAB 读出头 + 三张表（Types / Objects / Externals） → 看某个资产：查对象表 → typeID 找类型 → 按 TypeTree 反序列化 byteStart 处数据 → 遇到外部引用 → 顺藤摸瓜到另一个文件的 pathID
+
+
+8. 加密 bundle 的观察方法框架的加密几乎都是对标准 UnityFS 做包装（因为 Unity 加载器最终要能读，算法必须加载时可逆）：
+
+头部插入偏移字节：文件头塞一段随机长度垃圾字节，加载时跳过（YooAssets offset 加密即此思路）
+头部若干字节 XOR&#x2F;变换：破坏签名识别
+全文件流式变换（少见，加载慢）
+
+观察步骤：找到解密实现 → 用同样算法逆处理 → 得到标准 UnityFS → 丢进 AssetStudio &#x2F; UnityPy 查看；或直接构建一个不加密的包用于研究。
+
+9. 与 YooAssets 概念的对应
+
+
+概念
+说明
+
+
+
+.manifest 文本 &#x2F; AssetBundleManifest 对象
+Unity 原生清单层（第 4 节）；YooAssets 用自己的 PackageManifest 承担同一角色
+
+
+bundle &#x3D; 最小热更单位
+改一个资源 → Object 变 → SerializedFile 变 → 整包重写，hash 必变
+
+
+切太细导致冗余
+资源不在本 bundle 就只能 externals 跨文件引用；要避免跨包引用就得拷贝进每个引用方
+
+
+AssetBundle.Unload(true) 连坐
+Object 的内存对象与所在 SerializedFile 生命周期绑定，Unity 不做单 Object 级回收
+
+
+10. 参考实现（事实上的格式文档）
+AssetStudio（C#）：BundleFile.cs &#x2F; SerializedFile.cs，github.com&#x2F;Perfare&#x2F;AssetStudio
+UnityPy（Python）：结构清晰，适合快速对照
+AssetRipper（C#）：覆盖 Unity 版本最全，细节最严谨
+YooAssets（C#）：PackageManifest.cs &#x2F; ResourcePackage.cs，框架清单与原生清单对照的活样本，github.com&#x2F;tuyoogameYooAsset
+
+]]></content>
+      <tags>
+        <tag>Unity-AssetsBundle</tag>
+      </tags>
+  </entry>
+  <entry>
     <title>Unity的动态图集实现</title>
     <url>/posts/71da87fc.html</url>
     <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
@@ -2382,6 +2736,23 @@ Texture.Get&#x2F;SetPixelsTexture.Get&#x2F;SetPixels去拷贝一张图的过程�
 代码实现代码实现我根据不同的职责分为了4个类去实现。1.SimpleMaxRect。二维装箱实现类，内部使用Max-Rect算法，负责管理纹理空间，对外提供获取纹理中某个空闲尺寸的位置接口，以及释放尺寸接口。2.DynamicAtlas。动态图集类，内部维护一张纹理和一个SimpleMaxRect实例。对外提供通过具体路径加载贴图接口(Resources加载可以自行替换)，并在加载成功后拷贝到纹理中缓存；提供具体路径卸载某个图片，卸载使用了引用计数，为0时才释放纹理缓存。3.DynamicRawImage。RawIamge的封装类，提供路径记载接口，接口内部封装了动态图集的所有调用。并在OnDestory中调用释放接口，保证引用计数正确，不造成内存泄露。4.DynamicAtlasManager。动态图集单例管理类。内部维护所有的纹理，提供加载卸载图片接口。
 项目完整代码链接：https://github.com/Jin8868/DynamicAtlas
 ]]></content>
+  </entry>
+  <entry>
+    <title>Unity的TMP和Text原理和使用优化</title>
+    <url>/posts/b46c3d6a.html</url>
+    <content><![CDATA[Unity在2018版本加入了TextMeshPro，并且现在已经将Text标记为Legacy。下面是我有关于TMP和Text的理解和思考。
+Text的渲染原理Unity的text组件是使用FreeType库来加载TrueType字体来实现的。通过加载TrueType字体并为每一个字形生成位图以及计算几个度量值(Metric)，生成出一个具体的字形的位图纹理。text动态渲染一个字符过程为：判断一个字符是否已经存在字体纹理中，在则直接获取对应的纹理坐标渲染；若不在则读取ttf文件中字符数据生成字符的位图，并放入纹理中管理。若放入时图集已满，则会对图集进行一次扩大。因为每个size、粗体、斜体的度量值不同，所以当修改Text的这些值的时候，纹理中会出现同一个字符多个位图的情况。
+TMP的渲染原理TMP是基于SDF(有向距离场)的技术渲染的，将字体中每个像素或顶点离其最近的形状边缘的距离值，存储到一张距离纹理中。所以TMP在显示前必须生成这个距离纹理，否则将无法显示(Unity中TMP会缺字出现口的原因)。因为显示的像素为动态计算该使用何种颜色和透明度，从而创建出精细、高品质的字体效果。所以TMP几乎不受放大的影响，能一直提供锐利清晰的图像。并且因为有距离信息，所以TMP能以一个较小的开销支持描边、投影等效果。在Unity的SDF中可以看到这张纹理，可以看到字体内部为白色，外部为黑色，在字体边缘之间黑白渐变，也就是距离从近到远的变化。
+TMP和Text的性能对比这里使用的TTF文件为AlibabaPuHuiTi-3-65-Medium，TMP和Text渲染内容一篇滕王阁序。为了模拟实际项目中显示所有字符的需求，所有TMP和Text都选择字符模式都为Dynamic。下面从渲染DrawCall和内存两方面对比
+Text的性能表现首先是Text的DrawCall,得益于所有的字符都在一张字符纹理中，所以Text只有一个DC。其次是内存因为滕王阁序的字符有限，所以Text的内存占用也仅有0.5MB。
+TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Unity把文章字符分到了3个不同的字符纹理中，最终使用了3个DrwaCall。内存占用也是3个字符纹理的占用，为6MB。
+性能总结在有限字符的渲染中，Text凭借只会取需要的字符位图存储，所以内存和DrwaCall下更优。但是这里TMP有着明显的优化空间，就是使用静态把所有的文字都的烘培一张纹理中。此时drwaCall为1，内存占用也为一张纹理2MB。但在实际的项目中，除非是没有聊天、排行榜等玩家自定义字符的功能，否则静态纹理一定会出现字符缺失的情况。对于Text来说，只能是使用Dynamic去扩容纹理大小，在纹理达到4096*4096后，也会出现多张纹理导致DrawCall上升。对于TMP因为官方支持了FallBack字体，所以可以使用一个静态纹理打入常用的3000或者7000字符，使用的FallBack字符再设置为动态，可以有效的避免游戏过程中因为贴图扩大的性能开销。
+技术选型的思考1、Text不支持图文混排，除非自己实现一套富文本图片解析。所以有图文混排需求建议无脑TMP。2、仅有描边、投影的需求。之前实现了一个Text的描边和弯曲组件，所以在字符有限的项目中(不考虑本地化、玩家自定义情况)使用Text和TMP，在性能和效果上和TMP差不多。但在字符无限的项目中，推荐使用静态常用字TMP+动态TMP配合，既有较好的性能效果，也能使用TMP的各种功能。3、对渲染效果更高的要求，这个就不用纠结了，美术一定会让你选TMP。
+参考资料[1].Unity字体渲染原理[2].unity-UGUI源码分析(4):Text与TextMeshPro[3].文本渲染-LearnOpenGL
+]]></content>
+      <tags>
+        <tag>Unity文字渲染</tag>
+      </tags>
   </entry>
   <entry>
     <title>Unity 异步等待方案选型：Mono 轮询 vs 协程 vs UniTask</title>
@@ -2635,34 +3006,6 @@ UniTask：现代 Unity 项目的事实标准，几乎在所有维度上都是协
       </tags>
   </entry>
   <entry>
-    <title>Unity的==与空并运算符(？.)</title>
-    <url>/posts/1bd27c8e.html</url>
-    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
-Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
-Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
-差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
-在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
-Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity的TMP和Text原理和使用优化</title>
-    <url>/posts/b46c3d6a.html</url>
-    <content><![CDATA[Unity在2018版本加入了TextMeshPro，并且现在已经将Text标记为Legacy。下面是我有关于TMP和Text的理解和思考。
-Text的渲染原理Unity的text组件是使用FreeType库来加载TrueType字体来实现的。通过加载TrueType字体并为每一个字形生成位图以及计算几个度量值(Metric)，生成出一个具体的字形的位图纹理。text动态渲染一个字符过程为：判断一个字符是否已经存在字体纹理中，在则直接获取对应的纹理坐标渲染；若不在则读取ttf文件中字符数据生成字符的位图，并放入纹理中管理。若放入时图集已满，则会对图集进行一次扩大。因为每个size、粗体、斜体的度量值不同，所以当修改Text的这些值的时候，纹理中会出现同一个字符多个位图的情况。
-TMP的渲染原理TMP是基于SDF(有向距离场)的技术渲染的，将字体中每个像素或顶点离其最近的形状边缘的距离值，存储到一张距离纹理中。所以TMP在显示前必须生成这个距离纹理，否则将无法显示(Unity中TMP会缺字出现口的原因)。因为显示的像素为动态计算该使用何种颜色和透明度，从而创建出精细、高品质的字体效果。所以TMP几乎不受放大的影响，能一直提供锐利清晰的图像。并且因为有距离信息，所以TMP能以一个较小的开销支持描边、投影等效果。在Unity的SDF中可以看到这张纹理，可以看到字体内部为白色，外部为黑色，在字体边缘之间黑白渐变，也就是距离从近到远的变化。
-TMP和Text的性能对比这里使用的TTF文件为AlibabaPuHuiTi-3-65-Medium，TMP和Text渲染内容一篇滕王阁序。为了模拟实际项目中显示所有字符的需求，所有TMP和Text都选择字符模式都为Dynamic。下面从渲染DrawCall和内存两方面对比
-Text的性能表现首先是Text的DrawCall,得益于所有的字符都在一张字符纹理中，所以Text只有一个DC。其次是内存因为滕王阁序的字符有限，所以Text的内存占用也仅有0.5MB。
-TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Unity把文章字符分到了3个不同的字符纹理中，最终使用了3个DrwaCall。内存占用也是3个字符纹理的占用，为6MB。
-性能总结在有限字符的渲染中，Text凭借只会取需要的字符位图存储，所以内存和DrwaCall下更优。但是这里TMP有着明显的优化空间，就是使用静态把所有的文字都的烘培一张纹理中。此时drwaCall为1，内存占用也为一张纹理2MB。但在实际的项目中，除非是没有聊天、排行榜等玩家自定义字符的功能，否则静态纹理一定会出现字符缺失的情况。对于Text来说，只能是使用Dynamic去扩容纹理大小，在纹理达到4096*4096后，也会出现多张纹理导致DrawCall上升。对于TMP因为官方支持了FallBack字体，所以可以使用一个静态纹理打入常用的3000或者7000字符，使用的FallBack字符再设置为动态，可以有效的避免游戏过程中因为贴图扩大的性能开销。
-技术选型的思考1、Text不支持图文混排，除非自己实现一套富文本图片解析。所以有图文混排需求建议无脑TMP。2、仅有描边、投影的需求。之前实现了一个Text的描边和弯曲组件，所以在字符有限的项目中(不考虑本地化、玩家自定义情况)使用Text和TMP，在性能和效果上和TMP差不多。但在字符无限的项目中，推荐使用静态常用字TMP+动态TMP配合，既有较好的性能效果，也能使用TMP的各种功能。3、对渲染效果更高的要求，这个就不用纠结了，美术一定会让你选TMP。
-参考资料[1].Unity字体渲染原理[2].unity-UGUI源码分析(4):Text与TextMeshPro[3].文本渲染-LearnOpenGL
-]]></content>
-      <tags>
-        <tag>Unity文字渲染</tag>
-      </tags>
-  </entry>
-  <entry>
     <title>Unity的TMP的纹理优化</title>
     <url>/posts/af72c7f2.html</url>
     <content><![CDATA[上一篇文章介绍了Unity的TMP和Text，TMP在渲染时需要先一张距离纹理，这不禁让我想到一种优化策略：如果对这张纹理选择不同图像压缩方式，是不是就可以以牺牲显示效果为代价，换取内存开销。
@@ -2681,118 +3024,6 @@ if (targetFont.atlasTextures != null &amp;&amp; targetFont.atlasTextures.Length 
       <tags>
         <tag>Unity文字渲染</tag>
       </tags>
-  </entry>
-  <entry>
-    <title>Unity的TMP顶点数据优化</title>
-    <url>/posts/7c9d3a21.html</url>
-    <content><![CDATA[上一篇写了 Unity的TMP的纹理优化，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。
-优化目标TMP 默认的 SDF Shader 已经支持描边、阴影、Glow 等效果，但这些参数大多来自 Material。只要某个文本的描边颜色、宽度不一样，就很容易产生新的材质实例。UI 里如果存在大量名字、伤害数字、状态文字，这部分材质数量和 Canvas 渲染批次都会变得不好控制。
-我的做法是让材质只负责通用渲染逻辑，把每个文本独有的数据写入 Mesh 顶点通道。Shader 渲染每个字时，从顶点里读取自己的描边或阴影参数。这样多个文字可以共用同一个材质，同时又能显示不同效果。
-
-为什么可以把数据放进顶点Unity 的 UI Mesh 顶点不只有 position、color、uv0。Canvas 还可以通过 additionalShaderChannels 额外传递 uv1、uv2、normal、tangent 等数据。对 TMP UGUI 来说，我们可以把自定义数据写入 Mesh 的 UV3，也就是代码里的 SetUVs(2, data)，在 Shader 里对应 TEXCOORD2。
-这里不把数据写进 color，是因为 TMP 原本就会使用顶点颜色做文字颜色和透明度。也不写进 uv0，因为 uv0 要采样字体 Atlas。选择 TEXCOORD2 的好处是与 TMP 原有采样逻辑解耦，结构也足够清晰：一个 Vector4 就有四个 float 可以使用。
-需要注意的是，UGUI 默认不会把所有额外通道都传给 Shader，所以必须打开 Canvas 的 TexCoord2：
-private void EnsureCanvasChannels()&#123;    Canvas canvas = GetComponentInParent&lt;Canvas&gt;();    if (canvas == null)    &#123;        return;    &#125;    canvas.additionalShaderChannels |= AdditionalCanvasShaderChannels.TexCoord2;&#125;
-
-写入顶点数据每次参数变化或文字内容变化时，先让 TMP 刷新 Mesh，然后遍历 textInfo.meshInfo。每个 sub mesh 都填入同一份效果数据，再写到 UV3：
-public void ApplyVertexEffect()&#123;    if (isApplying)    &#123;        return;    &#125;    CacheTextComponent();    if (textComponent == null)    &#123;        return;    &#125;    isApplying = true;    try    &#123;        textComponent.ForceMeshUpdate(false, false);        TMP_TextInfo textInfo = textComponent.textInfo;        Vector4 effectData = PackEffectData();        TMP_MeshInfo[] meshInfos = textInfo.meshInfo;        for (int i = 0; i &lt; meshInfos.Length; i++)        &#123;            Mesh mesh = meshInfos[i].mesh;            if (mesh == null || mesh.vertexCount == 0)            &#123;                continue;            &#125;            FillChannel(effectChannel, mesh.vertexCount, effectData);            mesh.SetUVs(2, effectChannel);            textComponent.UpdateGeometry(mesh, i);        &#125;        if (textComponent.mesh != null)        &#123;            textComponent.canvasRenderer.SetMesh(textComponent.mesh);        &#125;    &#125;    finally    &#123;        isApplying = false;    &#125;&#125;
-
-这段逻辑的关键是 mesh.SetUVs(2, effectChannel)。下标 2 对应 UV3，在 Shader 的输入结构里就是 texcoord2 : TEXCOORD2。只要顶点数一致，每个字的四个顶点都能拿到同一组效果参数。
-数据如何设计我把效果分成三种模式：
-public enum TMPVertexEffectMode&#123;    None = 0,    Outline = 1,    Shadow = 2&#125;
-
-Vector4 的四个分量被这样使用：
-
-
-
-模式
-x
-y
-z
-w
-
-
-
-描边
-R
-G
-B + width
-mode + direction
-
-
-阴影
-offsetX
-offsetY
-R + G
-mode + B + strength
-
-
-描边和阴影不会同时作为像素效果写入同一个 Vector4，这样可以用同一套通道表达两套数据。弯曲效果不进 Shader，而是在 C# 端直接修改顶点位置，所以可以和描边或阴影叠加。
-数据压缩原理一个 Vector4 看起来有四个 float，但要表达描边颜色 RGB、宽度、方向，或者阴影颜色 RGB、偏移、强度和模式，直接存会不够。解决办法是把两个 0 到 1 的值压进一个 float。
-压缩步骤是：
-
-把两个归一化值分别量化成 0 到 255 的整数，也就是 8 bit。
-第一个值左移 8 位放到高 8 位，第二个值放到低 8 位。
-合成一个 0 到 65535 的 16 bit 整数。
-再除以 65535，变回 0 到 1 的 float，方便走顶点通道传给 Shader。
-
-核心代码如下：
-private static float PackTwoBytes(float highValue, float lowValue)&#123;    int highByte = Mathf.RoundToInt(Mathf.Clamp01(highValue) * 255f);    int lowByte = Mathf.RoundToInt(Mathf.Clamp01(lowValue) * 255f);    return ((highByte &lt;&lt; 8) | lowByte) / 65535f;&#125;
-
-描边模式里，x/y 存颜色的 R&#x2F;G，z 存 B 和描边宽度，w 存模式和描边方向：
-private static Vector4 PackOutlineData(    Color color,    float width,    TMPVertexOutlineDirection direction)&#123;    int blue = Mathf.RoundToInt(Mathf.Clamp01(color.b) * 255f);    int widthByte = Mathf.RoundToInt(Mathf.Clamp01(width) * 255f);    float packedBlueAndWidth = ((blue &lt;&lt; 8) | widthByte) / 65535f;    float packedModeAndDirection =        (float)TMPVertexEffectMode.Outline +        (direction == TMPVertexOutlineDirection.Outer ? 0.1f : 0f);    return new Vector4(        color.r,        color.g,        packedBlueAndWidth,        packedModeAndDirection);&#125;
-
-阴影模式里，x/y 直接存偏移。颜色和强度被拆成两组压缩数据：z 存 R&#x2F;G，w 的小数部分存 B&#x2F;strength：
-private static Vector4 PackShadowData(    Color color,    Vector2 offset,    float strength)&#123;    float packedRedAndGreen = PackTwoBytes(color.r, color.g);    float packedBlueAndStrength = PackTwoBytes(color.b, strength);    return new Vector4(        offset.x,        offset.y,        packedRedAndGreen,        (float)TMPVertexEffectMode.Shadow + packedBlueAndStrength * 0.1f);&#125;
-
-这里把阴影的 packedBlueAndStrength 乘以 0.1 放进 w 的小数部分，是为了让 w 的整数部分仍然能表示模式 2。Shader 端用四舍五入取模式，用 (w - 2) * 10 取回被压缩的数据。
-这个方案的代价是精度从 float 降到 8 bit。颜色通道和宽度、强度用 0 到 255 的精度已经足够；阴影偏移没有压缩，仍然直接存 float。
-Shader 解包Shader 顶点输入结构需要增加 TEXCOORD2：
-struct vertex_t&#123;    float4 position  : POSITION;    fixed4 color     : COLOR;    float2 texcoord0 : TEXCOORD0;    float2 texcoord1 : TEXCOORD1;    float4 texcoord2 : TEXCOORD2;&#125;;struct pixel_t&#123;    float4 position     : SV_POSITION;    fixed4 color        : COLOR;    float2 atlas        : TEXCOORD0;    float4 param        : TEXCOORD1;    float4 vertexEffect : TEXCOORD6;&#125;;
-
-顶点阶段只负责把数据传到片元阶段：
-output.vertexEffect = float4(input.texcoord2.xyz, input.texcoord2.w);
-
-解包函数与 C# 的打包规则对应：
-float2 DecodePackedBlueAndWidth(float packedValue)&#123;    float packedInt = floor(saturate(packedValue) * 65535.0 + 0.5);    float highValue = floor(packedInt / 256.0) / 255.0;    float lowValue = (packedInt - floor(packedInt / 256.0) * 256.0) / 255.0;    return float2(highValue, lowValue);&#125;float DecodeVertexEffectMode(float packedMode)&#123;    return floor(packedMode + 0.5);&#125;float DecodeShadowPackedBlueAndStrength(float packedMode)&#123;    return saturate((packedMode - 2.0) * 10.0);&#125;float DecodeOutlineDirection(float packedMode)&#123;    return step(0.5, saturate((packedMode - 1.0) * 10.0));&#125;
-
-片元阶段先判断当前模式，再决定是使用材质上的描边参数，还是使用顶点传进来的参数：
-float effectMode = DecodeVertexEffectMode(input.vertexEffect.w);float outlineMode = 1.0 - step(0.5, abs(effectMode - 1.0));float shadowMode = 1.0 - step(0.5, abs(effectMode - 2.0));float2 decodedOutline = DecodePackedBlueAndWidth(input.vertexEffect.z);float vertexOutlineWidth = decodedOutline.y * outlineMode;half4 vertexOutlineColor =    half4(input.vertexEffect.rg, decodedOutline.x, 1);half4 outlineColor = lerp(    _OutlineColor,    vertexOutlineColor,    step(0.0001, vertexOutlineWidth));
-
-阴影也是同理。偏移从 x/y 直接取，颜色和强度从压缩值里解出来：
-float2 decodedShadowRedAndGreen =    DecodePackedBlueAndWidth(input.vertexEffect.z);float2 decodedShadowBlueAndStrength =    DecodePackedBlueAndWidth(        DecodeShadowPackedBlueAndStrength(input.vertexEffect.w));float2 vertexShadowOffset =    -input.vertexEffect.xy * _GradientScale /    float2(_TextureWidth, _TextureHeight);float shadowSample = tex2D(_MainTex, input.atlas + vertexShadowOffset).a;float shadowAlpha =    saturate((shadowSample - 0.5) * scale + 0.5) *    decodedShadowBlueAndStrength.y *    shadowMode;half4 vertexShadowColor = half4(    decodedShadowRedAndGreen.x,    decodedShadowRedAndGreen.y,    decodedShadowBlueAndStrength.x,    1);vertexShadowColor.a *= shadowAlpha;vertexShadowColor.rgb *= vertexShadowColor.a;faceColor += vertexShadowColor * (1 - faceColor.a);
-
-弯曲效果弯曲没有必要进 Shader，因为它本质上是改顶点位置，不是像素颜色。这里直接根据文字包围盒把 x 坐标归一化到 0 到 1，再用 AnimationCurve 得到 y 方向偏移：
-private void ApplyBend(TMP_MeshInfo meshInfo)&#123;    Vector3[] vertices = meshInfo.vertices;    Bounds bounds = textComponent.textBounds;    float width = Mathf.Max(bounds.size.x, 0.001f);    float bendScale = bendStrength * width * 0.25f;    AnimationCurve curve = bendCurve ?? CreateArchCurve();    for (int i = 0; i &lt; vertices.Length; i++)    &#123;        float normalizedX =            Mathf.InverseLerp(bounds.min.x, bounds.max.x, vertices[i].x);        vertices[i].y += curve.Evaluate(normalizedX) * bendScale;    &#125;    meshInfo.mesh.vertices = vertices;    meshInfo.mesh.RecalculateBounds();&#125;
-
-这种方式的好处是弯曲可以和描边、阴影同时存在：弯曲改 position，描边和阴影读 TEXCOORD2，两者互不抢数据。
-使用方式我额外加了一个创建入口：GameObject/UI/TMP Vertex Outline Text。它会自动创建 TMP 文本、挂上 TMPVertexOutlineUGUI，并切换到自定义 Shader 材质。
-已有的 TextMeshProUGUI 也可以在组件右键菜单中选择 Add Vertex Outline Controller。如果手动配置，需要确认两件事：
-
-文本材质使用 TextMeshPro/Distance Field Vertex Outline。
-所在 Canvas 开启了 AdditionalCanvasShaderChannels.TexCoord2。
-
-
-
-总结这套方案的核心是把“材质级参数”变成“顶点级参数”。材质只保留一份通用 Shader，具体颜色、宽度、偏移、强度都从顶点通道读取。数据量不大时，用两个 8 bit 值压进一个 float，可以在不额外增加通道的情况下放下更多参数。
-它适合用于大量 TMP UGUI 文本需要不同描边或阴影的场景。限制也很明确：写入顶点后，文字内容变化、字体变化、Mesh 刷新时都要重新写入；如果还想扩展更多效果，需要重新规划 Vector4 的字段分配，或者启用更多顶点通道。
-项目地址OptimizeUnityTMP
-参考文章TMP(TextMeshPro)优化篇 — 描边投影效果
-]]></content>
-      <tags>
-        <tag>Unity文字渲染</tag>
-      </tags>
-  </entry>
-  <entry>
-    <title>Unity的协程的原理理解</title>
-    <url>/posts/ef3074aa.html</url>
-    <content><![CDATA[协程最近在看面试题，经常会遇到一个经典的八股问题：协程是多线程吗？底层原理是什么。虽然接触Unity好几年了，但是一直没用探究过其中的底层原理，看到这个问题也大脑空白。今天就来探寻一下其中的原理。
-测试代码废话不多说，直接上代码。代码非常简单一个TestCoroutine函数内yield return null和log输出。
-IL代码C#的代码看不出什么，打开IL代码。可以清晰编译器为我们的协程生成了一个类名叫d__1，并且继承了IEnumerator，类中除了IEnumerator的Current、MoveNext()和Reset()，还额外多了一个state变量。我们自己写的TestCoroutine函数中就new了这个类的实例。其中类中最关键的就是这个state变量的使用。
-state变量的使用从截图可以看到，MoveNext()中维护的switch充当了一个类似状态机的逻辑，每个yield return null就变成了一个case，state变量就变成了case块的记录，通过枚举去执行不同的逻辑，这就是协程可重入机制的根本原因。
-协程的性能消耗既然协程是new的了一个类，那就一定在堆上分配了内存，并且会触发GC。通过Unity的profiler可以看到，代码触发一个40B的GC。问了一下AI，这40B主要来自于(我的系统是64位的)，类的对象头16个字节，int类型的state变量4字节，object引用8字节，this指针8字节，最后再有4字节的内存对齐，所以总计&#x3D;16+4+8+8+4&#x3D;40b。
-优化&#x2F;替代方案既然协程有GC消耗所以我们应避免使用协程，在业务逻辑中使用协程只有一种情形就是等待。1、等待固定时间。2、等待固定帧。而这两种情形都可以通过在Update中通过轮询去替代。
-]]></content>
   </entry>
   <entry>
     <title>Unity的Text与TMP艺术字实现方案</title>
@@ -3083,38 +3314,124 @@ shader、材质与图集依赖完整，显示与编辑器一致
       </tags>
   </entry>
   <entry>
+    <title>Unity的TMP顶点数据优化</title>
+    <url>/posts/7c9d3a21.html</url>
+    <content><![CDATA[上一篇写了 Unity的TMP的纹理优化，核心是把 TMP Font Asset 内部的 SDF Atlas 提取出来，再按平台设置合适的纹理压缩格式。这篇继续写另一个方向：把描边、阴影这类每个文字可能不同的效果参数放进顶点数据里，避免为了不同颜色或不同宽度频繁创建材质实例。
+优化目标TMP 默认的 SDF Shader 已经支持描边、阴影、Glow 等效果，但这些参数大多来自 Material。只要某个文本的描边颜色、宽度不一样，就很容易产生新的材质实例。UI 里如果存在大量名字、伤害数字、状态文字，这部分材质数量和 Canvas 渲染批次都会变得不好控制。
+我的做法是让材质只负责通用渲染逻辑，把每个文本独有的数据写入 Mesh 顶点通道。Shader 渲染每个字时，从顶点里读取自己的描边或阴影参数。这样多个文字可以共用同一个材质，同时又能显示不同效果。
+
+为什么可以把数据放进顶点Unity 的 UI Mesh 顶点不只有 position、color、uv0。Canvas 还可以通过 additionalShaderChannels 额外传递 uv1、uv2、normal、tangent 等数据。对 TMP UGUI 来说，我们可以把自定义数据写入 Mesh 的 UV3，也就是代码里的 SetUVs(2, data)，在 Shader 里对应 TEXCOORD2。
+这里不把数据写进 color，是因为 TMP 原本就会使用顶点颜色做文字颜色和透明度。也不写进 uv0，因为 uv0 要采样字体 Atlas。选择 TEXCOORD2 的好处是与 TMP 原有采样逻辑解耦，结构也足够清晰：一个 Vector4 就有四个 float 可以使用。
+需要注意的是，UGUI 默认不会把所有额外通道都传给 Shader，所以必须打开 Canvas 的 TexCoord2：
+private void EnsureCanvasChannels()&#123;    Canvas canvas = GetComponentInParent&lt;Canvas&gt;();    if (canvas == null)    &#123;        return;    &#125;    canvas.additionalShaderChannels |= AdditionalCanvasShaderChannels.TexCoord2;&#125;
+
+写入顶点数据每次参数变化或文字内容变化时，先让 TMP 刷新 Mesh，然后遍历 textInfo.meshInfo。每个 sub mesh 都填入同一份效果数据，再写到 UV3：
+public void ApplyVertexEffect()&#123;    if (isApplying)    &#123;        return;    &#125;    CacheTextComponent();    if (textComponent == null)    &#123;        return;    &#125;    isApplying = true;    try    &#123;        textComponent.ForceMeshUpdate(false, false);        TMP_TextInfo textInfo = textComponent.textInfo;        Vector4 effectData = PackEffectData();        TMP_MeshInfo[] meshInfos = textInfo.meshInfo;        for (int i = 0; i &lt; meshInfos.Length; i++)        &#123;            Mesh mesh = meshInfos[i].mesh;            if (mesh == null || mesh.vertexCount == 0)            &#123;                continue;            &#125;            FillChannel(effectChannel, mesh.vertexCount, effectData);            mesh.SetUVs(2, effectChannel);            textComponent.UpdateGeometry(mesh, i);        &#125;        if (textComponent.mesh != null)        &#123;            textComponent.canvasRenderer.SetMesh(textComponent.mesh);        &#125;    &#125;    finally    &#123;        isApplying = false;    &#125;&#125;
+
+这段逻辑的关键是 mesh.SetUVs(2, effectChannel)。下标 2 对应 UV3，在 Shader 的输入结构里就是 texcoord2 : TEXCOORD2。只要顶点数一致，每个字的四个顶点都能拿到同一组效果参数。
+数据如何设计我把效果分成三种模式：
+public enum TMPVertexEffectMode&#123;    None = 0,    Outline = 1,    Shadow = 2&#125;
+
+Vector4 的四个分量被这样使用：
+
+
+
+模式
+x
+y
+z
+w
+
+
+
+描边
+R
+G
+B + width
+mode + direction
+
+
+阴影
+offsetX
+offsetY
+R + G
+mode + B + strength
+
+
+描边和阴影不会同时作为像素效果写入同一个 Vector4，这样可以用同一套通道表达两套数据。弯曲效果不进 Shader，而是在 C# 端直接修改顶点位置，所以可以和描边或阴影叠加。
+数据压缩原理一个 Vector4 看起来有四个 float，但要表达描边颜色 RGB、宽度、方向，或者阴影颜色 RGB、偏移、强度和模式，直接存会不够。解决办法是把两个 0 到 1 的值压进一个 float。
+压缩步骤是：
+
+把两个归一化值分别量化成 0 到 255 的整数，也就是 8 bit。
+第一个值左移 8 位放到高 8 位，第二个值放到低 8 位。
+合成一个 0 到 65535 的 16 bit 整数。
+再除以 65535，变回 0 到 1 的 float，方便走顶点通道传给 Shader。
+
+核心代码如下：
+private static float PackTwoBytes(float highValue, float lowValue)&#123;    int highByte = Mathf.RoundToInt(Mathf.Clamp01(highValue) * 255f);    int lowByte = Mathf.RoundToInt(Mathf.Clamp01(lowValue) * 255f);    return ((highByte &lt;&lt; 8) | lowByte) / 65535f;&#125;
+
+描边模式里，x/y 存颜色的 R&#x2F;G，z 存 B 和描边宽度，w 存模式和描边方向：
+private static Vector4 PackOutlineData(    Color color,    float width,    TMPVertexOutlineDirection direction)&#123;    int blue = Mathf.RoundToInt(Mathf.Clamp01(color.b) * 255f);    int widthByte = Mathf.RoundToInt(Mathf.Clamp01(width) * 255f);    float packedBlueAndWidth = ((blue &lt;&lt; 8) | widthByte) / 65535f;    float packedModeAndDirection =        (float)TMPVertexEffectMode.Outline +        (direction == TMPVertexOutlineDirection.Outer ? 0.1f : 0f);    return new Vector4(        color.r,        color.g,        packedBlueAndWidth,        packedModeAndDirection);&#125;
+
+阴影模式里，x/y 直接存偏移。颜色和强度被拆成两组压缩数据：z 存 R&#x2F;G，w 的小数部分存 B&#x2F;strength：
+private static Vector4 PackShadowData(    Color color,    Vector2 offset,    float strength)&#123;    float packedRedAndGreen = PackTwoBytes(color.r, color.g);    float packedBlueAndStrength = PackTwoBytes(color.b, strength);    return new Vector4(        offset.x,        offset.y,        packedRedAndGreen,        (float)TMPVertexEffectMode.Shadow + packedBlueAndStrength * 0.1f);&#125;
+
+这里把阴影的 packedBlueAndStrength 乘以 0.1 放进 w 的小数部分，是为了让 w 的整数部分仍然能表示模式 2。Shader 端用四舍五入取模式，用 (w - 2) * 10 取回被压缩的数据。
+这个方案的代价是精度从 float 降到 8 bit。颜色通道和宽度、强度用 0 到 255 的精度已经足够；阴影偏移没有压缩，仍然直接存 float。
+Shader 解包Shader 顶点输入结构需要增加 TEXCOORD2：
+struct vertex_t&#123;    float4 position  : POSITION;    fixed4 color     : COLOR;    float2 texcoord0 : TEXCOORD0;    float2 texcoord1 : TEXCOORD1;    float4 texcoord2 : TEXCOORD2;&#125;;struct pixel_t&#123;    float4 position     : SV_POSITION;    fixed4 color        : COLOR;    float2 atlas        : TEXCOORD0;    float4 param        : TEXCOORD1;    float4 vertexEffect : TEXCOORD6;&#125;;
+
+顶点阶段只负责把数据传到片元阶段：
+output.vertexEffect = float4(input.texcoord2.xyz, input.texcoord2.w);
+
+解包函数与 C# 的打包规则对应：
+float2 DecodePackedBlueAndWidth(float packedValue)&#123;    float packedInt = floor(saturate(packedValue) * 65535.0 + 0.5);    float highValue = floor(packedInt / 256.0) / 255.0;    float lowValue = (packedInt - floor(packedInt / 256.0) * 256.0) / 255.0;    return float2(highValue, lowValue);&#125;float DecodeVertexEffectMode(float packedMode)&#123;    return floor(packedMode + 0.5);&#125;float DecodeShadowPackedBlueAndStrength(float packedMode)&#123;    return saturate((packedMode - 2.0) * 10.0);&#125;float DecodeOutlineDirection(float packedMode)&#123;    return step(0.5, saturate((packedMode - 1.0) * 10.0));&#125;
+
+片元阶段先判断当前模式，再决定是使用材质上的描边参数，还是使用顶点传进来的参数：
+float effectMode = DecodeVertexEffectMode(input.vertexEffect.w);float outlineMode = 1.0 - step(0.5, abs(effectMode - 1.0));float shadowMode = 1.0 - step(0.5, abs(effectMode - 2.0));float2 decodedOutline = DecodePackedBlueAndWidth(input.vertexEffect.z);float vertexOutlineWidth = decodedOutline.y * outlineMode;half4 vertexOutlineColor =    half4(input.vertexEffect.rg, decodedOutline.x, 1);half4 outlineColor = lerp(    _OutlineColor,    vertexOutlineColor,    step(0.0001, vertexOutlineWidth));
+
+阴影也是同理。偏移从 x/y 直接取，颜色和强度从压缩值里解出来：
+float2 decodedShadowRedAndGreen =    DecodePackedBlueAndWidth(input.vertexEffect.z);float2 decodedShadowBlueAndStrength =    DecodePackedBlueAndWidth(        DecodeShadowPackedBlueAndStrength(input.vertexEffect.w));float2 vertexShadowOffset =    -input.vertexEffect.xy * _GradientScale /    float2(_TextureWidth, _TextureHeight);float shadowSample = tex2D(_MainTex, input.atlas + vertexShadowOffset).a;float shadowAlpha =    saturate((shadowSample - 0.5) * scale + 0.5) *    decodedShadowBlueAndStrength.y *    shadowMode;half4 vertexShadowColor = half4(    decodedShadowRedAndGreen.x,    decodedShadowRedAndGreen.y,    decodedShadowBlueAndStrength.x,    1);vertexShadowColor.a *= shadowAlpha;vertexShadowColor.rgb *= vertexShadowColor.a;faceColor += vertexShadowColor * (1 - faceColor.a);
+
+弯曲效果弯曲没有必要进 Shader，因为它本质上是改顶点位置，不是像素颜色。这里直接根据文字包围盒把 x 坐标归一化到 0 到 1，再用 AnimationCurve 得到 y 方向偏移：
+private void ApplyBend(TMP_MeshInfo meshInfo)&#123;    Vector3[] vertices = meshInfo.vertices;    Bounds bounds = textComponent.textBounds;    float width = Mathf.Max(bounds.size.x, 0.001f);    float bendScale = bendStrength * width * 0.25f;    AnimationCurve curve = bendCurve ?? CreateArchCurve();    for (int i = 0; i &lt; vertices.Length; i++)    &#123;        float normalizedX =            Mathf.InverseLerp(bounds.min.x, bounds.max.x, vertices[i].x);        vertices[i].y += curve.Evaluate(normalizedX) * bendScale;    &#125;    meshInfo.mesh.vertices = vertices;    meshInfo.mesh.RecalculateBounds();&#125;
+
+这种方式的好处是弯曲可以和描边、阴影同时存在：弯曲改 position，描边和阴影读 TEXCOORD2，两者互不抢数据。
+使用方式我额外加了一个创建入口：GameObject/UI/TMP Vertex Outline Text。它会自动创建 TMP 文本、挂上 TMPVertexOutlineUGUI，并切换到自定义 Shader 材质。
+已有的 TextMeshProUGUI 也可以在组件右键菜单中选择 Add Vertex Outline Controller。如果手动配置，需要确认两件事：
+
+文本材质使用 TextMeshPro/Distance Field Vertex Outline。
+所在 Canvas 开启了 AdditionalCanvasShaderChannels.TexCoord2。
+
+
+
+总结这套方案的核心是把“材质级参数”变成“顶点级参数”。材质只保留一份通用 Shader，具体颜色、宽度、偏移、强度都从顶点通道读取。数据量不大时，用两个 8 bit 值压进一个 float，可以在不额外增加通道的情况下放下更多参数。
+它适合用于大量 TMP UGUI 文本需要不同描边或阴影的场景。限制也很明确：写入顶点后，文字内容变化、字体变化、Mesh 刷新时都要重新写入；如果还想扩展更多效果，需要重新规划 Vector4 的字段分配，或者启用更多顶点通道。
+项目地址OptimizeUnityTMP
+参考文章TMP(TextMeshPro)优化篇 — 描边投影效果
+]]></content>
+      <tags>
+        <tag>Unity文字渲染</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Unity的协程的原理理解</title>
+    <url>/posts/ef3074aa.html</url>
+    <content><![CDATA[协程最近在看面试题，经常会遇到一个经典的八股问题：协程是多线程吗？底层原理是什么。虽然接触Unity好几年了，但是一直没用探究过其中的底层原理，看到这个问题也大脑空白。今天就来探寻一下其中的原理。
+测试代码废话不多说，直接上代码。代码非常简单一个TestCoroutine函数内yield return null和log输出。
+IL代码C#的代码看不出什么，打开IL代码。可以清晰编译器为我们的协程生成了一个类名叫d__1，并且继承了IEnumerator，类中除了IEnumerator的Current、MoveNext()和Reset()，还额外多了一个state变量。我们自己写的TestCoroutine函数中就new了这个类的实例。其中类中最关键的就是这个state变量的使用。
+state变量的使用从截图可以看到，MoveNext()中维护的switch充当了一个类似状态机的逻辑，每个yield return null就变成了一个case，state变量就变成了case块的记录，通过枚举去执行不同的逻辑，这就是协程可重入机制的根本原因。
+协程的性能消耗既然协程是new的了一个类，那就一定在堆上分配了内存，并且会触发GC。通过Unity的profiler可以看到，代码触发一个40B的GC。问了一下AI，这40B主要来自于(我的系统是64位的)，类的对象头16个字节，int类型的state变量4字节，object引用8字节，this指针8字节，最后再有4字节的内存对齐，所以总计&#x3D;16+4+8+8+4&#x3D;40b。
+优化&#x2F;替代方案既然协程有GC消耗所以我们应避免使用协程，在业务逻辑中使用协程只有一种情形就是等待。1、等待固定时间。2、等待固定帧。而这两种情形都可以通过在Update中通过轮询去替代。
+]]></content>
+  </entry>
+  <entry>
     <title>Unity节点编辑器(一) -- 需求分析</title>
     <url>/posts/4cce52e3.html</url>
     <content><![CDATA[最近需求的思考最近工作上在处理项目内的引导系统，我之前的做法是根据策划的需求，通过继承引导基类实现具体子类的做法，来实现不同的引导。但是这样有一个缺点：所有的引导实现都基于我的硬编码，当引导的流程变更的时候，我代码的流程也需要跟着修改，非常麻烦。而且这些变更也仅仅是步骤改变，1-&gt;2-&gt;3变成了1-&gt;3-&gt;2，修改就是纯粹的体力活，非常的琐碎。然后最近在各种机缘巧合之下，接触到了节点编辑器，突然激发了我的灵感，要是我把引导的逻辑封装在一个Node里面，由策划自己去建立Node流程，就是完全由策划编辑，我提供具体的引导Node实现，完美解决。
 关于节点编辑器其实这个东西在已经应用非常广泛了，Unity的ShareGraph和UE的蓝图，都是节点编辑器的应用。而且在Unity上开源的节点编辑器框架也不少，比较出名的就有：xNode，NodeGraphProcessor。本来是打算直接使用这些框架，省下自己造轮子的时间，但是深入了解之后，发现这些框架为了通用性，代码都比较多且太重度了(我目前的需求根本用不上)。所以就想着自己造一个只提供流程的简单节点编辑器。
 编辑器需求首先，因为颜值问题节点编辑器我选择了基于Unity的GraphView实现。要实现的需求：1、GraphView的创建与资源的打开。2、Node的创建、连接。3、GraphView的保存、序列化&#x2F;反序列化。4、需要具有拓展性，为之后功能提供底层复用。
 代码结构因为编辑器窗口仅做显示和把数据保存，就只有model-view两层。model层为保存的Unity的so数据，view层则是解析so数据创建出对应的节点和连接。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity节点编辑器(三) -- 创建Node节点</title>
-    <url>/posts/6faec29c.html</url>
-    <content><![CDATA[编辑器数据类要做的节点如下图所示根据图片可以很清晰的知道，数据分为4部分。1.要有一个类存储着所有的节点数据。2.每个节点需要保存自己的类型名字(用于反射生成)、节点唯一ID(用于标识节点)、标题、节点位置、输出&#x2F;输出端口的数据、以及一个Object类型的每个子类自己的数据。3.端口数据记录端口所在节点ID、端口唯一ID以及连接的数据。4.连接数据记录着连接的节点ID和端口。我的实现使用了Unity的ScriptableObject。数据结构的图如下。
-GraphSoData 黑板数据[Serializable]public class GraphSoData : ScriptableObject&#123;    [SerializeField] public string graphName;    [SerializeField] public List&lt;NodeSoData&gt; nodeSoDataList = new List&lt;NodeSoData&gt;();    public void Dispose()    &#123;        if (nodeSoDataList != null)        &#123;            nodeSoDataList.Clear();            nodeSoDataList = null;        &#125;    &#125;&#125;
-Node 节点数据[Serializable]public class NodeSoData : ScriptableObject&#123;    [SerializeField] public string nodeFullTypeName;        [SerializeField] public long nodeID;    [SerializeField] public Vector2 nodePos;    [SerializeField] public string nodeTitle;    [SerializeField] public List&lt;PortSerializationData&gt; intputPortDataList;    [SerializeField] public List&lt;PortSerializationData&gt; outputPortDataList;    [SerializeReference] public System.Object userData;&#125;
-port 端口数据其中端口数据需要记录该端口自己的端口唯一ID、所属的节点ID、以及连接的信息。其中连接的信息保存的就是连接的节点与连接的端口。
-[Serializable]public class LinkData&#123;    [SerializeField] public long linkPortID;    [SerializeField] public long linkNodeID;    public LinkData(long linkPortID, long linkNodeID)    &#123;        this.linkPortID = linkPortID;        this.linkNodeID = linkNodeID;    &#125;&#125;[Serializable]public class PortSerializationData&#123;    [SerializeField]    //端口ID    public long portID;    [SerializeField]    //端口所属节点ID    public long portNodeID;    [SerializeField]    //连接的端口ID    public List&lt;LinkData&gt; linkData;&#125;
-
-NodeBase 编辑器节点基类该Node类做的是显示工作,该类继承于UnityEditor.Experimental.GraphView.Node。类中包含了NodeGraphView黑板实例、NodeSoData此Node的节点数据，以及节点大小等数据。下面是一些流程函数的说明。
-初始化拿到节点数据和黑板实例后，流程先初始化数据，后初始化组件，最后刷新节点。比较简单。
-public virtual void Init(NodeSoData nodeData, NodeGraphView nodeGraphView)&#123;    this.nodeGraphView = nodeGraphView;    this.nodeData = nodeData;    InitData();    InitComponent();    Refresh();&#125;public virtual void Init(NodeGraphView nodeGraphView, bool isStartNode)&#123;    this.nodeGraphView = nodeGraphView;    nodeData = GraphEditorUnility.CreateDefaultNodeData(isStartNode);    InitData();    InitComponent();    Refresh();&#125;
-初始化组件这个函数比较关键，所有节点的操作都在这个函数中初始化了。拿节点数据设置位置、标题，遍历。
-protected virtual void InitComponent()&#123;    AddStyle();    SetPosition(new Rect(nodeData.nodePos, Vector2.zero));    InitTitleLabel();        InitPort();        AddResizeHandle();&#125;private void InitTitleLabel()&#123;    TextField textField = new TextField()    &#123;        value = nodeData.nodeTitle    &#125;;    titleContainer.Insert(0, textField);&#125;public virtual void InitPort()&#123;    //初始化输入端口    if (nodeData.intputPortDataList != null &amp;&amp; nodeData.intputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.intputPortDataList)        &#123;            InstantiatePort(port,nodeData.intputPortDataList,Direction.Input,inputContainer);        &#125;    &#125;    //初始化输出端口    if (nodeData.outputPortDataList != null &amp;&amp; nodeData.outputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.outputPortDataList)        &#123;            InstantiatePort(port,nodeData.outputPortDataList,Direction.Output,outputContainer);        &#125;    &#125;&#125;//创建节点的端口实例private Port InstantiatePort(PortSerializationData portData, List&lt;PortSerializationData&gt; portDataList,Direction direction, VisualElement portContainer)&#123;    // 创建一个水平布局的容器来放置删除按钮和端口    var horizontalContainer = new VisualElement();    horizontalContainer.style.flexDirection = FlexDirection.RowReverse; // 设置为水平排列    horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        Port newPort = InstantiatePort(Orientation.Horizontal, direction, Port.Capacity.Multi, typeof(bool));    newPort.name = string.Empty;    newPort.userData = portData;        // Button deleteButton = new Button();    // deleteButton.text = &quot;X&quot;;    // deleteButton.clicked += Click;    //    // horizontalContainer.Add(deleteButton);    horizontalContainer.Add(newPort);        portContainer.Add(horizontalContainer);    // void Click()    // &#123;    //     portDataList.Remove(portData);    //     nodeGraphView.DisconnectPort(newPort);    //     deleteButton.clicked -= Click;    //         //     portContainer.Remove(horizontalContainer);    // &#125;    return newPort;&#125;
-鼠标拖动节点大小其中AddResizeHandle函数是添加了节点宽度水平拉伸。为了做到鼠标移动到右边界改变鼠标样式，所以在节点的右侧，添加一个透明的VisualElement，并且高度占满节点，宽度为5px(可以根据喜好自行修改)，其中鼠标样式需要添加到uss文件中。
-//uss代码,设置一个水平的鼠标样式.resize-handle &#123;    cursor: resize-horizontal;&#125;protected virtual void AddResizeHandle()&#123;    resizeHandle = new VisualElement();    resizeHandle.style.position = Position.Absolute;    resizeHandle.style.right = 0;    resizeHandle.style.top = 0;    resizeHandle.style.bottom = 0;    resizeHandle.style.width = 10;    resizeHandle.style.backgroundColor = Color.clear;    resizeHandle.AddToClassList(&quot;resize-handle&quot;);    Add(resizeHandle);    resizeHandle.RegisterCallback&lt;MouseDownEvent&gt;(OnResizeHandleMouseDown);    resizeHandle.RegisterCallback&lt;MouseMoveEvent&gt;(OnResizeHandleMouseMove);    resizeHandle.RegisterCallback&lt;MouseUpEvent&gt;(OnResizeHandleMouseUp);&#125;//鼠标按下回调，添加一个绿框样式private void OnResizeHandleMouseDown(MouseDownEvent evt)&#123;    if (evt.button == 0) //     &#123;        isResizing = true;        resizeStartPosition = evt.mousePosition;        resizeStartSize = new Vector2(resolvedStyle.width, resolvedStyle.height);        style.borderTopWidth = 2;        style.borderBottomWidth = 2;        style.borderLeftWidth = 2;        style.borderRightWidth = 2;        style.borderTopColor = Color.green;        style.borderBottomColor = Color.green;        style.borderLeftColor = Color.green;        style.borderRightColor = Color.green;        resizeHandle.CaptureMouse();        evt.StopPropagation();    &#125;&#125;//鼠标按下移动，一直改变节点大小private void OnResizeHandleMouseMove(MouseMoveEvent evt)&#123;    if (isResizing &amp;&amp; resizeHandle.HasMouseCapture())    &#123;        Vector2 delta = evt.mousePosition - resizeStartPosition;        Vector2 newSize = resizeStartSize + new Vector2(delta.x, delta.y);        newSize.x = Mathf.Clamp(newSize.x, minSize.x, maxSize.x);        newSize.y = Mathf.Clamp(newSize.y, minSize.y, maxSize.y);        style.width = newSize.x;        RefreshPorts();        evt.StopPropagation();    &#125;&#125;//鼠标抬起设置大小private void OnResizeHandleMouseUp(MouseUpEvent evt)&#123;    if (isResizing &amp;&amp; evt.button == 0)    &#123;        isResizing = false;        resizeHandle.ReleaseMouse();        evt.StopPropagation();        style.borderTopWidth = StyleKeyword.Null;        style.borderBottomWidth = StyleKeyword.Null;        style.borderLeftWidth = StyleKeyword.Null;        style.borderRightWidth = StyleKeyword.Null;        style.borderTopColor = StyleKeyword.Null;        style.borderBottomColor = StyleKeyword.Null;        style.borderLeftColor = StyleKeyword.Null;        style.borderRightColor = StyleKeyword.Null;        OnSizeChanged();    &#125;&#125;
-
-StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView中必备的,表示从这个节点开始往下执行。
-//节点数据[Serializable]public class StartNodeData : NodeSerializationData&#123;    [SerializeField]    public bool isStartNode;    &#125;//开始节点public class StartNode : NodeBase&#123;    public StartNodeData startNodeData;        private Toggle checkBox;        protected override void InitData()    &#123;                if (nodeData.userData != null)        &#123;            startNodeData = nodeData.userData as StartNodeData;        &#125;        else        &#123;            startNodeData = new StartNodeData();            startNodeData.isStartNode = true;        &#125;    &#125;    protected override void InitComponent()    &#123;        base.InitComponent();                var horizontalContainer = new VisualElement();        horizontalContainer.style.flexDirection = FlexDirection.Row; // 设置为水平排列        horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        checkBox = new Toggle();        checkBox.SetEnabled(false);        checkBox.value = startNodeData.isStartNode;                var label = new Label(&quot;初始节点&quot;);                horizontalContainer.Add(checkBox);        horizontalContainer.Add(label);                extensionContainer.Add(horizontalContainer);    &#125;    public override NodeSerializationData GetSerializationData()    &#123;        StartNodeData serializationData = new StartNodeData();        serializationData.isStartNode = true;        serializationData.nodeID =  nodeData.nodeID;        serializationData.outputPortDataList = nodeData.outputPortDataList;        serializationData.intputPortDataList = nodeData.intputPortDataList;        return serializationData;    &#125;&#125;
-
-创建GraphView的So数据这里用的是Unity编辑器的菜单项，创建了一个So数据，并往里塞一个开始节点的默认数据。
-[MenuItem(&quot;★Tools★/CraeteGraph&quot;)]public static void CreateGraph()&#123;    GraphEditorUnility.CreateDefaultGraph();&#125;public static void CreateDefaultGraph()&#123;    GraphSoData graph = ScriptableObject.CreateInstance&lt;GraphSoData&gt;();    int soFileCount = CountFilesExcludingMeta(DEFAULT_FILE_PATH);    string defaultFileName = string.Format(DEFAULT_FILE_NAME, soFileCount);    string defaultFilePath = System.IO.Path.Combine(DEFAULT_FILE_PATH, defaultFileName);    graph.graphName = string.Format(DEFAULT_FILE_SAVE_NAME, soFileCount);    AssetDatabase.CreateAsset(graph, defaultFilePath);    NodeSoData defaultNode = CreateDefaultNodeData(true);    graph.nodeSoDataList.Add(defaultNode);    AssetDatabase.AddObjectToAsset(defaultNode, graph);        EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(defaultNode);    AssetDatabase.SaveAssets();&#125;public static NodeSoData CreateDefaultNodeData(bool isStartNode)&#123;    NodeSoData defaultSoData = ScriptableObject.CreateInstance&lt;NodeSoData&gt;();    defaultSoData.name = &quot;node&quot;;    defaultSoData.nodeID = GraphUtility.GenerateID();    defaultSoData.nodeTitle = &quot;New Node&quot;;    defaultSoData.nodePos = new Vector2(200, 200);    //起始节点加入输出node    if (isStartNode)    &#123;        defaultSoData.nodeFullTypeName = typeof(StartNode).FullName;        StartNodeData startNodeData = new StartNodeData();        startNodeData.isStartNode = true;        defaultSoData.userData = startNodeData;        defaultSoData.AddOutputPortData();    &#125;    else    &#123;        defaultSoData.nodeFullTypeName = typeof(NodeBase).FullName;    &#125;    defaultSoData.outputPortDataList = new List&lt;PortSerializationData&gt;();    defaultSoData.intputPortDataList = new List&lt;PortSerializationData&gt;();    return defaultSoData;&#125;
-
-结果可以在菜单项创建新的节点数据，并且双击打开能看到一个开始节点。
 ]]></content>
   </entry>
   <entry>
@@ -3153,6 +3470,32 @@ using System.Collections;using System.Collections.Generic;using UnityEngine;usin
 ]]></content>
   </entry>
   <entry>
+    <title>Unity节点编辑器(三) -- 创建Node节点</title>
+    <url>/posts/6faec29c.html</url>
+    <content><![CDATA[编辑器数据类要做的节点如下图所示根据图片可以很清晰的知道，数据分为4部分。1.要有一个类存储着所有的节点数据。2.每个节点需要保存自己的类型名字(用于反射生成)、节点唯一ID(用于标识节点)、标题、节点位置、输出&#x2F;输出端口的数据、以及一个Object类型的每个子类自己的数据。3.端口数据记录端口所在节点ID、端口唯一ID以及连接的数据。4.连接数据记录着连接的节点ID和端口。我的实现使用了Unity的ScriptableObject。数据结构的图如下。
+GraphSoData 黑板数据[Serializable]public class GraphSoData : ScriptableObject&#123;    [SerializeField] public string graphName;    [SerializeField] public List&lt;NodeSoData&gt; nodeSoDataList = new List&lt;NodeSoData&gt;();    public void Dispose()    &#123;        if (nodeSoDataList != null)        &#123;            nodeSoDataList.Clear();            nodeSoDataList = null;        &#125;    &#125;&#125;
+Node 节点数据[Serializable]public class NodeSoData : ScriptableObject&#123;    [SerializeField] public string nodeFullTypeName;        [SerializeField] public long nodeID;    [SerializeField] public Vector2 nodePos;    [SerializeField] public string nodeTitle;    [SerializeField] public List&lt;PortSerializationData&gt; intputPortDataList;    [SerializeField] public List&lt;PortSerializationData&gt; outputPortDataList;    [SerializeReference] public System.Object userData;&#125;
+port 端口数据其中端口数据需要记录该端口自己的端口唯一ID、所属的节点ID、以及连接的信息。其中连接的信息保存的就是连接的节点与连接的端口。
+[Serializable]public class LinkData&#123;    [SerializeField] public long linkPortID;    [SerializeField] public long linkNodeID;    public LinkData(long linkPortID, long linkNodeID)    &#123;        this.linkPortID = linkPortID;        this.linkNodeID = linkNodeID;    &#125;&#125;[Serializable]public class PortSerializationData&#123;    [SerializeField]    //端口ID    public long portID;    [SerializeField]    //端口所属节点ID    public long portNodeID;    [SerializeField]    //连接的端口ID    public List&lt;LinkData&gt; linkData;&#125;
+
+NodeBase 编辑器节点基类该Node类做的是显示工作,该类继承于UnityEditor.Experimental.GraphView.Node。类中包含了NodeGraphView黑板实例、NodeSoData此Node的节点数据，以及节点大小等数据。下面是一些流程函数的说明。
+初始化拿到节点数据和黑板实例后，流程先初始化数据，后初始化组件，最后刷新节点。比较简单。
+public virtual void Init(NodeSoData nodeData, NodeGraphView nodeGraphView)&#123;    this.nodeGraphView = nodeGraphView;    this.nodeData = nodeData;    InitData();    InitComponent();    Refresh();&#125;public virtual void Init(NodeGraphView nodeGraphView, bool isStartNode)&#123;    this.nodeGraphView = nodeGraphView;    nodeData = GraphEditorUnility.CreateDefaultNodeData(isStartNode);    InitData();    InitComponent();    Refresh();&#125;
+初始化组件这个函数比较关键，所有节点的操作都在这个函数中初始化了。拿节点数据设置位置、标题，遍历。
+protected virtual void InitComponent()&#123;    AddStyle();    SetPosition(new Rect(nodeData.nodePos, Vector2.zero));    InitTitleLabel();        InitPort();        AddResizeHandle();&#125;private void InitTitleLabel()&#123;    TextField textField = new TextField()    &#123;        value = nodeData.nodeTitle    &#125;;    titleContainer.Insert(0, textField);&#125;public virtual void InitPort()&#123;    //初始化输入端口    if (nodeData.intputPortDataList != null &amp;&amp; nodeData.intputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.intputPortDataList)        &#123;            InstantiatePort(port,nodeData.intputPortDataList,Direction.Input,inputContainer);        &#125;    &#125;    //初始化输出端口    if (nodeData.outputPortDataList != null &amp;&amp; nodeData.outputPortDataList.Count &gt; 0)    &#123;        foreach (var port in nodeData.outputPortDataList)        &#123;            InstantiatePort(port,nodeData.outputPortDataList,Direction.Output,outputContainer);        &#125;    &#125;&#125;//创建节点的端口实例private Port InstantiatePort(PortSerializationData portData, List&lt;PortSerializationData&gt; portDataList,Direction direction, VisualElement portContainer)&#123;    // 创建一个水平布局的容器来放置删除按钮和端口    var horizontalContainer = new VisualElement();    horizontalContainer.style.flexDirection = FlexDirection.RowReverse; // 设置为水平排列    horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        Port newPort = InstantiatePort(Orientation.Horizontal, direction, Port.Capacity.Multi, typeof(bool));    newPort.name = string.Empty;    newPort.userData = portData;        // Button deleteButton = new Button();    // deleteButton.text = &quot;X&quot;;    // deleteButton.clicked += Click;    //    // horizontalContainer.Add(deleteButton);    horizontalContainer.Add(newPort);        portContainer.Add(horizontalContainer);    // void Click()    // &#123;    //     portDataList.Remove(portData);    //     nodeGraphView.DisconnectPort(newPort);    //     deleteButton.clicked -= Click;    //         //     portContainer.Remove(horizontalContainer);    // &#125;    return newPort;&#125;
+鼠标拖动节点大小其中AddResizeHandle函数是添加了节点宽度水平拉伸。为了做到鼠标移动到右边界改变鼠标样式，所以在节点的右侧，添加一个透明的VisualElement，并且高度占满节点，宽度为5px(可以根据喜好自行修改)，其中鼠标样式需要添加到uss文件中。
+//uss代码,设置一个水平的鼠标样式.resize-handle &#123;    cursor: resize-horizontal;&#125;protected virtual void AddResizeHandle()&#123;    resizeHandle = new VisualElement();    resizeHandle.style.position = Position.Absolute;    resizeHandle.style.right = 0;    resizeHandle.style.top = 0;    resizeHandle.style.bottom = 0;    resizeHandle.style.width = 10;    resizeHandle.style.backgroundColor = Color.clear;    resizeHandle.AddToClassList(&quot;resize-handle&quot;);    Add(resizeHandle);    resizeHandle.RegisterCallback&lt;MouseDownEvent&gt;(OnResizeHandleMouseDown);    resizeHandle.RegisterCallback&lt;MouseMoveEvent&gt;(OnResizeHandleMouseMove);    resizeHandle.RegisterCallback&lt;MouseUpEvent&gt;(OnResizeHandleMouseUp);&#125;//鼠标按下回调，添加一个绿框样式private void OnResizeHandleMouseDown(MouseDownEvent evt)&#123;    if (evt.button == 0) //     &#123;        isResizing = true;        resizeStartPosition = evt.mousePosition;        resizeStartSize = new Vector2(resolvedStyle.width, resolvedStyle.height);        style.borderTopWidth = 2;        style.borderBottomWidth = 2;        style.borderLeftWidth = 2;        style.borderRightWidth = 2;        style.borderTopColor = Color.green;        style.borderBottomColor = Color.green;        style.borderLeftColor = Color.green;        style.borderRightColor = Color.green;        resizeHandle.CaptureMouse();        evt.StopPropagation();    &#125;&#125;//鼠标按下移动，一直改变节点大小private void OnResizeHandleMouseMove(MouseMoveEvent evt)&#123;    if (isResizing &amp;&amp; resizeHandle.HasMouseCapture())    &#123;        Vector2 delta = evt.mousePosition - resizeStartPosition;        Vector2 newSize = resizeStartSize + new Vector2(delta.x, delta.y);        newSize.x = Mathf.Clamp(newSize.x, minSize.x, maxSize.x);        newSize.y = Mathf.Clamp(newSize.y, minSize.y, maxSize.y);        style.width = newSize.x;        RefreshPorts();        evt.StopPropagation();    &#125;&#125;//鼠标抬起设置大小private void OnResizeHandleMouseUp(MouseUpEvent evt)&#123;    if (isResizing &amp;&amp; evt.button == 0)    &#123;        isResizing = false;        resizeHandle.ReleaseMouse();        evt.StopPropagation();        style.borderTopWidth = StyleKeyword.Null;        style.borderBottomWidth = StyleKeyword.Null;        style.borderLeftWidth = StyleKeyword.Null;        style.borderRightWidth = StyleKeyword.Null;        style.borderTopColor = StyleKeyword.Null;        style.borderBottomColor = StyleKeyword.Null;        style.borderLeftColor = StyleKeyword.Null;        style.borderRightColor = StyleKeyword.Null;        OnSizeChanged();    &#125;&#125;
+
+StartNode开始节点此节点继承于NodeBase,开始节点是每个GraphView中必备的,表示从这个节点开始往下执行。
+//节点数据[Serializable]public class StartNodeData : NodeSerializationData&#123;    [SerializeField]    public bool isStartNode;    &#125;//开始节点public class StartNode : NodeBase&#123;    public StartNodeData startNodeData;        private Toggle checkBox;        protected override void InitData()    &#123;                if (nodeData.userData != null)        &#123;            startNodeData = nodeData.userData as StartNodeData;        &#125;        else        &#123;            startNodeData = new StartNodeData();            startNodeData.isStartNode = true;        &#125;    &#125;    protected override void InitComponent()    &#123;        base.InitComponent();                var horizontalContainer = new VisualElement();        horizontalContainer.style.flexDirection = FlexDirection.Row; // 设置为水平排列        horizontalContainer.style.alignItems = Align.Center; // 垂直居中对齐        checkBox = new Toggle();        checkBox.SetEnabled(false);        checkBox.value = startNodeData.isStartNode;                var label = new Label(&quot;初始节点&quot;);                horizontalContainer.Add(checkBox);        horizontalContainer.Add(label);                extensionContainer.Add(horizontalContainer);    &#125;    public override NodeSerializationData GetSerializationData()    &#123;        StartNodeData serializationData = new StartNodeData();        serializationData.isStartNode = true;        serializationData.nodeID =  nodeData.nodeID;        serializationData.outputPortDataList = nodeData.outputPortDataList;        serializationData.intputPortDataList = nodeData.intputPortDataList;        return serializationData;    &#125;&#125;
+
+创建GraphView的So数据这里用的是Unity编辑器的菜单项，创建了一个So数据，并往里塞一个开始节点的默认数据。
+[MenuItem(&quot;★Tools★/CraeteGraph&quot;)]public static void CreateGraph()&#123;    GraphEditorUnility.CreateDefaultGraph();&#125;public static void CreateDefaultGraph()&#123;    GraphSoData graph = ScriptableObject.CreateInstance&lt;GraphSoData&gt;();    int soFileCount = CountFilesExcludingMeta(DEFAULT_FILE_PATH);    string defaultFileName = string.Format(DEFAULT_FILE_NAME, soFileCount);    string defaultFilePath = System.IO.Path.Combine(DEFAULT_FILE_PATH, defaultFileName);    graph.graphName = string.Format(DEFAULT_FILE_SAVE_NAME, soFileCount);    AssetDatabase.CreateAsset(graph, defaultFilePath);    NodeSoData defaultNode = CreateDefaultNodeData(true);    graph.nodeSoDataList.Add(defaultNode);    AssetDatabase.AddObjectToAsset(defaultNode, graph);        EditorUtility.SetDirty(graph);    EditorUtility.SetDirty(defaultNode);    AssetDatabase.SaveAssets();&#125;public static NodeSoData CreateDefaultNodeData(bool isStartNode)&#123;    NodeSoData defaultSoData = ScriptableObject.CreateInstance&lt;NodeSoData&gt;();    defaultSoData.name = &quot;node&quot;;    defaultSoData.nodeID = GraphUtility.GenerateID();    defaultSoData.nodeTitle = &quot;New Node&quot;;    defaultSoData.nodePos = new Vector2(200, 200);    //起始节点加入输出node    if (isStartNode)    &#123;        defaultSoData.nodeFullTypeName = typeof(StartNode).FullName;        StartNodeData startNodeData = new StartNodeData();        startNodeData.isStartNode = true;        defaultSoData.userData = startNodeData;        defaultSoData.AddOutputPortData();    &#125;    else    &#123;        defaultSoData.nodeFullTypeName = typeof(NodeBase).FullName;    &#125;    defaultSoData.outputPortDataList = new List&lt;PortSerializationData&gt;();    defaultSoData.intputPortDataList = new List&lt;PortSerializationData&gt;();    return defaultSoData;&#125;
+
+结果可以在菜单项创建新的节点数据，并且双击打开能看到一个开始节点。
+]]></content>
+  </entry>
+  <entry>
     <title>Unity节点编辑器(六) -- 引导节点与引导流程</title>
     <url>/posts/3a7262dc.html</url>
     <content><![CDATA[引导流程需求目前已经有了节点和引导的遮罩，为了实现编辑步骤，还要把每一步需要高亮的位置或者需要高亮跟随的GameObject放入节点数据中，并根据节点的先后顺序逐一运行逻辑。所以就需要有3个事情：1.引导节点。目前节点编辑器只有开始节点，无法存储引导节点的数据，所以需要继承于NodeBase和数据，实现编辑器的可视化功能。2.引导节点逻辑处理脚本。为了之后的拓展性，所以针对每一种引导节点都有一个特定的处理脚本。通过维护一个状态机的生命周期，在脚本中拿到节点数据进行具体的逻辑处理。3.引导系统。我把这个写成了单例。负责加载引导数据并反序列化出来，同时也要提供根据引导名字开启引导的接口。
@@ -3180,6 +3523,26 @@ public class GuideCollection&#123;    private string m_guideName;    private Lis
 private List&lt;GuideHandlerBase&gt; LoadData(string guideName)&#123;    string fileName = guideName + &quot;.json&quot;;    var bytesData = Resources.Load&lt;TextAsset&gt;(guideName);    var strList = bytesData.text.Split(&quot;|&quot;).ToList();    var handlerList = DeserializeObjectAndHandler(strList);    m_guideDataDic.Add(guideName, handlerList);    return handlerList;&#125;private List&lt;GuideHandlerBase&gt; DeserializeObjectAndHandler(List&lt;string&gt; objectStrList)&#123;    if (objectStrList == null || objectStrList.Count &lt;= 0)    &#123;        return null;    &#125;    var nodeDataList = new List&lt;GuideHandlerBase&gt;();    foreach (var objectStr in objectStrList)    &#123;        // 首先尝试解析为基础数据以获取类型信息        var baseData = Newtonsoft.Json.JsonConvert.DeserializeObject&lt;NodeSerializationData&gt;(objectStr);        if (baseData == null)        &#123;            Debug.LogError(&quot;无法反序列化基础数据&quot;);            continue;        &#125;        // 根据类型全名找到对应的类型        Type targetType = null;        foreach (var typeItem in m_guideTypeMap)        &#123;            if (typeItem.Key.FullName.Equals(baseData.typeFullName))            &#123;                targetType = typeItem.Key;                break;            &#125;        &#125;        if (targetType == null)        &#123;            Debug.LogError($&quot;未找到匹配的类型: &#123;baseData.typeFullName&#125;&quot;);            continue;        &#125;        // 使用正确的类型进行反序列化        var saveData = Newtonsoft.Json.JsonConvert.DeserializeObject(objectStr, targetType);        if (saveData == null)        &#123;            Debug.LogError($&quot;无法反序列化为目标类型: &#123;targetType.FullName&#125;&quot;);            continue;        &#125;        // 创建处理器实例        if (!m_guideTypeMap.TryGetValue(targetType, out Type handlerType))        &#123;            Debug.LogError($&quot;未找到类型 &#123;targetType.FullName&#125; 对应的处理器类型&quot;);            continue;        &#125;        var handler = Activator.CreateInstance(handlerType, saveData) as GuideHandlerBase;        if (handler == null)        &#123;            Debug.LogError($&quot;无法创建处理器实例: &#123;handlerType.FullName&#125;&quot;);            continue;        &#125;        nodeDataList.Add(handler);    &#125;    return nodeDataList;&#125;]]></content>
   </entry>
   <entry>
+    <title>Unity颜色空间:sRGB和Linear</title>
+    <url>/posts/b73f5a7a.html</url>
+    <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
+sRGB和Linear在物理世界中，如果光增加一倍，那么亮度也增加一倍，这是线性关系。但是在最早的显示器中，显示图像的时候，电压增加一倍，亮度并不是跟着增加一倍，而是呈亮度增加量等于电压增加量的2.2次幂的非线性关系:&nbsp;&nbsp;l_亮度&#x3D;u2.2&nbsp;&nbsp;&nbsp;&nbsp;(l ∈[0,1],u∈[0,1])2.2也叫做显示器的Gamma值。因为亮度0是黑，1是白，这种关系意味着当电压线性变化的时候，相对于真实的世界来说，亮度的变化在暗处黑的地方变换比较慢，暗占据数据范围更广，颜色整体偏暗。如图，直线代表物理世界的线性空间（Linear Space），下曲线是显示器输出的Gamma2.2空间（Gamma Space）。
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;横坐标表示电压，纵坐标表示亮度
+常情况下，人眼看物理世界感知到了正常的亮度。而如果显示器输出一个颜色后再被你看到，即相当于走了一次Gamma2.2曲线的调整，这下子颜色就变暗了。如果我们在显示器输出之前，做一个操作把显示器的Gamma2.2影响平衡掉，那就和人眼直接观察物理世界一样了！这个平衡的操作就叫做伽马校正。在数学上，伽马校正是一个约0.45的幂运算（和上面的2.2次幂互为逆运算）:&nbsp;&nbsp;Co &#x3D; Ci1&#x2F;2.2
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;左(Gamma0.45) 中(Gamma2.2) 右(线性物理空间)
+Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的纹理如果是sRGB（Gamma0.45），那我们要进行一个操作转换到线性空间。这个操作叫做Remove Gamma Correction，在数学上是一个2.2的幂运算 。如果输入不是sRGB，而是已经在线性空间的纹理了呢？那就可以跳过Remove Gamma Correction了。注：美术输出资源时都是在sRGB空间的，但Normal Map等其他电脑计算出来的纹理则一般在线性空间，即Linear Texture。
+第二步，现在输入已经在线性空间了，那么进行Shader中光照、插值等计算后就是比较真实的结果了，如果不对sRGB进行Remove Gamma Correction直接就进入Shader计算，那算出来的就会不自然。
+第三步，Shader计算完成后，需要进行Gamma Correction，从线性空间变换到Gamma0.45空间，在数学上是一个约为0.45的幂运算。如果不进行Gamma Correction输出会怎么样？那显示器就会将颜色从线性空间转换到Gamma2.2空间，接着再被你看到，结果会更暗。我遇到问题的原因！
+第四步，经过了前面的Gamma Correction，显示器输出在了线性空间，这就和人眼看物理世界的过程是一样的了！
+问题解决知道了sRGB和Linear的底层原理和变暗的原因，那么解决方案也就清晰明了：因为相机是Linear空间，会对输入进行一次Gamma2.2的操作。如果我们这里想要看到正常的图片，就有两种解决方案：
+如果在运行时截图显示：对显示的Texuture2D，进行一次Gamma0.45去和Remove Gamma Correction的Gamma2.2抵消(因为我也是运行时改图，这也是我采用的方案)。最终效果
+如果是读取编辑器的图片：直接在Inspector面板取消sRGB选项，Unity会做一次Gamma0.45，然后在Unity编辑器中看到的图片是偏白的。
+Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
+
+参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
+]]></content>
+  </entry>
+  <entry>
     <title>Unity节点编辑器(四) -- 保存&amp;打开Graph数据</title>
     <url>/posts/92b1d9a5.html</url>
     <content><![CDATA[打开SO数据使用Unity内置函数添加双击打开事件使用Unity提供的OnOpenAsset(0)，然后重新设置graphView的数据并重绘。
@@ -3202,56 +3565,6 @@ private void AddToolBar()&#123;    Toolbar toolbar = new Toolbar();    //// 设�
 public virtual void SaveData()&#123;    List&lt;NodeSerializationData&gt; nodeSaveData = new List&lt;NodeSerializationData&gt;();    foreach (var node in nodes)    &#123;        if (node == null)        &#123;            continue;        &#125;        if (node is NodeBase nodeBase)        &#123;            nodeSaveData.Add(nodeBase.GetSerializationData());        &#125;    &#125;    if (nodeSaveData.Count &lt;= 0)    &#123;        Debug.Log(&quot;Graph的Node数量为0!&quot;);        return;    &#125;    // string data = MergeUnsafe(nodeSaveData);    var data = MergeNodeData(nodeSaveData);    GraphEditorUnility.SaveDataToBytes(data, m_graphData.graphName);&#125;private string MergeNodeData(List&lt;NodeSerializationData&gt; nodeData)&#123;    StringBuilder sb = new StringBuilder();    for (int i = 0; i &lt; nodeData.Count; i++)    &#123;        string data = nodeData[i].Serialize();        //Debug.Log(data);        sb.Append(data);        if (i &lt; nodeData.Count - 1)        &#123;            sb.Append(&quot;|&quot;);        &#125;    &#125;    return sb.ToString();&#125;
 
 结果因为是继承Unity的GraphView和Node，所以现在已经能自由的添加&#x2F;删除连接、添加&#x2F;删除节点了。节点编辑器的基本功能已经实现完成了。
-]]></content>
-  </entry>
-  <entry>
-    <title>Unity颜色空间:sRGB和Linear</title>
-    <url>/posts/b73f5a7a.html</url>
-    <content><![CDATA[发现问题最近在项目中遇到一个问题，就是一张显示正常的图片，放到了UI中莫名其妙的就显示偏黑了，就像这样经过询问同事后发现，原来项目的相机是使用的Linear空间。
-sRGB和Linear在物理世界中，如果光增加一倍，那么亮度也增加一倍，这是线性关系。但是在最早的显示器中，显示图像的时候，电压增加一倍，亮度并不是跟着增加一倍，而是呈亮度增加量等于电压增加量的2.2次幂的非线性关系:&nbsp;&nbsp;l_亮度&#x3D;u2.2&nbsp;&nbsp;&nbsp;&nbsp;(l ∈[0,1],u∈[0,1])2.2也叫做显示器的Gamma值。因为亮度0是黑，1是白，这种关系意味着当电压线性变化的时候，相对于真实的世界来说，亮度的变化在暗处黑的地方变换比较慢，暗占据数据范围更广，颜色整体偏暗。如图，直线代表物理世界的线性空间（Linear Space），下曲线是显示器输出的Gamma2.2空间（Gamma Space）。
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;横坐标表示电压，纵坐标表示亮度
-常情况下，人眼看物理世界感知到了正常的亮度。而如果显示器输出一个颜色后再被你看到，即相当于走了一次Gamma2.2曲线的调整，这下子颜色就变暗了。如果我们在显示器输出之前，做一个操作把显示器的Gamma2.2影响平衡掉，那就和人眼直接观察物理世界一样了！这个平衡的操作就叫做伽马校正。在数学上，伽马校正是一个约0.45的幂运算（和上面的2.2次幂互为逆运算）:&nbsp;&nbsp;Co &#x3D; Ci1&#x2F;2.2
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;左(Gamma0.45) 中(Gamma2.2) 右(线性物理空间)
-Linear转换过程Linear空间的转换过程遵循下图:第一步，输入的纹理如果是sRGB（Gamma0.45），那我们要进行一个操作转换到线性空间。这个操作叫做Remove Gamma Correction，在数学上是一个2.2的幂运算 。如果输入不是sRGB，而是已经在线性空间的纹理了呢？那就可以跳过Remove Gamma Correction了。注：美术输出资源时都是在sRGB空间的，但Normal Map等其他电脑计算出来的纹理则一般在线性空间，即Linear Texture。
-第二步，现在输入已经在线性空间了，那么进行Shader中光照、插值等计算后就是比较真实的结果了，如果不对sRGB进行Remove Gamma Correction直接就进入Shader计算，那算出来的就会不自然。
-第三步，Shader计算完成后，需要进行Gamma Correction，从线性空间变换到Gamma0.45空间，在数学上是一个约为0.45的幂运算。如果不进行Gamma Correction输出会怎么样？那显示器就会将颜色从线性空间转换到Gamma2.2空间，接着再被你看到，结果会更暗。我遇到问题的原因！
-第四步，经过了前面的Gamma Correction，显示器输出在了线性空间，这就和人眼看物理世界的过程是一样的了！
-问题解决知道了sRGB和Linear的底层原理和变暗的原因，那么解决方案也就清晰明了：因为相机是Linear空间，会对输入进行一次Gamma2.2的操作。如果我们这里想要看到正常的图片，就有两种解决方案：
-如果在运行时截图显示：对显示的Texuture2D，进行一次Gamma0.45去和Remove Gamma Correction的Gamma2.2抵消(因为我也是运行时改图，这也是我采用的方案)。最终效果
-如果是读取编辑器的图片：直接在Inspector面板取消sRGB选项，Unity会做一次Gamma0.45，然后在Unity编辑器中看到的图片是偏白的。
-Gamma0.45的代码public Texture2D RecoverOriginalTexture(Texture2D gammaTexture)&#123;    // 创建新纹理（使用线性空间）    Texture2D recoveredTexture = new Texture2D(        gammaTexture.width,        gammaTexture.height,        TextureFormat.RGBA32,        false, // 不生成mipmaps        true   // 线性空间    );    // 获取像素数据    Color[] pixels = gammaTexture.GetPixels();    // 应用复原转换,直接进行0.45次方    for (int i = 0; i &lt; pixels.Length; i++)    &#123;        pixels[i] = RecoverGamma22Simple(pixels[i],0.45f);    &#125;    // 应用处理后的像素    recoveredTexture.SetPixels(pixels);    recoveredTexture.Apply();    return recoveredTexture;&#125;// 复原函数public Color RecoverGamma22Simple(Color gammaColor,float rate)&#123;    return new Color(        Mathf.Pow(gammaColor.r, rate),        Mathf.Pow(gammaColor.g, rate),        Mathf.Pow(gammaColor.b, rate),        gammaColor.a    );&#125;
-
-参考资料[1].Gamma、Linear、sRGB 和Unity Color Space，你真懂了吗？
-]]></content>
-  </entry>
-  <entry>
-    <title>基于前缀树的红点系统设计与实现</title>
-    <url>/posts/79323865.html</url>
-    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
-效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
-前缀树介绍
-前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
-
-红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
-public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
-
-节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
-增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
-public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
-减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
-public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
-数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
-public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
-刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
-public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
-红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
-单例这里我使用了单例模式，类中维护一个红点根节点。
-public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
-添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
-public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
-减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
-public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
-性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
 ]]></content>
   </entry>
   <entry>
@@ -3596,6 +3909,36 @@ TextMeshPro 文档
 ]]></content>
   </entry>
   <entry>
+    <title>基于前缀树的红点系统设计与实现</title>
+    <url>/posts/79323865.html</url>
+    <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
+效果这里先上一个gif展示效果。左上角的数值分为左右两部分：左边为节点及其所有子节点的总数值；右边为此节点自身的数值。
+前缀树介绍
+前缀树或Trie树，是一种哈希树的变种树形数据结构。其核心特征是通过共享字符串的公共前缀减少存储空间和缩短查询时间，查询效率优于传统哈希树。每个节点存储单一字符，子节点字符互不相同，路径构成对应字符串。基本操作包括插入、查找和前缀匹配，节点通常包含标识字段用于标记单词结尾。该结构广泛应用于字符串检索、自动补全、拼写检查、IP路由表以及文本统计排序，被搜索引擎系统用于词频统计与字典序排序。通过构建路径实现快速检索和前缀匹配，节点压缩技术与动态内存管理可优化存储效率。持久化字典树采用数据压缩、并发锁机制和分布式计算框架提升性能，支持多线程构建与查询。 – 百度百科
+
+红点数据节点的数据结构红点节点作为树的节点，和其介绍的一样，主要由一个字典存储着所有的子节点，其中的key为节点的名字，value为具体的节点。因为红点需要显示具体的数值和便于刷新，所以我增加了节点本身的数值、该节点下所有的数值与父节点，方便显示和根据父节点刷新。节点的代码如下：
+public class RedDotDataNode&#123;    private string m_redDotName;        //红点节点名字    private int m_allRedDotNum;         //该节点下所有的红点数值    private int m_redDotNum;            //节点本身的数值    private Action&lt;RedDotDataNode&gt; m_refreshCallBack;       //刷新回调    private Dictionary&lt;string, RedDotDataNode&gt; m_RedDotDict = new Dictionary&lt;string, RedDotDataNode&gt;();    private RedDotDataNode m_parentRedDotNode;  //父节点    private bool m_isSubChange;     //记录减少数量时是否改变&#125;
+
+节点的操作因为游戏内的红点就算消失了，外层的红点也是会继续显示。所以节点不设计删除节点功能，只有对节点数值的增加和减少。
+增加节点增加节点的逻辑比较简单，对于传入的节点，若字典为空直接添加；否则在字典中查询，查询不到直接添加，成功查询则更新，这里为更新其本身红点数量和刷新回调。
+public RedDotDataNode AddRedDot(string redDotPath, string redDotNodeName, int redDotNum,    Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    if (m_RedDotDict.Count &lt;= 0)    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.AddRedDotNum(redDotNum);        if (refreshCallBack != null)        &#123;            redDotDataNode.SetRefreshCallBack(refreshCallBack);        &#125;        return redDotDataNode;    &#125;    else    &#123;        var resultNode = new RedDotDataNode(redDotNodeName, redDotNum, refreshCallBack);        resultNode.m_parentRedDotNode = this;        m_RedDotDict.Add(redDotNodeName, resultNode);        return resultNode;    &#125;&#125;
+减少节点减少节点只是操作对应节点的红点数值，所以更加简单，直接从字典中查询，若查询到则扣除对应的数值。
+public RedDotDataNode SubRedDot(string redDotPath, string redDotNodeName, int redDotNum)&#123;    if (m_RedDotDict.TryGetValue(redDotNodeName, out var redDotDataNode))    &#123;        redDotDataNode.SubRedDotNum(redDotNum);        return redDotDataNode;    &#125;    return null;&#125;
+数值改变刷新对于每次增加数值的增加和减少，需要更新自身的数值，并且向上刷新所有父节点的数值。减少的逻辑相似，调用对应的Sub函数即可。
+public void RefreshAddRedDotNum(int addNum)&#123;    if (addNum &lt;= 0)    &#123;        return;    &#125;    AddAllRedDotNum(addNum);    var curNode = this;    curNode.m_refreshCallBack?.Invoke(curNode);    while (curNode.m_parentRedDotNode != null)    &#123;        curNode.m_parentRedDotNode.AddAllRedDotNum(addNum);        curNode.m_parentRedDotNode.m_refreshCallBack?.Invoke(curNode.m_parentRedDotNode);        curNode = curNode.m_parentRedDotNode;    &#125;&#125;
+刷新节点下的所有刷新该节点下的所有节点则为遍历字典，对所有的节点实行递归刷新。
+public int RefreshAllRedDotNode()&#123;    m_allRedDotNum = m_redDotNum;    if (m_RedDotDict.Count &lt;= 0)    &#123;        m_refreshCallBack?.Invoke(this);        return m_allRedDotNum;    &#125;    foreach (var redDotDataNode in m_RedDotDict.Values)    &#123;        if (redDotDataNode == null)        &#123;            continue;        &#125;        m_allRedDotNum += redDotDataNode.RefreshAllRedDotNode();    &#125;    m_refreshCallBack?.Invoke(this);    return m_allRedDotNum;&#125;
+红点系统当红点数据节点实现完成，红点系统已经完成了大部分的功能。红点系统只需要维护一个红点根节点，并对外开放根据路径进行增删查改的接口，就完成了所有功能。
+单例这里我使用了单例模式，类中维护一个红点根节点。
+public class RedDotSystem&#123;    private RedDotDataNode m_rootNode;    #region 单例模式    private static RedDotSystem m_Instance;    public static RedDotSystem Instance    &#123;        get        &#123;            if (m_Instance == null)            &#123;                m_Instance = new RedDotSystem();            &#125;            return m_Instance;        &#125;    &#125;    private RedDotSystem()    &#123;        m_rootNode = new RedDotDataNode(RedDotNameDefine.RedDotRoot, 0, null);    &#125;    #endregion&#125;
+添加红点添加节点通过传入一个路径，其中路径的是从顶层往底层的顺序排列，并且每一层使用|字符分割(A|B|C)。通过遍历分割后的字符数组后，每一层都执行添加操作。为了往下遍历到对应的节点，代码这里对应非最后一层使用了0和null占位，对于最后一层才传入真正的数值。在添加完成后，执行刷新逻辑，保证数值正确。
+public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNode&gt; refreshCallBack)&#123;    var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        string redDotName = redDotSplitName[i];        bool isLast = i &gt;= redDotSplitName.Length - 1;                if (isLast)        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName, redDotNum,refreshCallBack);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.AddRedDot(redDotPath,redDotName,0,null);        &#125;            &#125;    if (redDotNum &gt; 0)    &#123;        curRedDotNode.RefreshAddRedDotNum(redDotNum);    &#125;&#125;
+减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
+public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
+性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
+]]></content>
+  </entry>
+  <entry>
     <title>第一篇博客</title>
     <url>/posts/ff05b5bf.html</url>
     <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
@@ -3644,43 +3987,6 @@ GraphAssetGraphControllerGraphWindowEditorNodeNodeViewRuntimeNode业务 UI / 调
 ]]></content>
   </entry>
   <entry>
-    <title>通用节点编辑器03-运行时部分</title>
-    <url>/posts/7bb25447.html</url>
-    <content><![CDATA[通用运行时与序列化接口运行时部分负责加载导出的图数据、创建 RuntimeNode、执行节点生命周期并完成节点跳转。
-运行时结构GraphRuntimeManager    -&gt; GraphRunner        -&gt; INodeGraphRuntimeNode            -&gt; NodeGraphRuntimeNodeBase&lt;TData&gt;                -&gt; 业务 RuntimeNode
-
-GraphRuntimeManagerGraphRuntimeManager 是单例入口，负责：
-
-持有多个 GraphRunner。
-从字符串、TextAsset 或 Resources 加载运行时图。
-统一序列化和反序列化入口。
-更新、卸载和清理 Runner。
-
-GraphRunner runner = GraphRuntimeManager.Instance    .LoadFromResources(&quot;TaskGraphs/NewGraph0&quot;);
-
-GraphRunnerGraphRunner 维护当前节点和节点映射，并提供以下执行流程：
-Start    -&gt; 找到 StartRuntimeNode    -&gt; OnEnter    -&gt; Step    -&gt; 当前节点 Update    -&gt; MoveNext(exitKey)    -&gt; OnLeave    -&gt; 下一个节点 OnEnter
-
-Start() 会启动图并自动执行 Start 节点的一次 Step()，因此业务调用方通常只需要调用 Start()。
-RuntimeNode 接口每个 RuntimeNode 都实现 INodeGraphRuntimeNode：
-void Init(GraphRunner runner, NodeGraphRuntimeNodeData data);void OnInit();void OnEnter();string Update();void OnLeave();void OnDispose();
-
-通常业务节点继承 NodeGraphRuntimeNodeBase&lt;TUserData&gt;，只实现实际需要的方法。
-运行时节点注册RuntimeNode 使用 NodeRuntime 特性绑定编辑器节点类型：
-[NodeRuntime(&quot;Game.NodeGraphs.Editor.TaskNode&quot;)]public class TaskRuntimeNode : NodeGraphRuntimeNodeBase&lt;TaskNodeData&gt;&#123;&#125;
-
-NodeGraphRuntimeFactory 会根据导出数据中的节点类型创建对应的 RuntimeNode。
-可替换序列化器序列化接口分为：
-public interface IGraphSerializer&#123;    string Serialize&lt;T&gt;(T data);&#125;public interface IGraphDeserializer&#123;    T Deserialize&lt;T&gt;(string serializedData) where T : new();&#125;
-
-INodeGraphSerializer 组合上述两个接口。当前实现为 NodeGraphNewtonJsonSerializer，Manager 持有接口类型：
-private readonly INodeGraphSerializer serializer =    new NodeGraphNewtonJsonSerializer();
-
-项目需要切换 JSON 工具或二进制工具时，实现 INodeGraphSerializer，再替换这一个实例即可。
-
-]]></content>
-  </entry>
-  <entry>
     <title>通用节点编辑器02-编辑器部分</title>
     <url>/posts/80a055ae.html</url>
     <content><![CDATA[编辑器基类与扩展点编辑器层由图资产、Controller、窗口、图 View、节点外壳和节点内容 View 组成。
@@ -3716,6 +4022,43 @@ Task 节点的代码结构Task 业务在通用编辑器基类上增加自己的�
 classDiagram    class NodeGraphAsset    class TaskGraphAsset    NodeGraphAsset &lt;|-- TaskGraphAsset    class NodeGraphController    class TaskGraphController    NodeGraphController &lt;|-- TaskGraphController    class NodeEditorWindowBase    class TaskGraphWindow    NodeEditorWindowBase &lt;|-- TaskGraphWindow    class NodeGraphViewBase    class NodeBase~TData~ &#123;        +标题编辑        +ID 与复制按钮        +输入输出端口        +尺寸、样式、右键菜单    &#125;    class TaskNode &#123;        +Task 固定端口规则    &#125;    NodeBase~TData~ &lt;|-- TaskNode    class NodeViewBase~TData~ &#123;        +Build(root)    &#125;    class TaskNodeView &#123;        +Task 名称与描述字段    &#125;    NodeViewBase~TData~ &lt;|-- TaskNodeView    class TaskNodeData    TaskNode --&gt; TaskNodeData    TaskNode --&gt; TaskNodeView : 创建内容 View    TaskGraphWindow --&gt; NodeGraphViewBase : 持有    TaskGraphController --&gt; TaskGraphAsset : 管理
 
 图中 NodeBase&lt;TData&gt; 是所有节点共用的 View 外壳；TaskNode 只补充 Task 的端口规则；TaskNodeView 只构建 Task 的业务内容区。这使后续业务可以沿用相同结构，而不需要修改通用编辑器代码。
+]]></content>
+  </entry>
+  <entry>
+    <title>通用节点编辑器03-运行时部分</title>
+    <url>/posts/7bb25447.html</url>
+    <content><![CDATA[通用运行时与序列化接口运行时部分负责加载导出的图数据、创建 RuntimeNode、执行节点生命周期并完成节点跳转。
+运行时结构GraphRuntimeManager    -&gt; GraphRunner        -&gt; INodeGraphRuntimeNode            -&gt; NodeGraphRuntimeNodeBase&lt;TData&gt;                -&gt; 业务 RuntimeNode
+
+GraphRuntimeManagerGraphRuntimeManager 是单例入口，负责：
+
+持有多个 GraphRunner。
+从字符串、TextAsset 或 Resources 加载运行时图。
+统一序列化和反序列化入口。
+更新、卸载和清理 Runner。
+
+GraphRunner runner = GraphRuntimeManager.Instance    .LoadFromResources(&quot;TaskGraphs/NewGraph0&quot;);
+
+GraphRunnerGraphRunner 维护当前节点和节点映射，并提供以下执行流程：
+Start    -&gt; 找到 StartRuntimeNode    -&gt; OnEnter    -&gt; Step    -&gt; 当前节点 Update    -&gt; MoveNext(exitKey)    -&gt; OnLeave    -&gt; 下一个节点 OnEnter
+
+Start() 会启动图并自动执行 Start 节点的一次 Step()，因此业务调用方通常只需要调用 Start()。
+RuntimeNode 接口每个 RuntimeNode 都实现 INodeGraphRuntimeNode：
+void Init(GraphRunner runner, NodeGraphRuntimeNodeData data);void OnInit();void OnEnter();string Update();void OnLeave();void OnDispose();
+
+通常业务节点继承 NodeGraphRuntimeNodeBase&lt;TUserData&gt;，只实现实际需要的方法。
+运行时节点注册RuntimeNode 使用 NodeRuntime 特性绑定编辑器节点类型：
+[NodeRuntime(&quot;Game.NodeGraphs.Editor.TaskNode&quot;)]public class TaskRuntimeNode : NodeGraphRuntimeNodeBase&lt;TaskNodeData&gt;&#123;&#125;
+
+NodeGraphRuntimeFactory 会根据导出数据中的节点类型创建对应的 RuntimeNode。
+可替换序列化器序列化接口分为：
+public interface IGraphSerializer&#123;    string Serialize&lt;T&gt;(T data);&#125;public interface IGraphDeserializer&#123;    T Deserialize&lt;T&gt;(string serializedData) where T : new();&#125;
+
+INodeGraphSerializer 组合上述两个接口。当前实现为 NodeGraphNewtonJsonSerializer，Manager 持有接口类型：
+private readonly INodeGraphSerializer serializer =    new NodeGraphNewtonJsonSerializer();
+
+项目需要切换 JSON 工具或二进制工具时，实现 INodeGraphSerializer，再替换这一个实例即可。
+
 ]]></content>
   </entry>
   <entry>

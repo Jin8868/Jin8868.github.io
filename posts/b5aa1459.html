@@ -1,0 +1,560 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover"><title>Unity-YooAssets运行时加载与卸载 | 穿越时空的思念</title><meta name="author" content="穿越时空的思念"><meta name="copyright" content="穿越时空的思念"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#ffffff"><meta name="description" content="YooAssets 运行时加载与卸载：从构建产物到资源生命周期上一篇《YooAssets 打包流程：Builtin 管线》介绍了 Collector 的资源如何经过依赖分析，最终生成 AssetBundle、资源清单和版本文件。 现在，把这些文件放进安装包或上传到资源服务器。业务代码只传入一个 &quot;Knight&quot;，YooAssets 就能返回骑士预制体。但这中间还有几个问题：">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Unity-YooAssets运行时加载与卸载">
+<meta property="og:url" content="https://cyskdsn.top/posts/b5aa1459.html">
+<meta property="og:site_name" content="穿越时空的思念">
+<meta property="og:description" content="YooAssets 运行时加载与卸载：从构建产物到资源生命周期上一篇《YooAssets 打包流程：Builtin 管线》介绍了 Collector 的资源如何经过依赖分析，最终生成 AssetBundle、资源清单和版本文件。 现在，把这些文件放进安装包或上传到资源服务器。业务代码只传入一个 &quot;Knight&quot;，YooAssets 就能返回骑士预制体。但这中间还有几个问题：">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://cyskdsn.top/img/Title/YooAssets-Load-Unload.jpeg">
+<meta property="article:published_time" content="2026-10-27T11:47:17.926Z">
+<meta property="article:modified_time" content="2026-10-27T12:11:07.625Z">
+<meta property="article:author" content="穿越时空的思念">
+<meta property="article:tag" content="Unity-AssetsBundle">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://cyskdsn.top/img/Title/YooAssets-Load-Unload.jpeg"><script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "Unity-YooAssets运行时加载与卸载",
+  "url": "https://cyskdsn.top/posts/b5aa1459.html",
+  "image": "https://cyskdsn.top/img/Title/YooAssets-Load-Unload.jpeg",
+  "datePublished": "2026-10-27T11:47:17.926Z",
+  "dateModified": "2026-10-27T12:11:07.625Z",
+  "author": [
+    {
+      "@type": "Person",
+      "name": "穿越时空的思念",
+      "url": "https://cyskdsn.top"
+    }
+  ]
+}</script><link rel="shortcut icon" href="/img/favicon.png"><link rel="canonical" href="https://cyskdsn.top/posts/b5aa1459.html"><link rel="preconnect" href="//cdn.jsdelivr.net"/><link rel="manifest" href="/null"/><link rel="apple-touch-icon" sizes="180x180" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="32x32" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="16x16" href="/img/heaIcon16.ico"/><link rel="mask-icon" href="/img/heaIcon16.ico" color="#5bbad5"/><link rel="stylesheet" href="/css/index.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css"><script>
+    (() => {
+      
+    const saveToLocal = {
+      set: (key, value, ttl) => {
+        if (!ttl) return
+        const expiry = Date.now() + ttl * 86400000
+        localStorage.setItem(key, JSON.stringify({ value, expiry }))
+      },
+      get: key => {
+        const itemStr = localStorage.getItem(key)
+        if (!itemStr) return undefined
+        const { value, expiry } = JSON.parse(itemStr)
+        if (Date.now() > expiry) {
+          localStorage.removeItem(key)
+          return undefined
+        }
+        return value
+      }
+    }
+
+    window.btf = {
+      saveToLocal,
+      getScript: (url, attr = {}) => new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = url
+        script.async = true
+        Object.entries(attr).forEach(([key, val]) => script.setAttribute(key, val))
+        script.onload = script.onreadystatechange = () => {
+          if (!script.readyState || /loaded|complete/.test(script.readyState)) resolve()
+        }
+        script.onerror = reject
+        document.head.appendChild(script)
+      }),
+      getCSS: (url, id) => new Promise((resolve, reject) => {
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = url
+        if (id) link.id = id
+        link.onload = link.onreadystatechange = () => {
+          if (!link.readyState || /loaded|complete/.test(link.readyState)) resolve()
+        }
+        link.onerror = reject
+        document.head.appendChild(link)
+      }),
+      addGlobalFn: (key, fn, name = false, parent = window) => {
+        if (!false && key.startsWith('pjax')) return
+        const globalFn = parent.globalFn || {}
+        globalFn[key] = globalFn[key] || {}
+        globalFn[key][name || Object.keys(globalFn[key]).length] = fn
+        parent.globalFn = globalFn
+      }
+    }
+  
+      
+      const activateDarkMode = () => {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#0d0d0d')
+        }
+      }
+      const activateLightMode = () => {
+        document.documentElement.setAttribute('data-theme', 'light')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#ffffff')
+        }
+      }
+
+      btf.activateDarkMode = activateDarkMode
+      btf.activateLightMode = activateLightMode
+
+      const theme = saveToLocal.get('theme')
+    
+          theme === 'dark' ? activateDarkMode() : theme === 'light' ? activateLightMode() : null
+        
+      
+      const asideStatus = saveToLocal.get('aside-status')
+      if (asideStatus !== undefined) {
+        document.documentElement.classList.toggle('hide-aside', asideStatus === 'hide')
+      }
+    
+      
+    const detectApple = () => {
+      if (/iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('apple')
+      }
+    }
+    detectApple()
+  
+    })()
+  </script><script>const GLOBAL_CONFIG = {
+  root: '/',
+  algolia: undefined,
+  localSearch: {"path":"/search.xml","preload":false,"top_n_per_article":1,"unescape":false,"languages":{"hits_empty":"未找到符合您查询的内容：${query}","hits_stats":"共找到 ${hits} 篇文章"}},
+  translate: undefined,
+  highlight: {"plugin":"highlight.js","highlightCopy":true,"highlightLang":true,"highlightHeightLimit":false,"highlightFullpage":false,"highlightMacStyle":false},
+  copy: {
+    success: '复制成功',
+    error: '复制失败',
+    noSupport: '浏览器不支持'
+  },
+  relativeDate: {
+    homepage: false,
+    post: false
+  },
+  runtime: '',
+  dateSuffix: {
+    just: '刚刚',
+    min: '分钟前',
+    hour: '小时前',
+    day: '天前',
+    month: '个月前'
+  },
+  copyright: undefined,
+  lightbox: 'null',
+  Snackbar: undefined,
+  infinitegrid: {
+    js: 'https://cdn.jsdelivr.net/npm/@egjs/infinitegrid/dist/infinitegrid.min.js',
+    buttonText: '加载更多'
+  },
+  isPhotoFigcaption: false,
+  islazyloadPlugin: false,
+  isAnchor: false,
+  percent: {
+    toc: true,
+    rightside: false,
+  },
+  autoDarkmode: false
+}</script><script id="config-diff">var GLOBAL_CONFIG_SITE = {
+  title: 'Unity-YooAssets运行时加载与卸载',
+  isHighlightShrink: false,
+  isToc: true,
+  pageType: 'post'
+}</script><link rel="stylesheet" href="/css/style.css"><meta name="generator" content="Hexo 7.3.0"></head><body><div id="sidebar"><div id="menu-mask"></div><div id="sidebar-menus"><div class="avatar-img text-center"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="site-data text-center"><a href="/archives/"><div class="headline">文章</div><div class="length-num">34</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">7</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div></div></div><div class="post" id="body-wrap"><header class="post-bg" id="page-header" style="background-image: url(/img/Title/YooAssets-Load-Unload.jpeg);"><nav id="nav"><span id="blog-info"><a class="nav-site-title" href="/"><span class="site-name">穿越时空的思念</span></a><a class="nav-page-title" href="/"><span class="site-name">Unity-YooAssets运行时加载与卸载</span><span class="site-name"><i class="fa-solid fa-circle-arrow-left"></i><span>  返回首页</span></span></a></span><div id="menus"><div id="search-button"><span class="site-page social-icon search"><i class="fas fa-search fa-fw"></i><span> 搜索</span></span></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div><div id="toggle-menu"><span class="site-page"><i class="fas fa-bars fa-fw"></i></span></div></div></nav><div id="post-info"><h1 class="post-title">Unity-YooAssets运行时加载与卸载</h1><div id="post-meta"><div class="meta-firstline"><span class="post-meta-date"><i class="far fa-calendar-alt fa-fw post-meta-icon"></i><span class="post-meta-label">发表于</span><time class="post-meta-date-created" datetime="2026-10-27T11:47:17.926Z" title="发表于 2026-10-27 19:47:17">2026-10-27</time><span class="post-meta-separator">|</span><i class="fas fa-history fa-fw post-meta-icon"></i><span class="post-meta-label">更新于</span><time class="post-meta-date-updated" datetime="2026-10-27T12:11:07.625Z" title="更新于 2026-10-27 20:11:07">2026-10-27</time></span></div><div class="meta-secondline"><span class="post-meta-separator">|</span><span class="post-meta-wordcount"><i class="far fa-file-word fa-fw post-meta-icon"></i><span class="post-meta-label">总字数:</span><span class="word-count">5.4k</span><span class="post-meta-separator">|</span><i class="far fa-clock fa-fw post-meta-icon"></i><span class="post-meta-label">阅读时长:</span><span>17分钟</span></span></div></div></div></header><main class="layout" id="content-inner"><div id="post"><article class="container post-content" id="article-container"><h1 id="YooAssets-运行时加载与卸载：从构建产物到资源生命周期"><a href="#YooAssets-运行时加载与卸载：从构建产物到资源生命周期" class="headerlink" title="YooAssets 运行时加载与卸载：从构建产物到资源生命周期"></a>YooAssets 运行时加载与卸载：从构建产物到资源生命周期</h1><p>上一篇<a href="/posts/3dcf38a1.html">《YooAssets 打包流程：Builtin 管线》</a>介绍了 Collector 的资源如何经过依赖分析，最终生成 AssetBundle、资源清单和版本文件。</p>
+<p>现在，把这些文件放进安装包或上传到资源服务器。业务代码只传入一个 <code>&quot;Knight&quot;</code>，YooAssets 就能返回骑士预制体。但这中间还有几个问题：</p>
+<ol>
+<li><strong>运行时怎样使用打包生成的文件，找到资源及其依赖？</strong></li>
+<li><strong>AssetHandle、Provider、Loader 三层分别做什么，为什么需要拆成三层？</strong></li>
+<li><strong>调用 Release 后发生了什么，什么时候才会真正卸载资源？</strong></li>
+</ol>
+<p>继续沿用上一篇的例子：骑士和法师分别放在两个 Bundle 中，共用一个包含材质和贴图的依赖包。两个界面同时需要骑士，另一个系统需要法师。加载时要复用资源，关闭一个界面时，又不能破坏其他使用者。</p>
+<p>本文先建立 Package 的运行环境，再沿着这次资源请求，从清单查询一直追踪到最后一次卸载。</p>
+<blockquote>
+<p>本文依据项目使用的 YooAsset <strong>2.3.19</strong> 源码，讨论常规 AssetBundle 的异步加载与默认卸载机制。公开句柄类型名为 <code>AssetHandle</code>；本文所说的 Loader 层，在该版本中主要由 <code>LoadBundleFileOperation</code> 实现。示例用于说明调用关系和引用计数，未执行对应运行时实验。</p>
+</blockquote>
+<h2 id="一、加载之前，先初始化-Package"><a href="#一、加载之前，先初始化-Package" class="headerlink" title="一、加载之前，先初始化 Package"></a>一、加载之前，先初始化 Package</h2><p>Package 对应 Collector 配置与构建时选择的资源包，名称需要保持一致。下面以 <code>DefaultPackage</code>、版本 <code>1.0.0</code> 为例，按顺序说明每一步使用的文件；文件名采用默认的空清单前缀，若配置了 <code>PackageManifestPrefix</code>，版本、校验和清单文件名还会带上该前缀。</p>
+<ol>
+<li><strong>初始化全局环境</strong>：调用 <code>YooAssets.Initialize()</code>，建立异步操作调度与更新驱动。这一步不读取 Package 的构建产物。</li>
+<li><strong>创建 Package</strong>：调用 <code>YooAssets.CreatePackage(&quot;DefaultPackage&quot;)</code>，在内存中创建并注册资源包；此时不读取版本、清单或 AB，后续业务复用该对象。</li>
+<li><strong>配置运行模式</strong>：离线使用 <code>OfflinePlayModeParameters</code> 和内置文件系统；联机使用 <code>HostPlayModeParameters</code>，通常组合内置与缓存文件系统，并提供远端地址服务。这一步只是准备参数，还没有读取资源文件。编辑器模拟模式则使用 <code>EditorSimulateModeParameters</code>，本文后续以真实 AB 加载为主。</li>
+<li><strong>初始化 Package</strong>：调用 <code>package.InitializeAsync(parameters)</code>，建立资源管理器与文件系统。默认内置文件系统读取安装包中的 <strong><code>BuildinCatalog.bytes</code></strong>，得到内置 Bundle 的文件目录；缓存文件系统扫描、校验已有的本地缓存文件。若额外开启复制内置清单配置，还会读取内置 <code>.version</code>，并按该版本复制 <code>.hash</code> 和 <code>.bytes</code> 到指定目录。</li>
+<li><strong>确定资源版本</strong>：调用 <code>RequestPackageVersionAsync()</code>，读取 <strong><code>DefaultPackage.version</code></strong> 中的版本字符串，例如 <code>1.0.0</code>。离线模式读取内置版本文件，常见联机配置从远端请求该文件；若业务直接指定版本，可跳过本次版本文件读取。</li>
+<li><strong>启用资源清单</strong>：调用 <code>UpdatePackageManifestAsync(&quot;1.0.0&quot;)</code>，取得 <strong><code>DefaultPackage_1.0.0.hash</code></strong> 与 <strong><code>DefaultPackage_1.0.0.bytes</code></strong>，用前者校验后者，再反序列化并激活清单。离线模式读取内置文件；常见联机配置使用缓存，缺失时从远端下载。</li>
+<li><strong>下载与加载资源</strong>：按清单需要预下载或按需获取实际的 <strong>AssetBundle 文件</strong>，再由 <code>LoadAssetAsync</code> 打开主包和依赖包、加载其中的 Unity 对象。AB 的实际文件名由清单记录，取决于构建时的命名方式。</li>
+</ol>
+<p><strong>Package 初始化成功表示运行环境已经建立，启用清单后才具备资源查询能力。</strong> 每个异步步骤都应检查状态，成功后再继续。使用 <code>package.LoadAssetAsync</code> 可直接指定 Package；使用 <code>YooAssets.LoadAssetAsync</code> 等静态快捷接口时，还需通过 <code>YooAssets.SetDefaultPackage(package)</code> 指定默认 Package。</p>
+<h2 id="二、从资源地址找到-Bundle"><a href="#二、从资源地址找到-Bundle" class="headerlink" title="二、从资源地址找到 Bundle"></a>二、从资源地址找到 Bundle</h2><h3 id="1-清单连接地址、资源路径和-Bundle"><a href="#1-清单连接地址、资源路径和-Bundle" class="headerlink" title="1. 清单连接地址、资源路径和 Bundle"></a>1. 清单连接地址、资源路径和 Bundle</h3><p>清单启用后，<code>LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;)</code> 会通过 <code>PackageManifest</code> 将业务地址解析为资源路径，再查出主 Bundle 和依赖 Bundle。</p>
+<p>在这个例子中，可以把清单的查询结果简化为：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">业务地址：Knight</span><br><span class="line">    → 资源路径：Assets/Game/Characters/Knight.prefab</span><br><span class="line">    → 主 Bundle：characters_knight.bundle</span><br><span class="line">    → 依赖 Bundle：shared_materials.bundle</span><br></pre></td></tr></table></figure>
+
+<p><code>PackageManifest</code> 中的 <code>AssetList</code> 描述可寻址资源，<code>BundleList</code> 描述 Bundle 文件。普通单资源加载通过资源记录中的 <code>BundleID</code> 找到主包，通过 <code>DependBundleIDs</code> 找到依赖包；Bundle 记录再提供文件标识、大小、CRC 等信息。</p>
+<p>运行时不再重新遍历 Collector，也不再调用编辑器 API 分析预制体依赖。<strong>构建阶段已经把收集与依赖分析的结果固化进清单，运行时按清单执行。</strong></p>
+<p>这也解释了前面两篇之间的连接：Collector 决定收集什么，构建流程确定包归属，运行时消费这些结果。</p>
+<h3 id="2-文件系统决定去哪里拿-Bundle"><a href="#2-文件系统决定去哪里拿-Bundle" class="headerlink" title="2. 文件系统决定去哪里拿 Bundle"></a>2. 文件系统决定去哪里拿 Bundle</h3><p>确定 Bundle 后，还需要回答“这个文件在哪里”。这部分由运行模式配置的文件系统处理。</p>
+<table>
+<thead>
+<tr>
+<th>常见模式</th>
+<th>文件来源</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>编辑器模拟模式</td>
+<td>通过编辑器文件系统访问资源，不能替代真实 AB 加载验证</td>
+</tr>
+<tr>
+<td>离线模式</td>
+<td>使用随安装包携带的内置资源</td>
+</tr>
+<tr>
+<td>联机模式</td>
+<td>组合内置文件系统与缓存文件系统，必要时从服务器下载</td>
+</tr>
+</tbody></table>
+<p>在常见联机配置中，<code>PlayModeImpl</code> 按文件系统顺序判断 Bundle 的归属。内置文件系统通常通过 Catalog 判断是否包含该 Bundle；其余交由缓存文件系统处理。</p>
+<p>缓存文件系统发现文件已经存在时，直接使用缓存。文件缺失时，默认可以按需下载；若配置禁止按需下载，则加载会失败，需要提前完成下载。</p>
+<p>对于常规未加密磁盘 AB，文件准备好后，底层会调用 <code>AssetBundle.LoadFromFileAsync</code> 打开它。加密文件则经过配置的解密服务处理。</p>
+<p>到这一步拿到的是可读取的 AssetBundle，里面的骑士预制体还没有完成加载。</p>
+<h2 id="三、为什么要分成-Handle、Provider、Loader-三层"><a href="#三、为什么要分成-Handle、Provider、Loader-三层" class="headerlink" title="三、为什么要分成 Handle、Provider、Loader 三层"></a>三、为什么要分成 Handle、Provider、Loader 三层</h2><p>假设两个界面同时请求骑士：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">AssetHandle firstHandle = package.LoadAssetAsync&lt;GameObject&gt;(<span class="string">&quot;Knight&quot;</span>);</span><br><span class="line">AssetHandle secondHandle = package.LoadAssetAsync&lt;GameObject&gt;(<span class="string">&quot;Knight&quot;</span>);</span><br></pre></td></tr></table></figure>
+
+<p>这两次调用应该分别记录使用者的持有关系，同时复用底层的资源加载。如果把“谁在使用”“加载哪个对象”“打开哪个文件”混在一起，复用和释放就很难协调。</p>
+<p>YooAssets 用三层分别管理它们：</p>
+<table>
+<thead>
+<tr>
+<th>层次</th>
+<th>管理的对象</th>
+<th>核心职责</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AssetHandle</code></td>
+<td>一次加载调用的持有关系</td>
+<td>向业务提供状态、结果与释放入口</td>
+</tr>
+<tr>
+<td>Provider</td>
+<td>一项资源加载操作</td>
+<td>等待主包和依赖包，加载具体 Unity 对象，复用加载结果</td>
+</tr>
+<tr>
+<td>Loader</td>
+<td>一个 Bundle 的加载与持有状态</td>
+<td>通过文件系统打开 Bundle，为多个 Provider 复用</td>
+</tr>
+</tbody></table>
+<h3 id="1-Handle：每次调用都有自己的持有关系"><a href="#1-Handle：每次调用都有自己的持有关系" class="headerlink" title="1. Handle：每次调用都有自己的持有关系"></a>1. Handle：每次调用都有自己的持有关系</h3><p>每次 <code>LoadAssetAsync</code> 都会创建一个新的 <code>AssetHandle</code>。业务通过它等待完成、获取 <code>AssetObject</code>，并在不再使用时调用 <code>Release()</code>。</p>
+<p>即使两个 Handle 指向同一个 Provider，它们仍然是两份独立的持有关系。释放第一个，不会直接释放第二个仍在使用的结果。</p>
+<p>但普通 C# 变量赋值不产生新的持有关系：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">AssetHandle anotherHandle = firstHandle;</span><br></pre></td></tr></table></figure>
+
+<p>这里两个变量指向同一个 Handle，引用计数不会增加。若两个模块需要独立释放，应分别发起加载请求，并各自保存自己的 Handle。</p>
+<h3 id="2-Provider：复用一次资源加载"><a href="#2-Provider：复用一次资源加载" class="headerlink" title="2. Provider：复用一次资源加载"></a>2. Provider：复用一次资源加载</h3><p><code>ResourceManager</code> 维护 <code>ProviderDic</code>。对于普通 <code>LoadAssetAsync</code>，会根据加载方式和 <code>AssetInfo</code> 的内部标识查找 Provider；找到可复用的 Provider 后，给它创建新的 Handle。</p>
+<p>该内部标识由资源路径和请求类型等信息组成，不能直接理解为资源 <code>.meta</code> 中的 GUID。因此，本文讨论的复用前提是：<strong>同一个 Package 中，以相同加载方式和类型请求同一个资源。</strong> 场景、子资源、整包资源加载有各自的处理方式。</p>
+<p>普通资源由 <code>AssetProvider</code> 负责。它需要完成两件事：先等主 Bundle 和依赖 Bundle 都准备好，再从主 Bundle 中加载目标对象。</p>
+<p>重复请求可以共享正在进行的加载，也可以共享已经完成的结果。</p>
+<h3 id="3-Loader：复用-Bundle-文件"><a href="#3-Loader：复用-Bundle-文件" class="headerlink" title="3. Loader：复用 Bundle 文件"></a>3. Loader：复用 Bundle 文件</h3><p><code>ResourceManager</code> 还维护 <code>LoaderDic</code>，以 BundleName 查找 Loader。</p>
+<p>骑士与法师是两个不同资源，需要不同 Provider，但它们依赖同一个材质包。这个共享包只需要一个 Loader，由两个 Provider 共同持有。</p>
+<p>同样，同一个 Bundle 内的两个不同预制体可以拥有不同 Provider，同时共享主包 Loader。<strong>资源复用和 Bundle 复用发生在不同层，不能只用“同一个资源有没有加载过”来判断。</strong></p>
+<h2 id="四、一次-LoadAssetAsync-怎样到达-Unity"><a href="#四、一次-LoadAssetAsync-怎样到达-Unity" class="headerlink" title="四、一次 LoadAssetAsync 怎样到达 Unity"></a>四、一次 LoadAssetAsync 怎样到达 Unity</h2><p>把前面的索引查询与三层结构连起来，一次普通资源加载可以分成五步。</p>
+<h3 id="1-用地址查到-AssetInfo"><a href="#1-用地址查到-AssetInfo" class="headerlink" title="1. 用地址查到 AssetInfo"></a>1. 用地址查到 AssetInfo</h3><p><code>ResourcePackage.LoadAssetAsync&lt;T&gt;</code> 先将 location 转换为 <code>AssetInfo</code>，得到真实资源路径、请求类型以及清单中的资源记录。</p>
+<h3 id="2-获取或创建-Provider，并返回-Handle"><a href="#2-获取或创建-Provider，并返回-Handle" class="headerlink" title="2. 获取或创建 Provider，并返回 Handle"></a>2. 获取或创建 Provider，并返回 Handle</h3><p><code>ResourceManager</code> 查找对应 Provider。若需要新建，Provider 会取得主包和依赖包的 Loader，并分别增加它们的引用计数。</p>
+<p>无论复用还是新建 Provider，本次调用都会拿到自己的 Handle，并使 Provider 的引用计数加一。</p>
+<h3 id="3-Loader-准备主包和依赖包"><a href="#3-Loader-准备主包和依赖包" class="headerlink" title="3. Loader 准备主包和依赖包"></a>3. Loader 准备主包和依赖包</h3><p>Provider 启动相关 Loader，等待加载结果。Loader 通过文件系统获取文件并打开 Bundle，产出 <code>BundleResult</code>。</p>
+<p>共享 Loader 让多个 Provider 等待同一个包的加载结果，不需要各自重复下载或打开。</p>
+<h3 id="4-Provider-从主包加载-Unity-对象"><a href="#4-Provider-从主包加载-Unity-对象" class="headerlink" title="4. Provider 从主包加载 Unity 对象"></a>4. Provider 从主包加载 Unity 对象</h3><p>主包和依赖包全部成功后，<code>AssetProvider</code> 调用主包结果的 <code>LoadAssetAsync</code>。对于 AssetBundle，最终落到 Unity API：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">assetBundle.LoadAssetAsync(assetInfo.AssetPath, assetInfo.AssetType);</span><br></pre></td></tr></table></figure>
+
+<p>这里传给 Unity 的是解析后的资源路径和类型。业务传入的 <code>&quot;Knight&quot;</code> 已经在前面完成了映射。</p>
+<p>依赖包提前准备好，是为了让 Unity 加载预制体时能够解析材质、贴图等跨包引用。</p>
+<h3 id="5-通过-Handle-交付结果"><a href="#5-通过-Handle-交付结果" class="headerlink" title="5. 通过 Handle 交付结果"></a>5. 通过 Handle 交付结果</h3><p>Provider 保存加载结果并结束操作，Handle 随之表现为完成。业务仍需检查 <code>Status</code>：完成也可能意味着加载失败。</p>
+<div class="mermaid-wrap"><pre class="mermaid-src" hidden>
+    graph TD
+    A[业务调用 LoadAssetAsync] --&gt; B[清单解析地址与资源路径]
+    B --&gt; C[获取或创建 Provider]
+    C --&gt; D[创建并返回本次 Handle]
+    C --&gt; E[主包 Loader]
+    C --&gt; F[依赖包 Loader]
+    E --&gt; G[文件系统准备文件并打开 Bundle]
+    F --&gt; G
+    G --&gt; H[Provider 等待全部 Bundle 成功]
+    H --&gt; I[主包调用 Unity LoadAssetAsync]
+    I --&gt; J[Provider 保存 Unity 对象]
+    J --&gt; K[Handle 提供状态和结果]
+  </pre></div>
+
+<p>至此，拿到的是骑士预制体资源。若要在场景里显示骑士，还需要实例化；资源加载完成与实例创建是两个阶段。</p>
+<h2 id="五、共享资源时，引用计数究竟记在哪里"><a href="#五、共享资源时，引用计数究竟记在哪里" class="headerlink" title="五、共享资源时，引用计数究竟记在哪里"></a>五、共享资源时，引用计数究竟记在哪里</h2><p>现在让两个界面分别加载骑士，再让另一个系统加载法师。全部加载完成后，关系如下：</p>
+<div class="mermaid-wrap"><pre class="mermaid-src" hidden>
+    graph TD
+    H1[界面 A 的 Knight Handle] --&gt; P1[Knight Provider]
+    H2[界面 B 的 Knight Handle] --&gt; P1
+    H3[Mage Handle] --&gt; P2[Mage Provider]
+    P1 --&gt; L1[Knight Loader]
+    P1 --&gt; LS[Shared Loader]
+    P2 --&gt; L2[Mage Loader]
+    P2 --&gt; LS
+  </pre></div>
+
+<p>这里存在两种引用计数：</p>
+<table>
+<thead>
+<tr>
+<th>对象</th>
+<th>引用计数</th>
+<th>计数来源</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Knight Provider</td>
+<td>2</td>
+<td>两个 Knight Handle</td>
+</tr>
+<tr>
+<td>Mage Provider</td>
+<td>1</td>
+<td>一个 Mage Handle</td>
+</tr>
+<tr>
+<td>Knight Loader</td>
+<td>1</td>
+<td>Knight Provider</td>
+</tr>
+<tr>
+<td>Mage Loader</td>
+<td>1</td>
+<td>Mage Provider</td>
+</tr>
+<tr>
+<td>Shared Loader</td>
+<td>2</td>
+<td>Knight Provider 与 Mage Provider</td>
+</tr>
+</tbody></table>
+<p><strong>Handle 增加 Provider 的引用；新建的 Provider 增加相关 Loader 的引用。</strong> 第二个骑士 Handle 复用了已有 Provider，因此不会再给骑士包和共享包各增加一次 Loader 引用。</p>
+<p>这就是三层结构的价值：业务持有者可以有很多个，实际资源加载和文件加载仍然按各自粒度复用。</p>
+<h2 id="六、Release-为什么不等于立即卸载"><a href="#六、Release-为什么不等于立即卸载" class="headerlink" title="六、Release 为什么不等于立即卸载"></a>六、Release 为什么不等于立即卸载</h2><h3 id="1-Release-先结束当前调用者的持有关系"><a href="#1-Release-先结束当前调用者的持有关系" class="headerlink" title="1. Release 先结束当前调用者的持有关系"></a>1. Release 先结束当前调用者的持有关系</h3><p><code>AssetHandle.Release()</code> 沿用 <code>HandleBase</code> 的实现，主要做三件事：</p>
+<ol>
+<li>从 Provider 移除当前 Handle，并减少 Provider 引用计数。</li>
+<li>当 Provider 引用计数归零时，尝试触发配置允许的自动卸载。</li>
+<li>断开 Handle 与 Provider 的关系，使当前 Handle 失效。</li>
+</ol>
+<p>它首先表达的是“这个调用者不再需要资源”。它不直接等价于销毁实例，也不直接等价于卸载 Bundle。</p>
+<p>当前版本初始化参数中的 <code>AutoUnloadBundleWhenUnused</code> 默认是 <code>false</code>。默认配置下，即使最后一个 Handle 已经释放，Provider 和 Loader 仍可能保留，等待后续清理。</p>
+<p>因此，常见做法是在界面、关卡或资源批次的生命周期结束时释放各自 Handle，再在适当时机调用：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">yield</span> <span class="keyword">return</span> package.UnloadUnusedAssetsAsync();</span><br></pre></td></tr></table></figure>
+
+<p>如果开启自动卸载，最后一个 Handle 释放时会尝试清理相关 Bundle；能否卸载仍然取决于加载状态和其他引用。</p>
+<h3 id="2-清理先销毁-Provider，再处理-Loader"><a href="#2-清理先销毁-Provider，再处理-Loader" class="headerlink" title="2. 清理先销毁 Provider，再处理 Loader"></a>2. 清理先销毁 Provider，再处理 Loader</h3><p><code>UnloadUnusedAssetsOperation</code> 每轮清理按以下顺序进行：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">扫描 Loader，尝试销毁其管理的无用 Provider</span><br><span class="line">    → Provider 销毁时，减少主包和依赖包的 Loader 引用</span><br><span class="line">    → 收集满足销毁条件的 Loader</span><br><span class="line">    → 卸载 Bundle，并移除 Loader</span><br></pre></td></tr></table></figure>
+
+<p>Provider 必须已经不处于加载阶段，并且没有 Handle 引用，才能正常销毁。销毁时，它才会归还自己对主包、依赖包 Loader 的持有。</p>
+<p>这意味着：<strong>Provider 引用归零，与 Loader 引用减少之间，还隔着 Provider 的清理。</strong> 不能在每次 Handle 释放后，直接把同一次操作理解为“Bundle 引用也减一”。</p>
+<h3 id="3-Loader-归零后，还要检查依赖顺序"><a href="#3-Loader-归零后，还要检查依赖顺序" class="headerlink" title="3. Loader 归零后，还要检查依赖顺序"></a>3. Loader 归零后，还要检查依赖顺序</h3><p>Loader 的正常销毁也有条件：没有正在进行的文件加载、引用计数归零，并满足包之间的依赖卸载约束。</p>
+<p>清单初始化时会根据 Bundle 依赖建立反向引用关系。默认实现检查依赖当前包的其他 Bundle 是否已经销毁，以避免先卸掉仍被其他包依赖的包。</p>
+<p>例如骑士包依赖共享材质包，需要先处理骑士包，再处理共享包。深层依赖可能需要多轮扫描，<code>UnloadUnusedAssetsAsync</code> 默认执行 10 轮。</p>
+<p>这个参数是扫描次数，不是“无论资源何时加载完，都等待到全部释放”的保证。循环依赖也可能阻碍正常卸载，需要从分包关系上排查。</p>
+<h3 id="4-用骑士与法师验证释放结果"><a href="#4-用骑士与法师验证释放结果" class="headerlink" title="4. 用骑士与法师验证释放结果"></a>4. 用骑士与法师验证释放结果</h3><p>假设上述资源均已加载完成，每个阶段释放后都执行一次无用资源清理：</p>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>Provider 的变化</th>
+<th>Bundle 的变化</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>界面 A 释放骑士 Handle</td>
+<td>Knight Provider 从 2 变为 1</td>
+<td>骑士包和共享包继续保留</td>
+</tr>
+<tr>
+<td>界面 B 释放骑士 Handle</td>
+<td>Knight Provider 归零，清理时销毁</td>
+<td>骑士包可卸载；共享包仍由 Mage Provider 持有</td>
+</tr>
+<tr>
+<td>法师系统释放 Handle</td>
+<td>Mage Provider 归零，清理时销毁</td>
+<td>法师包可卸载，共享包在依赖条件满足后也可卸载</td>
+</tr>
+</tbody></table>
+<p>如果只执行 Release，没有执行清理，也没有开启自动卸载，就不能预期表格中的 Bundle 立即卸载。</p>
+<p>另外，<strong>加载中释放 Handle 不等于取消加载</strong>。特别是共享 Provider 时，其他调用者仍可能需要结果。加载尚未结束的 Provider 会暂时保留，之后需要有清理机会；一次过早的清理完成，不代表这些资源以后会自动消失。</p>
+<h2 id="七、实例还活着时，为什么不能提前释放-Handle"><a href="#七、实例还活着时，为什么不能提前释放-Handle" class="headerlink" title="七、实例还活着时，为什么不能提前释放 Handle"></a>七、实例还活着时，为什么不能提前释放 Handle</h2><p>在<a href="/posts/38e927b7.html">《AssetBundle 加载与卸载》</a>中，我们区分过 <code>AssetBundle.Unload(false)</code> 与 <code>AssetBundle.Unload(true)</code>。</p>
+<p>本版本普通 AssetBundle 的卸载最终由 <code>AssetBundleResult.UnloadBundleFile</code> 调用 <strong><code>AssetBundle.Unload(true)</code></strong>。这会卸载从包中加载的资源对象。</p>
+<p>因此，不能只根据“预制体已经实例化”就释放它的 Handle。实例仍可能引用包里的材质和贴图；这些资源卸载后，场景里的实例会出现引用失效。</p>
+<h3 id="1-实例化不会自动增加-Handle-引用"><a href="#1-实例化不会自动增加-Handle-引用" class="headerlink" title="1. 实例化不会自动增加 Handle 引用"></a>1. 实例化不会自动增加 Handle 引用</h3><p>无论使用 <code>Object.Instantiate</code>，还是 <code>AssetHandle.InstantiateSync()</code>，都不能理解为“新实例自动持有了一份 Handle”。实例创建本身没有建立这样的引用关系。</p>
+<p>反方向也一样：<code>Destroy(instance)</code> 不会自动替业务释放加载 Handle。</p>
+<p>需要让 Handle 的持有时间覆盖实例实际使用资源的时间。最简单的关系是：一个拥有者负责加载、保存 Handle、创建实例，并在实例结束使用后释放 Handle。</p>
+<h3 id="2-一个最小的生命周期示例"><a href="#2-一个最小的生命周期示例" class="headerlink" title="2. 一个最小的生命周期示例"></a>2. 一个最小的生命周期示例</h3><p>下面是协程中的加载片段。假设 Package 已初始化、清单已启用，<code>&quot;Knight&quot;</code> 是有效加载地址：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// 为本次使用保留独立的加载句柄。</span></span><br><span class="line">AssetHandle knightHandle = package.LoadAssetAsync&lt;GameObject&gt;(<span class="string">&quot;Knight&quot;</span>);</span><br><span class="line"><span class="keyword">yield</span> <span class="keyword">return</span> knightHandle;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 等待结束不代表加载成功，失败也需要归还句柄。</span></span><br><span class="line"><span class="keyword">if</span> (knightHandle.Status != EOperationStatus.Succeed)</span><br><span class="line">&#123;</span><br><span class="line">    Debug.LogError(knightHandle.LastError);</span><br><span class="line">    knightHandle.Release();</span><br><span class="line">    <span class="keyword">yield</span> <span class="keyword">break</span>;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 使用期间由同一拥有者保存实例与句柄。</span></span><br><span class="line">GameObject knightInstance = knightHandle.InstantiateSync();</span><br></pre></td></tr></table></figure>
+
+<p>到界面关闭或角色真正离场时，同一拥有者再执行以下结束使用片段。这里的变量代表之前保存的实例与 Handle：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// Destroy 延迟生效，先让实例完成销毁。</span></span><br><span class="line">UnityEngine.Object.Destroy(knightInstance);</span><br><span class="line"><span class="keyword">yield</span> <span class="keyword">return</span> <span class="literal">null</span>;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 归还本次使用权，再在合适的清理节点卸载无用资源。</span></span><br><span class="line">knightHandle.Release();</span><br><span class="line"><span class="keyword">yield</span> <span class="keyword">return</span> package.UnloadUnusedAssetsAsync();</span><br></pre></td></tr></table></figure>
+
+<p>这两个片段展示的是生命周期边界，不是要求每销毁一个实例就扫描整个 Package。实际项目可以在界面批次关闭、关卡退出等节点统一清理，也要为加载失败、业务取消和拥有者提前销毁保留释放路径。</p>
+<p>如果使用对象池，<code>SetActive(false)</code> 只是停用实例，实例仍可能持有材质与贴图。池中仍保留对象时，应继续保留相应资源持有关系，直到池被真正清空。</p>
+<p>同样，把 <code>AssetObject</code> 保存到普通字段，不会替代 Handle 的引用计数；把 Handle 变量设为 <code>null</code>，也不能代替显式 <code>Release()</code>。</p>
+<h2 id="八、区分四种容易混淆的“清理”"><a href="#八、区分四种容易混淆的“清理”" class="headerlink" title="八、区分四种容易混淆的“清理”"></a>八、区分四种容易混淆的“清理”</h2><table>
+<thead>
+<tr>
+<th>操作</th>
+<th>实际作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Destroy(instance)</code></td>
+<td>销毁业务创建的 Unity 实例</td>
+</tr>
+<tr>
+<td><code>handle.Release()</code></td>
+<td>结束本次加载调用的持有关系</td>
+</tr>
+<tr>
+<td><code>package.UnloadUnusedAssetsAsync()</code></td>
+<td>清理满足条件的 Provider、Loader，并卸载对应 Bundle</td>
+</tr>
+<tr>
+<td>清理下载缓存</td>
+<td>删除磁盘上的缓存文件，需要使用相应缓存管理流程</td>
+</tr>
+</tbody></table>
+<p>Bundle 从内存卸载后，下载缓存通常仍在磁盘上，下一次加载可以继续使用。Unity 的 <code>Resources.UnloadUnusedAssets</code> 和 C# GC 也属于不同层次，不能替代 YooAssets 的 Handle 释放。</p>
+<p>另外还有两个使用边界：</p>
+<ul>
+<li><strong>场景使用场景自己的卸载入口。</strong> <code>SceneHandle.UnloadAsync()</code> 负责场景卸载流程，不能仅以普通 <code>Release()</code> 替代场景卸载。</li>
+<li><strong><code>UnloadAllAssetsAsync</code> 用于整体清理。</strong> 它会强制销毁资源管理对象，使仍被业务保存的 Handle 失效。应在停止相关加载与使用后，用于整个 Package 的退出或重置，不能当成关闭普通界面的常规手段。</li>
+</ul>
+<h2 id="九、回到开头的三个问题"><a href="#九、回到开头的三个问题" class="headerlink" title="九、回到开头的三个问题"></a>九、回到开头的三个问题</h2><p><strong>运行时如何使用构建产物？</strong></p>
+<p>版本文件决定使用哪一版清单，清单将加载地址映射到资源路径、主包与依赖包，文件系统再根据内置目录、缓存和远端配置取得 Bundle。Collector 的工作已经在构建阶段完成。</p>
+<p><strong>为什么分成三层？</strong></p>
+<p>Handle 记录调用者的持有关系，Provider 复用具体资源的加载，Loader 复用 Bundle 文件的加载。同一资源的多个使用者可以共享 Provider，不同资源也可以共享 Loader。</p>
+<p><strong>什么时候真正卸载？</strong></p>
+<p>Release 先归还调用者的使用权；Provider 无人使用且加载结束后，清理流程释放其 Loader 引用；Loader 再满足引用与依赖约束，才真正卸载 Bundle。业务应让 Handle 的生命周期覆盖所有实际使用该资源的实例。</p>
+<p>从第四篇的资源分类、第五篇的构建，到这里的运行时加载，整条链路就连接起来了：<strong>配置决定资源范围，构建固化包与依赖关系，运行时按清单加载，再按持有关系释放。</strong></p>
+<h2 id="源码阅读入口"><a href="#源码阅读入口" class="headerlink" title="源码阅读入口"></a>源码阅读入口</h2><p>以下路径均相对于 YooAsset 包根目录，适合按本文顺序阅读：</p>
+<table>
+<thead>
+<tr>
+<th>关注点</th>
+<th>源码路径</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>初始化参数与运行模式</td>
+<td><code>Runtime/InitializeParameters.cs</code></td>
+</tr>
+<tr>
+<td>文件系统创建参数</td>
+<td><code>Runtime/FileSystem/FileSystemParameters.cs</code></td>
+</tr>
+<tr>
+<td>文件系统初始化过程</td>
+<td><code>Runtime/ResourcePackage/Operation/InitializationOperation.cs</code></td>
+</tr>
+<tr>
+<td>对外加载与初始化入口</td>
+<td><code>Runtime/ResourcePackage/ResourcePackage.cs</code></td>
+</tr>
+<tr>
+<td>资源索引与反向依赖</td>
+<td><code>Runtime/ResourcePackage/PackageManifest.cs</code></td>
+</tr>
+<tr>
+<td>文件系统选择</td>
+<td><code>Runtime/ResourcePackage/PlayMode/PlayModeImpl.cs</code></td>
+</tr>
+<tr>
+<td>Provider 与 Loader 的复用</td>
+<td><code>Runtime/ResourceManager/ResourceManager.cs</code></td>
+</tr>
+<tr>
+<td>Provider 的加载阶段与引用</td>
+<td><code>Runtime/ResourceManager/Provider/ProviderOperation.cs</code></td>
+</tr>
+<tr>
+<td>普通资源加载</td>
+<td><code>Runtime/ResourceManager/Provider/AssetProvider.cs</code></td>
+</tr>
+<tr>
+<td>Bundle 加载与销毁判断</td>
+<td><code>Runtime/ResourceManager/Operation/Internal/LoadBundleFileOperation.cs</code></td>
+</tr>
+<tr>
+<td>Handle 释放</td>
+<td><code>Runtime/ResourceManager/Handle/HandleBase.cs</code></td>
+</tr>
+<tr>
+<td>无用资源清理顺序</td>
+<td><code>Runtime/ResourceManager/Operation/UnloadUnusedAssetsOperation.cs</code></td>
+</tr>
+<tr>
+<td>Unity AssetBundle 的加载结果与卸载</td>
+<td><code>Runtime/FileSystem/BundleResult/AssetBundleResult/AssetBundleResult.cs</code></td>
+</tr>
+</tbody></table>
+</article><div class="post-copyright"><div class="post-copyright__author"><span class="post-copyright-meta"><i class="fas fa-circle-user fa-fw"></i>文章作者: </span><span class="post-copyright-info"><a href="https://cyskdsn.top">穿越时空的思念</a></span></div><div class="post-copyright__type"><span class="post-copyright-meta"><i class="fas fa-square-arrow-up-right fa-fw"></i>文章链接: </span><span class="post-copyright-info"><a href="https://cyskdsn.top/posts/b5aa1459.html">https://cyskdsn.top/posts/b5aa1459.html</a></span></div><div class="post-copyright__notice"><span class="post-copyright-meta"><i class="fas fa-circle-exclamation fa-fw"></i>版权声明: </span><span class="post-copyright-info">本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a> 许可协议。转载请注明来源 <a href="https://cyskdsn.top" target="_blank">穿越时空的思念</a>！</span></div></div><div class="tag_share"><div class="post-meta__tag-list"><a class="post-meta__tags" href="/tags/Unity-AssetsBundle/">Unity-AssetsBundle</a></div><div class="post-share"><div class="social-share" data-image="/img/Title/YooAssets-Load-Unload.jpeg" data-sites="facebook,twitter,wechat,weibo,qq"></div><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/css/share.min.css" media="print" onload="this.media='all'"><script src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/js/social-share.min.js" defer></script></div></div><nav class="pagination-post" id="pagination"><a class="pagination-related full-width" href="/posts/3dcf38a1.html" title="Unity-YooAssets打包流程：Builtin管线"><img class="cover" src="/img/Title/YooAssets-pack.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of next post"><div class="info text-right"><div class="info-1"><div class="info-item-1">下一篇</div><div class="info-item-2">Unity-YooAssets打包流程：Builtin管线</div></div><div class="info-2"><div class="info-item-1">YooAssets 打包流程：从 Collector 到 AssetBundle 与发布产物上一篇《YooAssets 的 AB 资源分类与管理》介绍了 Package、Group、Collector 和 MainAssets，也说明 Collector 会为每个资源计算 BundleName：同名资源归入同一个 AssetBundle。 但配置只是开始。一个预制体会引用材质、贴图和 Shader，不同包中的预制体还可能引用同一份资源。构建流程需要把这些配置与引用关系整理成 Unity 的打包输入，再生成可发布、可加载的文件。 本文沿 Builtin Build Pipeline 的执行过程，回答四个问题：  如何使用 Collector 的数据？ 如何避免共享依赖在多个 AB 中重复包含，实现资源零冗余？ MainAsset 如何进入 Unity 的 AssetBundle？ 构建产物有哪些，分别有什么用？   本文依据 YooAsset 2.3.19 源码，讨论常规 AssetBundle 构建。示例用于说明数据变化，未执行对应构建实验。Builtin 指 Unity 内置构...</div></div></div></a></nav><div class="relatedPosts"><div class="headline"><i class="fas fa-thumbs-up fa-fw"></i><span>相关推荐</span></div><div class="relatedPosts-list"><a class="pagination-related" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载"><img class="cover" src="/img/Title/Unity-AssetBundleLoad.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-22</div><div class="info-item-2">Unity-AssetBundle加载与卸载</div></div><div class="info-2"><div class="info-item-1">AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。 下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。 一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。 但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。 这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一...</div></div></div></a><a class="pagination-related" href="/posts/3dcf38a1.html" title="Unity-YooAssets打包流程：Builtin管线"><img class="cover" src="/img/Title/YooAssets-pack.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-26</div><div class="info-item-2">Unity-YooAssets打包流程：Builtin管线</div></div><div class="info-2"><div class="info-item-1">YooAssets 打包流程：从 Collector 到 AssetBundle 与发布产物上一篇《YooAssets 的 AB 资源分类与管理》介绍了 Package、Group、Collector 和 MainAssets，也说明 Collector 会为每个资源计算 BundleName：同名资源归入同一个 AssetBundle。 但配置只是开始。一个预制体会引用材质、贴图和 Shader，不同包中的预制体还可能引用同一份资源。构建流程需要把这些配置与引用关系整理成 Unity 的打包输入，再生成可发布、可加载的文件。 本文沿 Builtin Build Pipeline 的执行过程，回答四个问题：  如何使用 Collector 的数据？ 如何避免共享依赖在多个 AB 中重复包含，实现资源零冗余？ MainAsset 如何进入 Unity 的 AssetBundle？ 构建产物有哪些，分别有什么用？   本文依据 YooAsset 2.3.19 源码，讨论常规 AssetBundle 构建。示例用于说明数据变化，未执行对应构建实验。Builtin 指 Unity 内置构...</div></div></div></a><a class="pagination-related" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理"><img class="cover" src="/img/Title/YooAsset-BundleCollector.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-25</div><div class="info-item-2">Unity-YooAssets的AB资源分类与管理</div></div><div class="info-2"><div class="info-item-1">YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求前三篇分别讨论了 AssetBundle 的结构、加载与卸载，以及分包策略。到了具体项目里，我们已经可以根据资源的使用范围、生命周期和更新节奏，决定哪些内容适合放进同一个包。 但对于 YooAssets，问题还要再往前走一步。 有的项目按角色和关卡管理资源，有的按玩法和活动组织内容；有的保留贴图、材质、预制体等类型目录，有的直接按功能划分文件夹。同样一个角色，在小项目中可能整体打包，在大项目中却需要拆出皮肤、语音和高清贴图。 YooAssets 作为一个面向不同项目的通用资源管理器，要适配这些差异，它应该如何抽象资源分类和分包管理？ 如果直接规定“每个文件夹打成一个 AB”，就会把项目的目录结构与打包结构绑在一起；如果规定“每个角色一个 AB”，又无法表达界面、配置、场景和其他业务的需求。通用框架需要提供一套能描述项目差异的结构，让具体项目把自己的分包策略填进去。 本文就从这个问题出发，按照背景、目标、设计和结果的顺序，理解 YooAssets 在资源收集界面中呈现的四层结构：Package → Group → C...</div></div></div></a><a class="pagination-related" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略"><img class="cover" src="/img/Title/Unity-AssetBundle.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-23</div><div class="info-item-2">Unity-AssetBundle分包策略</div></div><div class="info-2"><div class="info-item-1">AssetBundle 分包策略：哪些资源应该放进同一个包前两篇《Unity-AssetBundle结构解析》和《Unity-AssetBundle加载与卸载》，分别讨论了 AB 文件内部的组织方式，以及资源加载后由谁持有、什么时候释放。 这一篇讨论构建时的问题：哪些资源应该放进同一个包？ 一般项目会先按资源类型划分文件夹，把动画、纹理、预制体、材质、配置和字体分别存放，方便查找和日常管理： 1234567Assets/Res/├── Animations/├── Textures/├── Prefabs/├── Materials/├── Configs/└── Fonts/  如果直接把每个类型文件夹打成一个包，打包规则会很简单：Animations 对应一个动画包，Textures 对应一个纹理包，Prefabs 对应一个预制体包。 但随着项目资源增加，这些包也会越来越大。角色、战斗、场景和界面的纹理都可能进入同一个纹理包，各个玩法的预制体也可能进入同一个预制体包。文件夹按类型整理得很清楚，包内却混合了使用范围完全不同的资源。 这种直接按类型目录打包的方式，就会带来大包的问...</div></div></div></a><a class="pagination-related" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析"><img class="cover" src="/img/Title/Unity-AssetBundle.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-10-20</div><div class="info-item-2">Unity-AssetBundle结构解析</div></div><div class="info-2"><div class="info-item-1">Unity AssetBundle 结构解析笔记 基于 AssetStudio 逆向源码（BundleFile.cs &#x2F; SerializedFile.cs）与 YooAssets 源码整理。Unity 未公开官方格式文档，本文以逆向工程实现为准（Unity 2022.3 为 UnityFS 主流版本）。  0. 概述 .assetbundle 文件是 Unity 的私有格式，YooAssets &#x2F; Addressables 等框架都只是调用 BuildPipeline.BuildAssetBundles 产出后在外层做 hash &#x2F; 加密 &#x2F; 清单，不改变文件内部结构。 完整的资源体系是三层结构：外层是一个自定义压缩归档（UnityFS），里面躺着若干个 Unity 序列化文件（SerializedFile，即资产真正存放的地方）；bundle 之上还有一层独立文件 manifest（清单），记录所有 bundle 的组织关系。   1. 整体布局先建立全局图景，再逐层展开（第 2、3、4 节）： 12345678910111213141...</div></div></div></a></div></div></div><div class="aside-content" id="aside-content"><div class="card-widget card-info text-center"><div class="avatar-img"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="author-info-name">穿越时空的思念</div><div class="author-info-description">每天进步一点，做更好的自己!</div><div class="site-data"><a href="/archives/"><div class="headline">文章</div><div class="length-num">34</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">7</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">0</div></a></div><a id="card-info-btn" target="_blank" rel="noopener" href="https://github.com/Jin8868"><i class="fab fa-github"></i><span>Follow Me</span></a></div><div class="card-widget card-announcement"><div class="item-headline"><i class="fas fa-bullhorn fa-shake"></i><span>公告</span></div><div class="announcement_content"></div></div><div class="sticky_layout"><div class="card-widget" id="card-toc"><div class="item-headline"><i class="fas fa-stream"></i><span>目录</span><span class="toc-percentage"></span></div><div class="toc-content"><ol class="toc"><li class="toc-item toc-level-1"><a class="toc-link" href="#YooAssets-%E8%BF%90%E8%A1%8C%E6%97%B6%E5%8A%A0%E8%BD%BD%E4%B8%8E%E5%8D%B8%E8%BD%BD%EF%BC%9A%E4%BB%8E%E6%9E%84%E5%BB%BA%E4%BA%A7%E7%89%A9%E5%88%B0%E8%B5%84%E6%BA%90%E7%94%9F%E5%91%BD%E5%91%A8%E6%9C%9F"><span class="toc-number">1.</span> <span class="toc-text">YooAssets 运行时加载与卸载：从构建产物到资源生命周期</span></a><ol class="toc-child"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%80%E3%80%81%E5%8A%A0%E8%BD%BD%E4%B9%8B%E5%89%8D%EF%BC%8C%E5%85%88%E5%88%9D%E5%A7%8B%E5%8C%96-Package"><span class="toc-number">1.1.</span> <span class="toc-text">一、加载之前，先初始化 Package</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BA%8C%E3%80%81%E4%BB%8E%E8%B5%84%E6%BA%90%E5%9C%B0%E5%9D%80%E6%89%BE%E5%88%B0-Bundle"><span class="toc-number">1.2.</span> <span class="toc-text">二、从资源地址找到 Bundle</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E6%B8%85%E5%8D%95%E8%BF%9E%E6%8E%A5%E5%9C%B0%E5%9D%80%E3%80%81%E8%B5%84%E6%BA%90%E8%B7%AF%E5%BE%84%E5%92%8C-Bundle"><span class="toc-number">1.2.1.</span> <span class="toc-text">1. 清单连接地址、资源路径和 Bundle</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E6%96%87%E4%BB%B6%E7%B3%BB%E7%BB%9F%E5%86%B3%E5%AE%9A%E5%8E%BB%E5%93%AA%E9%87%8C%E6%8B%BF-Bundle"><span class="toc-number">1.2.2.</span> <span class="toc-text">2. 文件系统决定去哪里拿 Bundle</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%89%E3%80%81%E4%B8%BA%E4%BB%80%E4%B9%88%E8%A6%81%E5%88%86%E6%88%90-Handle%E3%80%81Provider%E3%80%81Loader-%E4%B8%89%E5%B1%82"><span class="toc-number">1.3.</span> <span class="toc-text">三、为什么要分成 Handle、Provider、Loader 三层</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-Handle%EF%BC%9A%E6%AF%8F%E6%AC%A1%E8%B0%83%E7%94%A8%E9%83%BD%E6%9C%89%E8%87%AA%E5%B7%B1%E7%9A%84%E6%8C%81%E6%9C%89%E5%85%B3%E7%B3%BB"><span class="toc-number">1.3.1.</span> <span class="toc-text">1. Handle：每次调用都有自己的持有关系</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-Provider%EF%BC%9A%E5%A4%8D%E7%94%A8%E4%B8%80%E6%AC%A1%E8%B5%84%E6%BA%90%E5%8A%A0%E8%BD%BD"><span class="toc-number">1.3.2.</span> <span class="toc-text">2. Provider：复用一次资源加载</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-Loader%EF%BC%9A%E5%A4%8D%E7%94%A8-Bundle-%E6%96%87%E4%BB%B6"><span class="toc-number">1.3.3.</span> <span class="toc-text">3. Loader：复用 Bundle 文件</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%9B%9B%E3%80%81%E4%B8%80%E6%AC%A1-LoadAssetAsync-%E6%80%8E%E6%A0%B7%E5%88%B0%E8%BE%BE-Unity"><span class="toc-number">1.4.</span> <span class="toc-text">四、一次 LoadAssetAsync 怎样到达 Unity</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E7%94%A8%E5%9C%B0%E5%9D%80%E6%9F%A5%E5%88%B0-AssetInfo"><span class="toc-number">1.4.1.</span> <span class="toc-text">1. 用地址查到 AssetInfo</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E8%8E%B7%E5%8F%96%E6%88%96%E5%88%9B%E5%BB%BA-Provider%EF%BC%8C%E5%B9%B6%E8%BF%94%E5%9B%9E-Handle"><span class="toc-number">1.4.2.</span> <span class="toc-text">2. 获取或创建 Provider，并返回 Handle</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-Loader-%E5%87%86%E5%A4%87%E4%B8%BB%E5%8C%85%E5%92%8C%E4%BE%9D%E8%B5%96%E5%8C%85"><span class="toc-number">1.4.3.</span> <span class="toc-text">3. Loader 准备主包和依赖包</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#4-Provider-%E4%BB%8E%E4%B8%BB%E5%8C%85%E5%8A%A0%E8%BD%BD-Unity-%E5%AF%B9%E8%B1%A1"><span class="toc-number">1.4.4.</span> <span class="toc-text">4. Provider 从主包加载 Unity 对象</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#5-%E9%80%9A%E8%BF%87-Handle-%E4%BA%A4%E4%BB%98%E7%BB%93%E6%9E%9C"><span class="toc-number">1.4.5.</span> <span class="toc-text">5. 通过 Handle 交付结果</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BA%94%E3%80%81%E5%85%B1%E4%BA%AB%E8%B5%84%E6%BA%90%E6%97%B6%EF%BC%8C%E5%BC%95%E7%94%A8%E8%AE%A1%E6%95%B0%E7%A9%B6%E7%AB%9F%E8%AE%B0%E5%9C%A8%E5%93%AA%E9%87%8C"><span class="toc-number">1.5.</span> <span class="toc-text">五、共享资源时，引用计数究竟记在哪里</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%85%AD%E3%80%81Release-%E4%B8%BA%E4%BB%80%E4%B9%88%E4%B8%8D%E7%AD%89%E4%BA%8E%E7%AB%8B%E5%8D%B3%E5%8D%B8%E8%BD%BD"><span class="toc-number">1.6.</span> <span class="toc-text">六、Release 为什么不等于立即卸载</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-Release-%E5%85%88%E7%BB%93%E6%9D%9F%E5%BD%93%E5%89%8D%E8%B0%83%E7%94%A8%E8%80%85%E7%9A%84%E6%8C%81%E6%9C%89%E5%85%B3%E7%B3%BB"><span class="toc-number">1.6.1.</span> <span class="toc-text">1. Release 先结束当前调用者的持有关系</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E6%B8%85%E7%90%86%E5%85%88%E9%94%80%E6%AF%81-Provider%EF%BC%8C%E5%86%8D%E5%A4%84%E7%90%86-Loader"><span class="toc-number">1.6.2.</span> <span class="toc-text">2. 清理先销毁 Provider，再处理 Loader</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-Loader-%E5%BD%92%E9%9B%B6%E5%90%8E%EF%BC%8C%E8%BF%98%E8%A6%81%E6%A3%80%E6%9F%A5%E4%BE%9D%E8%B5%96%E9%A1%BA%E5%BA%8F"><span class="toc-number">1.6.3.</span> <span class="toc-text">3. Loader 归零后，还要检查依赖顺序</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#4-%E7%94%A8%E9%AA%91%E5%A3%AB%E4%B8%8E%E6%B3%95%E5%B8%88%E9%AA%8C%E8%AF%81%E9%87%8A%E6%94%BE%E7%BB%93%E6%9E%9C"><span class="toc-number">1.6.4.</span> <span class="toc-text">4. 用骑士与法师验证释放结果</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%83%E3%80%81%E5%AE%9E%E4%BE%8B%E8%BF%98%E6%B4%BB%E7%9D%80%E6%97%B6%EF%BC%8C%E4%B8%BA%E4%BB%80%E4%B9%88%E4%B8%8D%E8%83%BD%E6%8F%90%E5%89%8D%E9%87%8A%E6%94%BE-Handle"><span class="toc-number">1.7.</span> <span class="toc-text">七、实例还活着时，为什么不能提前释放 Handle</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E5%AE%9E%E4%BE%8B%E5%8C%96%E4%B8%8D%E4%BC%9A%E8%87%AA%E5%8A%A8%E5%A2%9E%E5%8A%A0-Handle-%E5%BC%95%E7%94%A8"><span class="toc-number">1.7.1.</span> <span class="toc-text">1. 实例化不会自动增加 Handle 引用</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E4%B8%80%E4%B8%AA%E6%9C%80%E5%B0%8F%E7%9A%84%E7%94%9F%E5%91%BD%E5%91%A8%E6%9C%9F%E7%A4%BA%E4%BE%8B"><span class="toc-number">1.7.2.</span> <span class="toc-text">2. 一个最小的生命周期示例</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%85%AB%E3%80%81%E5%8C%BA%E5%88%86%E5%9B%9B%E7%A7%8D%E5%AE%B9%E6%98%93%E6%B7%B7%E6%B7%86%E7%9A%84%E2%80%9C%E6%B8%85%E7%90%86%E2%80%9D"><span class="toc-number">1.8.</span> <span class="toc-text">八、区分四种容易混淆的“清理”</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B9%9D%E3%80%81%E5%9B%9E%E5%88%B0%E5%BC%80%E5%A4%B4%E7%9A%84%E4%B8%89%E4%B8%AA%E9%97%AE%E9%A2%98"><span class="toc-number">1.9.</span> <span class="toc-text">九、回到开头的三个问题</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%BA%90%E7%A0%81%E9%98%85%E8%AF%BB%E5%85%A5%E5%8F%A3"><span class="toc-number">1.10.</span> <span class="toc-text">源码阅读入口</span></a></li></ol></li></ol></div></div><div class="card-widget card-post-series"><div class="item-headline"><i class="fa-solid fa-layer-group"></i><span>系列文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/b5aa1459.html" title="Unity-YooAssets运行时加载与卸载"><img src="/img/Title/YooAssets-Load-Unload.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets运行时加载与卸载"></a><div class="content"><a class="title" href="/posts/b5aa1459.html" title="Unity-YooAssets运行时加载与卸载">Unity-YooAssets运行时加载与卸载</a><time datetime="2026-10-27T11:47:17.926Z" title="发表于 2026-10-27 19:47:17">2026-10-27</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/3dcf38a1.html" title="Unity-YooAssets打包流程：Builtin管线"><img src="/img/Title/YooAssets-pack.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets打包流程：Builtin管线"></a><div class="content"><a class="title" href="/posts/3dcf38a1.html" title="Unity-YooAssets打包流程：Builtin管线">Unity-YooAssets打包流程：Builtin管线</a><time datetime="2026-10-26T11:39:22.823Z" title="发表于 2026-10-26 19:39:22">2026-10-26</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理"><img src="/img/Title/YooAsset-BundleCollector.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets的AB资源分类与管理"></a><div class="content"><a class="title" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理">Unity-YooAssets的AB资源分类与管理</a><time datetime="2026-10-25T05:42:27.627Z" title="发表于 2026-10-25 13:42:27">2026-10-25</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略"><img src="/img/Title/Unity-AssetBundle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle分包策略"></a><div class="content"><a class="title" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略">Unity-AssetBundle分包策略</a><time datetime="2026-10-23T12:08:11.452Z" title="发表于 2026-10-23 20:08:11">2026-10-23</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载"><img src="/img/Title/Unity-AssetBundleLoad.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle加载与卸载"></a><div class="content"><a class="title" href="/posts/38e927b7.html" title="Unity-AssetBundle加载与卸载">Unity-AssetBundle加载与卸载</a><time datetime="2026-10-22T11:26:03.041Z" title="发表于 2026-10-22 19:26:03">2026-10-22</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析"><img src="/img/Title/Unity-AssetBundle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle结构解析"></a><div class="content"><a class="title" href="/posts/d5e3da58.html" title="Unity-AssetBundle结构解析">Unity-AssetBundle结构解析</a><time datetime="2026-10-20T12:59:38.249Z" title="发表于 2026-10-20 20:59:38">2026-10-20</time></div></div></div></div><div class="card-widget card-recent-post"><div class="item-headline"><i class="fas fa-history"></i><span>最新文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/b5aa1459.html" title="Unity-YooAssets运行时加载与卸载"><img src="/img/Title/YooAssets-Load-Unload.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets运行时加载与卸载"/></a><div class="content"><a class="title" href="/posts/b5aa1459.html" title="Unity-YooAssets运行时加载与卸载">Unity-YooAssets运行时加载与卸载</a><time datetime="2026-10-27T11:47:17.926Z" title="发表于 2026-10-27 19:47:17">2026-10-27</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/3dcf38a1.html" title="Unity-YooAssets打包流程：Builtin管线"><img src="/img/Title/YooAssets-pack.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets打包流程：Builtin管线"/></a><div class="content"><a class="title" href="/posts/3dcf38a1.html" title="Unity-YooAssets打包流程：Builtin管线">Unity-YooAssets打包流程：Builtin管线</a><time datetime="2026-10-26T11:39:22.823Z" title="发表于 2026-10-26 19:39:22">2026-10-26</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理"><img src="/img/Title/YooAsset-BundleCollector.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-YooAssets的AB资源分类与管理"/></a><div class="content"><a class="title" href="/posts/b0d5b4a0.html" title="Unity-YooAssets的AB资源分类与管理">Unity-YooAssets的AB资源分类与管理</a><time datetime="2026-10-25T05:42:27.627Z" title="发表于 2026-10-25 13:42:27">2026-10-25</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/64d42568.html" title="Unity的Text与TMP艺术字实现方案"><img src="/img/Title/Unity-Text&amp;TMP-ArtFont.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity的Text与TMP艺术字实现方案"/></a><div class="content"><a class="title" href="/posts/64d42568.html" title="Unity的Text与TMP艺术字实现方案">Unity的Text与TMP艺术字实现方案</a><time datetime="2026-10-24T07:08:51.732Z" title="发表于 2026-10-24 15:08:51">2026-10-24</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略"><img src="/img/Title/Unity-AssetBundle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity-AssetBundle分包策略"/></a><div class="content"><a class="title" href="/posts/9b7c4e21.html" title="Unity-AssetBundle分包策略">Unity-AssetBundle分包策略</a><time datetime="2026-10-23T12:08:11.452Z" title="发表于 2026-10-23 20:08:11">2026-10-23</time></div></div></div></div></div></div></main><footer id="footer"><div class="footer-other"><div class="footer-copyright"><span class="copyright">&copy;2025 - 2026 By 穿越时空的思念</span></div><div class="footer_custom_text">每天进步一点，做更好的自己!</div></div></footer></div><div id="rightside"><div id="rightside-config-hide"><button id="readmode" type="button" title="阅读模式"><i class="fas fa-book-open"></i></button><button id="darkmode" type="button" title="日间和夜间模式切换"><i class="fas fa-adjust"></i></button><button id="hide-aside-btn" type="button" title="单栏和双栏切换"><i class="fas fa-arrows-alt-h"></i></button></div><div id="rightside-config-show"><button id="rightside-config" type="button" title="设置"><i class="fas fa-cog fa-spin"></i></button><button class="close" id="mobile-toc-button" type="button" title="目录"><i class="fas fa-list-ul"></i></button><button id="go-up" type="button" title="回到顶部"><span class="scroll-percent"></span><i class="fas fa-arrow-up"></i></button></div></div><div><script src="/js/utils.js"></script><script src="/js/main.js"></script><div class="js-pjax"><script>(async () => {
+  const showKatex = () => {
+    document.querySelectorAll('#article-container .katex').forEach(el => el.classList.add('katex-show'))
+  }
+
+  if (!window.katex_js_css) {
+    window.katex_js_css = true
+    await btf.getCSS('https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css')
+    if (true) {
+      await btf.getScript('https://cdn.jsdelivr.net/npm/katex/dist/contrib/copy-tex.min.js')
+    }
+  }
+
+  showKatex()
+})()</script><script>(() => {
+  const runMermaid = ele => {
+    window.loadMermaid = true
+    const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default'
+
+    ele.forEach((item, index) => {
+      const mermaidSrc = item.firstElementChild
+      const mermaidThemeConfig = `%%{init:{ 'theme':'${theme}'}}%%\n`
+      const mermaidID = `mermaid-${index}`
+      const mermaidDefinition = mermaidThemeConfig + mermaidSrc.textContent
+
+      const renderFn = mermaid.render(mermaidID, mermaidDefinition)
+      const renderMermaid = svg => {
+        mermaidSrc.insertAdjacentHTML('afterend', svg)
+      }
+
+      // mermaid v9 and v10 compatibility
+      typeof renderFn === 'string' ? renderMermaid(renderFn) : renderFn.then(({ svg }) => renderMermaid(svg))
+    })
+  }
+
+  const codeToMermaid = () => {
+    const codeMermaidEle = document.querySelectorAll('pre > code.mermaid')
+    if (codeMermaidEle.length === 0) return
+
+    codeMermaidEle.forEach(ele => {
+      const preEle = document.createElement('pre')
+      preEle.className = 'mermaid-src'
+      preEle.hidden = true
+      preEle.textContent = ele.textContent
+      const newEle = document.createElement('div')
+      newEle.className = 'mermaid-wrap'
+      newEle.appendChild(preEle)
+      ele.parentNode.replaceWith(newEle)
+    })
+  }
+
+  const loadMermaid = () => {
+    if (true) codeToMermaid()
+    const $mermaid = document.querySelectorAll('#article-container .mermaid-wrap')
+    if ($mermaid.length === 0) return
+
+    const runMermaidFn = () => runMermaid($mermaid)
+    btf.addGlobalFn('themeChange', runMermaidFn, 'mermaid')
+    window.loadMermaid ? runMermaidFn() : btf.getScript('https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js').then(runMermaidFn)
+  }
+
+  btf.addGlobalFn('encrypt', loadMermaid, 'mermaid')
+  window.pjax ? loadMermaid() : document.addEventListener('DOMContentLoaded', loadMermaid)
+})()</script></div><script defer="defer" id="ribbon" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-ribbon.min.js" size="150" alpha="0.6" zIndex="-1" mobile="true" data-click="true"></script><script defer="defer" id="fluttering_ribbon" mobile="true" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-fluttering-ribbon.min.js"></script><div id="local-search"><div class="search-dialog"><nav class="search-nav"><span class="search-dialog-title">搜索</span><span id="loading-status"></span><button class="search-close-button"><i class="fas fa-times"></i></button></nav><div class="text-center" id="loading-database"><i class="fas fa-spinner fa-pulse"></i><span>  数据加载中</span></div><div class="search-wrap"><div id="local-search-input"><div class="local-search-box"><input class="local-search-box--input" placeholder="搜索文章" type="text"/></div></div><hr/><div id="local-search-results"></div><div id="local-search-stats-wrap"></div></div></div><div id="search-mask"></div><script src="/js/search/local-search.js"></script></div></div></body></html>
