@@ -1,173 +1,249 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
-    <title>C#匿名函数与闭包</title>
-    <url>/posts/278e5dd7.html</url>
-    <content><![CDATA[起因最近看到了一段C#程序，一开始就简单的以为只是一个for循环的0~9的打印，但是深入了解之后发现我错了，而且对其中的原理相知甚少。代码如下：
-public static void Main(string[] args)&#123;    Action[] actions = new Action[10];    for (int i = 0; i &lt; 10; i++)    &#123;        actions[i] = () =&gt; &#123;Console.WriteLine(i.ToString()); &#125;;    &#125;    foreach (var action in actions)    &#123;        action();    &#125;&#125;
-这段代码的运行结果输出是10个10，如果做对了，想必已经是了解其中的原理，下面的内容可以不用看了。
-原因原因其实很简单，使用编辑器查看IL代码，可以很清晰的看到：编译器为匿名函数生成了一个名为&lt;&gt;c__DisplayClass0_0的类，并把int i作为了类内的成员变量，并在类中生成了b__0()方法，在方法中打印成员变量i。在函数运行时，new了一个名为cDisplayClass00的实例，并且在for循环中是不断的自增实例中的变量，最后把自己的b__0()方法传入Action中。C#中class是默认分配在堆上的，所以每次增加的i变量都是同一个地址上的数据，最后执行action委托时，调用的也是同一个类的b__0()方法，所以最后的结果自然全是10。
-闭包中存在的问题既然匿名函数在使用时在堆上new了一个实例，分配了内存，所以必定涉及到了GC。那么代码中的哪种写法导会有严重的GC问题，哪种写法又能尽量避免GC。搜索之后，发现猫仙人的这篇文章总结得非常到位：文章传送连接，以下是我对他文章结论的进一步总结，具体论证细节可以点击连接去查看。
-捕获变量的分类外部变量的分类重要分为3种：1、捕获静态变量2、捕获实例字段3、捕获外部方法的局部变量其中分配内存的多少为：3&gt;2&gt;1&gt;无闭包，并且捕获外部方法的局部变量的内存分配量高达2n次，为了记录外部局部变量的值，编译器每次都new了一个新的匿名类实例和Action实例。
-优化方法文章中指出了，可以通过增加参数数量，使用方法参数去传递要捕获的变量，避免掉对外部变量的捕获，同时避免闭包的额外内存分配。对于该文章开头的代码，若想改成输出0~9，就有两种办法，以下给出代码截图。第二种用了优化建议，内存性能要优于第一种。
-捕获外部方法的局部变量编译器new了n个匿名类实例和Action实例
-增加参数变量编译器只new对应的Aciton实例
-总结对于以上验证，可以简单粗暴的认为：runtime直接不使用()&#x3D;&gt;{}这种匿名函数的写法，能非常有效的避免额外内存开销。
+    <title>AlloyFramework(三)：框架循环与时间模块</title>
+    <url>/posts/d0ad57a2.html</url>
+    <content><![CDATA[游戏业务中，经常需要“等一会儿，再执行一段逻辑”：提示显示两秒后关闭，角色死亡后延迟复活，或者等下一帧再刷新界面布局。
+因此，框架需要提供一种方便的延迟写法，让业务能够直接表达“多久之后做什么”。例如，让提示两秒后关闭：
+// 两秒后关闭提示，使用不受游戏时间缩放影响的计时。long closeTimerID = AlloyTimer.DelaySeconds(    2.0,    CloseTip,    useTimeScale: false);
+
+这里的 CloseTip 是业务自己的关闭方法，计时器负责等待并在到期后调用。返回的任务 ID 则用于提前取消：如果提示已经被玩家手动关闭，就可以取消原来的延迟任务。
+// 提示提前关闭时，取消尚未执行的延迟回调。AlloyTimer.Remove(closeTimerID);
+
+从一次延迟继续往下看，还会遇到每秒刷新一次倒计时、每隔几帧检查一次状态、重复执行指定次数等需求。游戏暂停时，有的任务需要一起暂停，有的界面刷新则需要继续。这些都是同一类计时需求的不同用法。
+Unity 的协程和 UniTask 都可以表达等待。AlloyFramework 在这里提供统一的时间模块，让需要回调调度的业务使用相同的添加、重复和取消方式，并明确时间缩放、执行次数与退出清理规则。
+有了业务接口，接下来就要解决它如何运行：谁来推进时间，又由谁判断任务已经到期？
+当前实现使用 Unity 的帧更新驱动计时器。GameLoop 先把 Unity 的更新回调统一分发给普通 C# 对象，时间模块再把调度器注册进去，每帧推进任务并执行到期回调。
+这就是本篇将 GameLoopManager 和 TimerManager 放在一起介绍的原因：前者准备帧驱动，后者接入计时能力，共同支撑业务层简单的一次延迟调用。沿着上一篇的启动管线，它们的初始化与运行过程分为三步：
+
+初始化游戏循环：创建 MonoFacade，接收 Unity 的 Update、LateUpdate 和 FixedUpdate。
+初始化时间模块：创建 TimerScheduler，注册到 GameLoop 的更新列表。
+业务添加定时任务：通过 AlloyTimer 创建任务，调度器每帧检查是否到期，到期后执行回调。
+
+flowchart TD    A[&quot;启动管线&quot;] --&gt; B[&quot;GameLoopManager.InitializeAsync&quot;]    B --&gt; C[&quot;GameLoop.Initialize：创建 MonoFacade&quot;]    A --&gt; D[&quot;TimerManager.InitializeAsync&quot;]    D --&gt; E[&quot;AlloyTimer.Initialize：创建 TimerScheduler&quot;]    E --&gt; F[&quot;GameLoop.Register：注册调度器&quot;]    C --&gt; G[&quot;Unity 调用 MonoFacade.Update&quot;]    F --&gt; H[&quot;GameLoop 分发更新&quot;]    G --&gt; H    H --&gt; I[&quot;TimerScheduler.OnUpdate：推进计时并执行到期回调&quot;]    J[&quot;业务通过 AlloyTimer 添加任务&quot;] --&gt; I
+
+一、在启动管线中确定初始化顺序这两个模块都继承上一篇介绍的 FrameworkSystem，通过统一的初始化步骤加入启动管线：
+// 先准备帧驱动，再让计时器接入更新。Add(new InitializeFrameworkSystemStep(new GameLoopManager()));Add(new InitializeFrameworkSystemStep(new TimerManager()));
+
+GameLoopManager 先建立更新入口，TimerManager 再注册调度器。它们都在资源等后续模块之前初始化，为其他模块提供基础能力。
+这里的方法返回 UniTask，用于保持统一的初始化接口。这两个模块当前的准备工作可以同步完成，所以返回 UniTask.CompletedTask，无需额外等待。
+本文代码涉及 AlloyFramework、AlloyFramework.Timing、Cysharp.Threading.Tasks、System.Threading 和 UnityEngine 等命名空间。UniTask 在这里负责统一启动接口，计时器本身由 Unity 帧回调驱动。
+二、GameLoopManager：建立统一的帧驱动1. 管理器接入框架生命周期GameLoopManager 负责启动和关闭 GameLoop，核心结构如下：
+internal sealed class GameLoopManager : FrameworkSystem&#123;    /// &lt;summary&gt;创建框架统一的帧驱动入口。&lt;/summary&gt;    /// &lt;param name=&quot;context&quot;&gt;本轮框架服务容器。&lt;/param&gt;    /// &lt;param name=&quot;cancellationToken&quot;&gt;用于取消初始化的令牌。&lt;/param&gt;    /// &lt;returns&gt;游戏循环初始化完成的任务。&lt;/returns&gt;    public override UniTask InitializeAsync(        FrameworkContext context,        CancellationToken cancellationToken)    &#123;        // 启动取消后不再创建运行对象。        cancellationToken.ThrowIfCancellationRequested();        GameLoop.Initialize();        return UniTask.CompletedTask;    &#125;    /// &lt;summary&gt;清理更新注册并释放帧驱动对象。&lt;/summary&gt;    public override void Shutdown()    &#123;        GameLoop.Shutdown();    &#125;&#125;
+
+GameLoop.Initialize 会创建名为 [AlloyFramework] MonoFacade 的 GameObject，并添加 MonoFacade 组件。已有驱动对象或应用正在退出时，不会重复创建。
+因此，业务场景不用额外挂载一个更新管理对象，驱动对象由框架初始化时自动建立。
+2. MonoFacade 将 Unity 回调交给 GameLoopMonoFacade 继承 MonoBehaviour，负责接收 Unity 回调。它在 Awake 中绑定到 GameLoop，并设置为跨场景保留。核心过程如下：
+public sealed class MonoFacade : MonoBehaviour&#123;    private void Awake()    &#123;        // 只允许一个有效驱动对象接入框架。        if (!GameLoop.AttachFacade(this))        &#123;            Destroy(gameObject);            return;        &#125;        DontDestroyOnLoad(gameObject);    &#125;    private void Update()    &#123;        GameLoop.DispatchUpdate(Time.deltaTime, Time.unscaledDeltaTime);    &#125;    private void LateUpdate()    &#123;        GameLoop.DispatchLateUpdate(Time.deltaTime, Time.unscaledDeltaTime);    &#125;    private void FixedUpdate()    &#123;        GameLoop.DispatchFixedUpdate(Time.fixedDeltaTime);    &#125;    private void OnDestroy()    &#123;        GameLoop.DetachFacade(this);    &#125;&#125;
+
+这个组件只负责转发。需要逐帧执行的框架或业务对象，可以是普通 C# 类，通过更新接口接入 GameLoop。
+3. 用接口声明对象需要哪种更新框架提供三种更新接口，分别对应 Unity 的三个更新阶段：
+public interface IUpdateable&#123;    /// &lt;summary&gt;执行普通帧更新。&lt;/summary&gt;    /// &lt;param name=&quot;deltaTime&quot;&gt;受时间缩放影响的时间增量。&lt;/param&gt;    /// &lt;param name=&quot;unscaledDeltaTime&quot;&gt;不受时间缩放影响的时间增量。&lt;/param&gt;    void OnUpdate(float deltaTime, float unscaledDeltaTime);&#125;public interface ILateUpdateable&#123;    /// &lt;summary&gt;执行帧末更新。&lt;/summary&gt;    /// &lt;param name=&quot;deltaTime&quot;&gt;受时间缩放影响的时间增量。&lt;/param&gt;    /// &lt;param name=&quot;unscaledDeltaTime&quot;&gt;不受时间缩放影响的时间增量。&lt;/param&gt;    void OnLateUpdate(float deltaTime, float unscaledDeltaTime);&#125;public interface IFixedUpdateable&#123;    /// &lt;summary&gt;执行固定时间步长更新。&lt;/summary&gt;    /// &lt;param name=&quot;fixedDeltaTime&quot;&gt;固定更新的时间步长。&lt;/param&gt;    void OnFixedUpdate(float fixedDeltaTime);&#125;
+
+对象实现所需接口后，通过 GameLoop.Register 注册；不再需要更新时，调用 GameLoop.Unregister。一个对象可以实现多个接口，注册时会分别加入对应的更新集合。
+例如，一个纯 C# 的业务对象需要每帧更新状态，只要实现 IUpdateable 并注册，就能收到 OnUpdate，不必为它单独创建 GameObject。
+GameLoop 内部为三种接口分别维护注册集合，使用 List 遍历对象，使用 HashSet 避免重复注册。回调期间发生的注册和移除会暂存，分发结束后统一处理，避免遍历时直接改变列表。已标记移除的对象会在后续遍历中跳过，新注册对象则不会插入当前这轮分发。
+三、TimerManager：把计时器接入游戏循环1. 初始化统一的计时器入口TimerManager 同样只承担模块生命周期接入，真正的时间服务由 AlloyTimer 提供：
+internal sealed class TimerManager : FrameworkSystem&#123;    /// &lt;summary&gt;创建计时器调度器并接入游戏循环。&lt;/summary&gt;    /// &lt;param name=&quot;context&quot;&gt;本轮框架服务容器。&lt;/param&gt;    /// &lt;param name=&quot;cancellationToken&quot;&gt;用于取消初始化的令牌。&lt;/param&gt;    /// &lt;returns&gt;时间模块初始化完成的任务。&lt;/returns&gt;    public override UniTask InitializeAsync(        FrameworkContext context,        CancellationToken cancellationToken)    &#123;        cancellationToken.ThrowIfCancellationRequested();        AlloyTimer.Initialize();        return UniTask.CompletedTask;    &#125;    /// &lt;summary&gt;取消调度器注册并清理全部计时器。&lt;/summary&gt;    public override void Shutdown()    &#123;        AlloyTimer.Shutdown();    &#125;&#125;
+
+AlloyTimer.Initialize 创建一个 TimerScheduler，然后注册到 GameLoop。初始化与退出的核心结构如下：
+public static class AlloyTimer&#123;    private static TimerScheduler m_scheduler; // 当前计时器调度器。    internal static void Initialize()    &#123;        if (m_scheduler != null)        &#123;            return;        &#125;        // 调度器通过命名方法取得帧号并报告回调异常。        m_scheduler = new TimerScheduler(ReportException, GetFrameCount);        GameLoop.Register(m_scheduler);    &#125;    internal static void Shutdown()    &#123;        if (m_scheduler == null)        &#123;            return;        &#125;        // 先停止接收更新，再清理任务和调度器引用。        GameLoop.Unregister(m_scheduler);        m_scheduler.RemoveAll();        m_scheduler = null;    &#125;    private static int GetFrameCount()    &#123;        return Time.frameCount;    &#125;    private static void ReportException(Exception exception)    &#123;        AlloyDebug.Error(exception);    &#125;&#125;
+
+TimerScheduler 实现了 IUpdateable。注册后，每一帧的 Update 会沿着 MonoFacade → GameLoop → TimerScheduler.OnUpdate 这条路径推进计时。
+这里的职责可以分成三层：TimerManager 接入启动与退出，AlloyTimer 提供业务调用入口，TimerScheduler 保存任务并执行调度。
+2. TimerScheduler 如何判断任务到期调度器内部维护活跃任务列表和按 ID 查找任务的字典。创建任务时，记录时间间隔或帧间隔、剩余执行次数、回调方法等信息，并返回一个唯一 ID。
+每次 OnUpdate 遍历任务，按任务类型判断是否到期。核心判断如下：
+// 帧任务按宿主帧号计算，注册当帧不提前计入延迟。if (timer.FrameDelay &gt; 0)&#123;    if (unchecked((uint)(m_getFrameCount() - timer.StartFrame)) &lt; (uint)timer.FrameDelay)    &#123;        continue;    &#125;&#125;else&#123;    // 秒任务根据配置选择缩放时间或非缩放时间。    timer.Remaining -= timer.UseTimeScale ? deltaTime : unscaledDeltaTime;    if (timer.Remaining &gt; 0)    &#123;        continue;    &#125;&#125;
+
+任务到期后，调度器更新剩余执行次数；次数用完就移除任务，需要重复执行则计算下一次等待时间，然后调用回调。
+当前实现中，每个任务每帧最多触发一次，卡顿期间错过的次数不会集中补发。按秒重复的任务会根据超出的时间计算下一个间隔；按帧重复的任务则从本次触发帧重新计算帧间隔。
+这意味着计时器回调精度受帧更新影响。例如，设置一秒间隔，是在累计时间到期后的调度更新中执行，并不保证精确到某一个系统时钟瞬间。
+3. 回调中的新增、取消与异常回调本身可能继续创建或取消任务，所以调度器不会在遍历过程中直接插入新任务。新增任务先放入待添加列表，当前调度结束后再合入活跃列表。
+取消任务时，会标记任务失效并移除 ID 索引，随后清理失效项。这样，一个回调取消另一个尚未执行的任务时，后者在当前轮中就可以被跳过。
+定时器回调由 try&#x2F;catch 单独保护，异常交给 AlloyDebug 记录，其他计时器仍然继续处理。重复任务不会仅因为回调抛出异常就自动取消；业务如果需要停止它，应主动移除。
+这些处理让任务在执行过程中调整自身或其他任务时，仍然能够遵循确定的调度规则。
+四、业务如何使用 AlloyTimer业务等待框架初始化完成后，通过 AlloyTimer 添加任务，不需要自己创建 TimerManager 或 TimerScheduler。
+常用接口如下：
+
+
+
+接口
+用途
+
+
+
+DelaySeconds
+延迟指定秒数执行一次
+
+
+RepeatSeconds
+按秒间隔执行指定次数或无限重复
+
+
+DelayFrames
+延迟指定帧数执行一次
+
+
+RepeatFrames
+按帧间隔执行指定次数或无限重复
+
+
+Remove
+使用任务 ID 取消指定任务
+
+
+创建任务会返回 ID，业务需要保存自己负责的任务，并在界面关闭或对象退出时取消。当前计时器不会自动感知业务对象已经失效。
+例如，界面显示期间每秒刷新一次内容，核心过程如下：
+private long m_refreshTimerID; // 当前界面持有的刷新任务。private void StartRefresh()&#123;    // 防止重复打开或重复调用时注册多份任务。    StopRefresh();    m_refreshTimerID = AlloyTimer.RepeatSeconds(        1.0,        AlloyTimer.INFINITE,        RefreshContent,        useTimeScale: false);&#125;private void StopRefresh()&#123;    // 界面关闭时只清理自己持有的任务。    AlloyTimer.Remove(m_refreshTimerID);    m_refreshTimerID = AlloyTimer.INVALIDID;&#125;private void RefreshContent()&#123;    // 在这里读取最新业务状态并刷新界面。&#125;
+
+RepeatSeconds 的首次执行也会等待一个间隔。如果界面打开时就要显示最新内容，可以先主动调用一次 RefreshContent，再注册定时刷新。
+接口也支持带参数回调。业务可以通过泛型重载显式传入上下文，配合命名方法使用，避免通过捕获变量的 lambda 携带状态。
+时间缩放与帧延迟的选择按秒计时默认使用 Time.deltaTime，会受 Time.timeScale 影响。例如，跟随游戏速度变化的技能计时可以使用这个模式。设置 useTimeScale: false 后，使用 Time.unscaledDeltaTime，适合暂停时仍需更新的 UI。
+按帧计时根据 Time.frameCount 判断，不受时间缩放影响，但仍然依赖游戏继续产生帧。它适合延后一帧刷新等需求，不代表真实世界中的固定时长。
+DelaySeconds(0, ...) 会在后续调度更新中执行，不会在添加时立即调用；如果明确要求最早下一帧执行，应使用 DelayFrames(1, ...)。
+非缩放计时也需要 Unity 持续更新，并不等于应用进入后台后仍持续运行的系统时钟。涉及服务器活动结束时间时，应根据目标时间重新计算剩余时间，让计时器承担定时刷新展示的职责。
+五、退出时先停止计时器，再关闭游戏循环启动顺序是 GameLoopManager → TimerManager，正常退出按相反顺序执行。
+TimerManager 先调用 AlloyTimer.Shutdown，从 GameLoop 注销调度器、清空任务并解除引用。随后 GameLoopManager 调用 GameLoop.Shutdown，清理更新注册并释放驱动对象。
+业务层通常只需要调用 Remove 清理自己保存的 ID。RemoveAll 会清除整个时间模块中的任务，应留给确实需要全局清理的场景。
+这两个模块共同建立了框架的运行基础：GameLoop 将 Unity 帧回调提供给普通 C# 对象，Timer 在这个驱动上统一管理定时任务。后续模块既可以通过更新接口接入逐帧执行，也可以直接使用 AlloyTimer 完成延时和周期逻辑。
 ]]></content>
+      <tags>
+        <tag>UnityFramework</tag>
+      </tags>
   </entry>
   <entry>
-    <title>AlloyFramework(一)：最小的游戏框架需要包含几个模块</title>
-    <url>/posts/c2cb4e7b.html</url>
-    <content><![CDATA[从重复需求出发，明确框架要解决什么写一个 Unity Demo 时，我们通常希望尽快把核心玩法跑起来。但真正开始动手后就会发现：在玩法之外，总有一批基础逻辑需要先写。
-程序从哪里启动？资源怎么加载？倒计时怎么管理？配置表怎么读取？怎样与服务器通信？资源和代码怎么更新？界面如何打开、关闭和切换？
-换一个 Demo，这些问题依然存在。项目规模扩大之后，它们还会带来初始化顺序、资源释放、异步取消、异常恢复等更具体的问题。
-这就是我想搭建 AlloyFramework 的原因：把项目中反复出现的通用需求整理出来，形成可以复用的基础能力，让开发新项目时能够把更多精力放在玩法和业务上。
-这一篇先不讨论具体代码，也不把需求描述当作已经完成的功能清单。我们先回答一个问题：一个最小的游戏框架，需要替项目承担哪些职责？
-一、统一的启动入口：让游戏按确定的顺序进入运行状态Unity 提供了 Awake、OnEnable、Start 等生命周期方法，但这些方法并不会自动形成一条清晰的业务启动流程。
-项目很小时，把初始化代码写在几个组件里似乎就够了。随着模块增加，依赖关系会逐渐显现：读取配置之前可能需要准备资源包，打开登录界面之前需要初始化 UI，而正式进入游戏之前，可能还要完成版本检查和更新。
-如果这些操作散落在不同对象的生命周期中，启动顺序就很难直观看清，也容易出现某个模块已经开始工作、它依赖的模块却尚未准备好的问题。
-因此，框架需要一个统一的启动入口，负责组织启动阶段和模块之间的依赖。
-它至少应该满足以下需求：
+    <title>AlloyFramework(二)：框架启动流程</title>
+    <url>/posts/df7521a5.html</url>
+    <content><![CDATA[上一篇介绍了 AlloyFramework 需要提供哪些基础模块。这一篇介绍这些模块如何启动，以及框架完成准备后，如何把流程交给业务层。
+整个启动结构主要分为三块：
 
-明确启动流程，让每个阶段的职责和执行顺序可以被理解。
-支持异步初始化，让资源准备、配置加载等操作可以被等待。
-提供启动状态与进度，方便界面展示当前正在进行的工作。
-在启动失败时保留明确的失败原因，并由业务决定重试、退出或其他处理方式。
-允许项目接入自己的业务步骤，例如登录、角色选择和首个场景加载。
+框架入口：在启动场景挂载 FrameworkBootstrap，从它的 Awake 开始启动。
+模块初始化流程：统一组织模块，按顺序初始化，完成热更代码准备，并通过反射获得业务入口。
+业务入口：初始化业务、执行项目自身逻辑，完成从框架启动流程到业务流程的交接。
 
-统一入口并不意味着把所有初始化代码塞进一个巨大的类里。各模块仍然负责自己的初始化，入口负责把它们组织起来。
-最终需要达到的效果是：当我们想知道“游戏是怎么启动的”时，可以找到一条明确的执行路径。
-二、资源加载模块：统一资源获取与生命周期管理游戏离不开资源。界面预制体、图集、音效、场景和配置文件，都需要在合适的时机加载，并在不再使用时释放。
-Demo 阶段可以通过直接引用或简单加载快速完成需求。但进入实际项目后，资源来源和使用方式会更加复杂：编辑器下需要方便调试，发布后可能需要从资源包加载，部分资源还可能需要先下载。
-如果每个业务模块都自行处理这些细节，加载代码会逐渐分散，释放规则也容易不一致。
-资源模块的核心需求，是为业务提供统一的资源获取方式，并建立清晰的使用与释放约定。
-它至少需要考虑：
+flowchart TD    subgraph Bootstrap[&quot;第一块：框架入口&quot;]        A[&quot;Boot 场景挂载 FrameworkBootstrap&quot;]        B[&quot;Awake：读取启动配置，准备日志和 Loading&quot;]        A --&gt; B    end    subgraph Initialization[&quot;第二块：模块初始化流程&quot;]        C[&quot;建立启动步骤 List，按顺序执行&quot;]        D[&quot;初始化游戏循环、时间和资源模块&quot;]        E[&quot;准备热更代码，反射调用业务安装方法&quot;]        F[&quot;初始化配置、模型、音频、网络和 UI 模块&quot;]        G[&quot;框架就绪，反射创建 IGameEntry&quot;]        C --&gt; D --&gt; E --&gt; F --&gt; G    end    subgraph Business[&quot;第三块：业务入口&quot;]        H[&quot;InitializeAsync：安装业务扩展，初始化业务模块&quot;]        I[&quot;MainAsync：进入业务场景，执行游戏逻辑&quot;]        J[&quot;结束启动 Loading，后续流程由业务组织&quot;]        H --&gt; I --&gt; J    end    B --&gt; C    G --&gt; H
 
-支持异步加载，避免耗时操作阻塞游戏流程。
-对资源定位建立统一规则，减少业务对物理路径和打包方式的依赖。
-明确资源句柄、实例和加载结果的所有权，知道由谁负责释放。
-在底层方案支持的基础上，管理重复加载、依赖资源和资源复用。
-提供失败结果与取消机制，处理资源不存在、下载失败或使用者提前退出等情况。
+代码中使用的 UniTask本文的异步代码使用 UniTask，需要引入 Cysharp.Threading.Tasks 命名空间；取消令牌 CancellationToken 来自 System.Threading。
+using Cysharp.Threading.Tasks;using System.Threading;
 
-例如，一个界面在资源加载完成前就被关闭，稍后返回的加载结果应该如何处理？这类问题如果没有统一约定，很容易变成项目中的隐性泄漏。
-资源模块的价值，不只是少写几行加载代码，更是让资源从申请到释放有一致的生命周期。
-三、时间模块：为延时、计时和周期任务建立共同规则技能冷却、活动倒计时、定时刷新、延迟关闭界面，这些需求都与时间有关。
-直接在 Update 中累计时间，或者为每个功能单独写协程，都能完成某个具体需求。但当这样的逻辑越来越多时，暂停是否生效、对象销毁后任务是否继续、重复任务如何停止，就会变成反复处理的问题。
-时间模块需要统一常见的定时任务，并明确不同时间语义。
-它至少应该提供：
+资源加载、代码准备和场景加载都可能需要等待。启动方法返回 UniTask，管线通过 await 等待当前步骤完成，再执行下一步，从而把异步操作写成清晰的顺序流程。等待期间可以把执行机会交还给 Unity，await 本身不会自动把工作放到子线程中，同步执行的耗时操作仍然会占用当前线程。
+UniTask 为 Unity 提供了基于 PlayerLoop 的异步支持，并通过值类型和对象复用等方式减少分配。它不意味着所有异步代码都绝对零 GC，具体原理可以阅读之前的文章：UniTask 0GC实现原理。本篇重点关注它如何组织启动流程。
+一、框架入口：从 FrameworkBootstrap 的 Awake 开始项目准备一个独立的 Boot 场景，作为游戏运行时加载的第一个场景，并在其中挂载 FrameworkBootstrap。
+FrameworkBootstrap 继承自 MonoBehaviour，因此可以通过 Unity 的 Awake 发起启动。它持有启动配置引用，当前项目配置的是 GameHotUpdateSettings，用来提供资源模式、代码模式、日志和 Loading 预制体等信息。代码中的字段使用其父类 FrameworkBootSettings 声明，方便不同项目提供自己的配置实现。
+Awake 先检查是否已有框架入口，避免重复启动；然后将入口设置为跨场景保留，创建启动控制器，安装日志、校验配置并创建 Loading，最后发起模块初始化流程。核心过程如下：
+public sealed class FrameworkBootstrap : MonoBehaviour&#123;    [SerializeField]    private FrameworkBootSettings m_settings; // 当前项目关联 GameHotUpdateSettings 配置资产。    [SerializeField]    private GameObject m_startupScreen; // Loading 就绪前显示的启动画面。    private FrameworkStartupController m_startupController; // 管理本轮启动流程。    private void Awake()    &#123;        // 保证已有入口继续管理框架，重复入口直接退出。        if (HasExistingBootstrap())        &#123;            DestroyDuplicateBootstrap();            return;        &#125;        // 确认配置存在，并让入口跨场景持有框架生命周期。        EnsureSettingsAssigned();        transform.SetParent(null);        DontDestroyOnLoad(gameObject);        m_startupController = new FrameworkStartupController();        // 在模块初始化前准备日志和启动展示。        InstallLogViewer();        m_settings.Validate();        InstallLoadingPresenter();        // 交给控制器异步执行后续启动管线。        m_startupController.Startup(m_settings, m_startupScreen);    &#125;&#125;
 
-一次性延时任务与周期任务。
-任务取消能力，以及与业务对象生命周期配套的清理方式。
-受游戏时间缩放影响和不受其影响的计时方式。
-一致的触发与异常处理规则，避免某个任务异常破坏其他任务的调度。
+这些配置和展示资源随主包提供，保证资源模块和业务代码尚未准备好时也能使用。控制器等待 Loading 显示后，再开始执行后续启动步骤。
+Awake 完成环境准备后，由启动控制器运行 FrameworkStartupPipeline，接下来进入模块初始化流程。
+二、模块初始化流程：统一注册，按顺序执行1. 用 FrameworkSystem 统一模块生命周期各个框架模块继承 FrameworkSystem，通过统一的方法完成初始化和退出。父类的核心结构如下：
+public abstract class FrameworkSystem : IFrameworkSystem&#123;    /// &lt;summary&gt;初始化模块所需的对象、数据和服务。&lt;/summary&gt;    /// &lt;param name=&quot;context&quot;&gt;本轮框架服务容器。&lt;/param&gt;    /// &lt;param name=&quot;cancellationToken&quot;&gt;用于取消初始化的令牌。&lt;/param&gt;    /// &lt;returns&gt;模块初始化完成的任务。&lt;/returns&gt;    public abstract UniTask InitializeAsync(        FrameworkContext context,        CancellationToken cancellationToken);    /// &lt;summary&gt;默认执行同步清理，需要异步退出的模块可以重写。&lt;/summary&gt;    /// &lt;returns&gt;模块清理完成的任务。&lt;/returns&gt;    public virtual UniTask ShutdownAsync()    &#123;        Shutdown();        return UniTask.CompletedTask;    &#125;    /// &lt;summary&gt;同步释放模块资源，也用于应用退出时兜底。&lt;/summary&gt;    public virtual void Shutdown()    &#123;    &#125;&#125;
 
-这里还需要区分游戏运行时间与真实世界时间。技能表现可能跟随游戏暂停，运营活动的结束时间通常不能因为游戏暂停就延后。
-对于服务器决定的活动时间，框架可以提供服务器时间偏移或校准后的查询能力，但不能把本地倒计时当作最终结算依据。客户端展示剩余时间，关键规则仍需要由服务器确认。
-时间模块的目标，是让业务说明“什么时候执行、是否跟随暂停、何时停止”，而不用反复实现计时细节。
-四、配置表模块：让规则数据有统一的访问入口角色属性、道具信息、关卡参数和技能数值，往往需要通过配置来管理。
-把这些数据写在代码里，修改成本会随着内容增加而上升。改为配置表后，又会产生新的问题：表如何加载？什么时候可用？如何根据 ID 查找？找不到记录怎么办？表之间的引用如何验证？
-配置模块需要把这些访问与生命周期问题组织起来，让业务可以稳定地读取规则数据。
-它至少需要满足：
+InitializeAsync 是每个模块必须实现的方法。例如，资源模块在这里准备 YooAsset 资源服务，配置模块在这里加载配置。退出逻辑按模块需要实现：同步释放资源的模块重写 Shutdown，需要等待异步清理的模块则重写 ShutdownAsync。
+统一父类之后，启动流程就可以按相同的方式调用模块，而不用了解每个模块内部如何初始化。
+2. 用 List 组织模块和启动步骤启动过程除了初始化模块，还包含读取配置、准备代码和创建业务入口。因此，FrameworkStartupPipeline 保存的是启动步骤列表 List&lt;IFrameworkStartupStep&gt;。
+步骤接口提供执行和退出两个方法：
+internal interface IFrameworkStartupStep&#123;    /// &lt;summary&gt;执行当前启动步骤。&lt;/summary&gt;    /// &lt;param name=&quot;context&quot;&gt;本轮启动上下文。&lt;/param&gt;    /// &lt;param name=&quot;cancellationToken&quot;&gt;用于取消启动的令牌。&lt;/param&gt;    /// &lt;returns&gt;当前步骤执行完成的任务。&lt;/returns&gt;    UniTask ExecuteAsync(        FrameworkStartupContext context,        CancellationToken cancellationToken);    /// &lt;summary&gt;清理当前步骤持有的资源。&lt;/summary&gt;    /// &lt;param name=&quot;context&quot;&gt;本轮启动上下文。&lt;/param&gt;    /// &lt;returns&gt;当前步骤清理完成的任务。&lt;/returns&gt;    UniTask ShutdownAsync(FrameworkStartupContext context);&#125;
 
-统一配置初始化与读取入口，保证业务访问时所需数据已经就绪。
-提供明确的数据类型与查询方式，减少字符串约定和重复解析。
-对缺失记录、非法数据和引用错误提供可定位的信息。
-与资源加载及版本更新流程配合，保证当前代码能够正确读取当前配置。
+普通模块由 InitializeFrameworkSystemStep 包装成步骤，配置读取、代码准备和业务入口等操作直接实现这个接口。它们因此可以放进同一个 List，并按顺序执行。
+启动管线的步骤注册与执行核心如下：
+internal sealed class FrameworkStartupPipeline&#123;    private readonly List&lt;IFrameworkStartupStep&gt; m_steps = new List&lt;IFrameworkStartupStep&gt;(); // 启动步骤列表。    private readonly FrameworkStartupContext m_context; // 本轮启动上下文。    private int m_startedStepCount; // 已开始执行、需要退出清理的步骤数。    private bool m_hasRun; // 防止同一管线重复执行。    internal FrameworkStartupPipeline(        FrameworkStartupContext context,        IGameStartupConfigurationProvider configurationProvider)    &#123;        m_context = context ?? throw new ArgumentNullException(nameof(context));        // 先确定运行模式，再准备基础模块和业务代码。        Add(new ConfigureGameStartupStep(configurationProvider));        Add(new InitializeFrameworkSystemStep(new GameLoopManager()));        Add(new InitializeFrameworkSystemStep(new TimerManager()));        Add(new InitializeFrameworkSystemStep(new ResourceServiceManager()));        Add(new PrepareGameCodeStep());        // 业务代码先安装配置加载器，后续模块再使用业务配置。        Add(new InitializeFrameworkSystemStep(new ConfigManager()));        Add(new InitializeFrameworkSystemStep(new ModelManager()));        Add(new InitializeFrameworkSystemStep(new AudioLifecycleManager()));        Add(new InitializeFrameworkSystemStep(new NetworkManager()));        Add(new InitializeFrameworkSystemStep(new UIManager()));        // 框架就绪后创建业务入口，开始业务初始化与主流程。        Add(new CompleteFrameworkInitializationStep());        Add(new StartGameEntryStep());    &#125;    internal async UniTask RunAsync(CancellationToken cancellationToken)    &#123;        // 每条管线只负责一轮启动。        if (m_hasRun)        &#123;            throw new InvalidOperationException(&quot;框架启动管线不能重复执行。&quot;);        &#125;        m_hasRun = true;        for (int index = 0; index &lt; m_steps.Count; index++)        &#123;            cancellationToken.ThrowIfCancellationRequested();            // 执行前记录清理责任，当前步骤中途失败时也参与退出。            m_startedStepCount = index + 1;            await m_steps[index].ExecuteAsync(m_context, cancellationToken);            cancellationToken.ThrowIfCancellationRequested();        &#125;    &#125;    private void Add(IFrameworkStartupStep step)    &#123;        m_steps.Add(step);    &#125;&#125;
 
-配置生成工具和运行时配置模块可以各司其职。前者负责导出与生成，后者负责加载、访问以及项目需要的适配逻辑，没有必要重新实现已有工具已经解决的问题。
-配置表也应与玩家存档区分开。道具的基础属性属于配置，玩家拥有多少道具属于运行时或存档数据，两者的修改方式和生命周期不同。
-五、网络模块：统一通信流程，让业务专注于协议含义联网项目中，登录、角色数据、背包操作和战斗交互都需要网络通信。
-如果每个业务自行建立连接、序列化消息、等待返回并处理超时，很快就会出现大量重复代码，而且很难保持一致的错误处理行为。
-网络模块需要提供稳定的通信基础能力，让业务更多关注“发送什么请求”和“如何处理结果”。
-它通常需要考虑：
-
-连接建立、主动关闭以及连接状态通知。
-消息发送、接收、序列化和协议分发。
-请求与响应的对应关系，以及超时、取消和错误返回。
-服务器主动推送消息的订阅与解绑。
-根据项目需要提供心跳、断线检测和重连支持。
-
-这里尤其需要划清基础能力与业务决策的边界。网络模块可以发现连接中断并尝试恢复连接，但是否重新登录、是否返回登录界面，需要业务决定。
-同样，请求超时不一定代表服务器没有执行操作。购买、领取奖励等请求不能简单地一律自动重发，需要结合协议的幂等设计和业务状态处理。
-对于纯单机 Demo，网络模块可以不启用。框架具备这一能力，不代表每个项目都必须依赖它。
-六、热更新：让资源与代码具备可控的版本演进能力项目发布之后，内容和逻辑仍然可能变化。更新一张图片、调整配置、增加活动内容，或者修复一段业务逻辑，都可能涉及版本更新。
-热更新需要分别看待资源更新与代码更新。
-资源更新关注资源清单、版本检查、差异下载、文件校验，以及新资源何时可以投入使用。代码更新则关注热更新代码的构建、加载、执行入口，以及它与主包代码之间的兼容关系。
-两者需要协同，但并不是同一件事。
-从框架需求出发，至少应该明确：
-
-如何识别本地版本与目标版本，以及本次需要更新的内容。
-如何展示下载进度，并处理网络失败、存储空间不足和校验失败。
-如何确认目标版本所需文件完整，避免在部分下载完成时切换到不可用状态。
-如何约束代码、配置和资源之间的兼容关系。
-更新完成后，如何交回启动流程并进入后续业务阶段。
-
-代码热更新也有适用边界，它受目标平台、发布渠道和所选技术方案限制。不能假定所有平台都支持同样的方式，也不能假定所有改动都可以绕过主包更新。
-因此，热更新的核心需求是建立可检查、可恢复的版本切换流程。至于采用何种资源方案和代码方案，可以在后续实现中展开。
-七、UI 模块：统一界面的生命周期与交互秩序UI 往往是项目中增长最快的部分之一。登录界面、主界面、背包、设置、提示框和加载界面，看起来只是不同的预制体，实际却共享很多管理需求。
-界面如何打开和关闭？重复打开时复用还是新建？窗口之间如何排序？关闭弹窗后返回哪里？界面关闭时，消息监听和定时任务是否一起清理？
-如果各个界面各自处理这些问题，随着数量增加，交互行为和资源管理就很容易失去一致性。
-UI 模块至少需要提供：
-
-统一的界面打开、关闭与实例管理方式。
-明确的生命周期，让初始化、显示、隐藏和销毁各有职责。
-层级、遮罩与输入阻挡规则，维护合理的显示和交互顺序。
-界面参数传递方式，支持不同业务场景复用同一个界面。
-与资源模块配合的加载和释放规则。
-按项目需要支持返回栈、弹窗队列、界面缓存和打开关闭动效。
-移动端异形屏与安全区域适配，兼顾不同宽高比、横竖屏变化和系统手势区域。
-提供 AlloyFramework 自行封装的通用 UI 组件，例如无限列表，供业务界面复用。
-
-移动端还需要专门考虑异形屏适配。刘海、挖孔、圆角以及底部手势区域，都可能影响界面的显示和操作。仅仅按照分辨率缩放 UI，并不能保证按钮、文字和重要信息始终处于合适的位置。
-因此，AlloyFramework 的 UI 模块需要提供统一的安全区域适配能力，根据设备报告的可用区域调整内容布局，并在屏幕尺寸、横竖屏方向或安全区域发生变化时重新计算。对于底部手势区域等系统交互边界，还需要结合平台表现和项目需求预留合适的操作间距。
-适配时也需要区分不同内容的布局要求：背景和全屏遮罩通常需要铺满屏幕，返回按钮、确认按钮以及关键文字则应放在安全区域内。框架应允许界面配置哪些容器需要适配、适配哪些边缘，以及是否增加额外留白，避免把整个界面统一缩进后产生背景露边或布局失衡。
-这些规则应由 UI 模块集中提供，让业务界面通过配置使用，并结合不同宽高比和典型异形屏设备验证显示与点击效果，减少每个界面重复编写适配逻辑。
-并不是所有界面都适合同一种管理策略。常驻主界面、可返回的功能页面和一次性提示框，生命周期可能不同，框架应该允许这些差异被明确表达。
-UI 框架负责界面管理规则，背包如何排序、任务奖励如何领取等内容仍属于业务。把这个边界保留下来，框架才能被不同项目复用。
-八、AlloyFramework 的实现思路：不重复造轮子，封装成熟方案供业务使用前面七个模块描述了游戏开发中反复出现的需求。落实到 AlloyFramework 的实现上，并不需要把每个模块的底层能力都从头写一遍。
-AlloyFramework 的一个基本原则就是不重复造轮子。对于已有成熟方案的领域，选择合适的工具，在其基础上做一层面向业务的封装，再把它们接入统一的框架流程。
-其中，资源模块使用 YooAsset，配置表使用 Luban，代码热更新使用 HybridCLR。资源热更新由 YooAsset 承担相应的底层能力，框架负责将资源更新与代码加载组织起来。
-1. 资源模块：基于 YooAsset，统一业务的资源使用方式YooAsset 提供资源包管理、资源加载、版本清单和资源下载等能力。AlloyFramework 在此基础上封装业务常用的加载入口，并约定资源的持有和释放方式。
-例如，UI 模块需要加载一个界面预制体时，可以通过框架的资源接口发起加载。资源包如何初始化、当前使用哪种运行模式，以及加载句柄如何配合界面生命周期释放，这些共性问题由框架统一组织。
-这层封装的重点是建立适合项目使用的接口和生命周期规则，让各个业务模块遵循同一套约定。
-2. 配置表模块：基于 Luban，衔接导出数据与运行时访问Luban 负责配置数据的导出、校验和配套代码生成。AlloyFramework 的配置表模块围绕这些产物，组织运行时的数据加载、表实例初始化和统一访问入口。
-业务需要读取一条道具配置时，应该能够通过明确的类型和 ID 获取数据。配置文件从哪里加载、何时完成初始化，以及初始化失败如何反馈，则由框架与资源模块、启动流程共同处理。
-封装时可以保留 Luban 生成的强类型数据结构，把框架代码集中在加载和接入部分，避免为了统一接口再复制一套配置模型。
-3. 热更新模块：结合 YooAsset 与 HybridCLR，组织完整更新流程在热更新方案中，YooAsset 与 HybridCLR 各自承担不同的职责。
-YooAsset 负责更新所需资源文件的版本管理与下载。热更新程序集等文件也可以作为资源交付，再由框架组织后续加载。HybridCLR 提供代码热更新所需的运行时能力，并支持按需要补充 AOT 元数据。
-AlloyFramework 需要把这些能力接入启动流程：准备资源包、检查版本、下载所需文件、准备代码运行环境、加载热更新程序集，再进入对应的业务入口。
-这里的封装价值在于流程衔接，包括阶段状态、进度反馈、失败处理，以及主包与热更新代码之间的入口约定。HybridCLR 本身不负责远端文件下载，资源下载完成也不代表代码已经完成加载，这些步骤需要由框架明确组织。
-4. 框架层：把独立能力组织成业务可以直接使用的模块采用成熟方案之后，AlloyFramework 仍然需要解决项目中的共性问题：模块如何初始化，资源由谁释放，配置何时可用，更新失败后如何反馈，以及 UI 如何使用这些基础能力。
-这几层的职责可以这样理解：
+构造函数中的注册顺序就是启动顺序。RunAsync 遍历列表，等待当前步骤完成后再执行下一步，从而保证前置依赖已经准备好。
+其中，InitializeFrameworkSystemStep 负责调用模块的 InitializeAsync，成功后将模块注册到服务容器，并在退出时调用模块的清理方法。List 保存执行顺序，服务容器保存已经就绪的模块。
+后续新增普通模块，只需要继承 FrameworkSystem，实现生命周期方法，再包装为初始化步骤，加入列表的合适位置。新增特殊启动操作，则实现 IFrameworkStartupStep 后注册到列表。
+3. 热更代码模块如何接入热更代码准备被安排在资源模块之后、配置模块之前。资源模块需要先准备好，才能获取代码文件；业务代码需要先可用，才能创建项目自己的配置加载器。
+这里先明确 AOT 和 HotUpdate 的边界。在当前 HybridCLR 方案中，两者按程序集划分，决定了哪些代码可以通过热更新发布，哪些改动需要重新构建和安装主包。
 
 
 
-层次
-主要职责
-示例
+部分
+当前项目中的内容
+修改后如何发布
 
 
 
-第三方方案
-提供专业领域的基础能力
-YooAsset、Luban、HybridCLR
+AOT 主包代码
+框架启动与基础模块、Game.Bootstrap 中的启动配置逻辑，以及主包内的 HybridCLR 接入代码
+修改这些代码需要重新构建并发布安装包
 
 
-AlloyFramework
-封装常用接口，统一生命周期，组织模块协作
-资源接口、配置初始化、更新流程、UI 管理
+HotUpdate 业务代码
+配置为热更新程序集的 Game.Runtime，包括 GameEntry、业务配置加载器和业务逻辑
+在与现有主包兼容的前提下，重新构建并发布热更新 DLL，无需更换主包
 
 
-业务层
-使用框架能力实现具体玩法和产品需求
-登录、背包、任务、战斗
+AOT 表示代码在构建主包时提前编译。FrameworkBootstrap、模块初始化管线以及代码加载能力需要先存在于主包中，才能启动游戏并加载后续业务代码。HotUpdate 则是通过 HybridCLR 加载执行的业务程序集，当前项目在热更新配置中指定的是 Game.Runtime。
+例如，修改 Game.Runtime 中的背包业务逻辑，且仍使用主包已有接口，可以发布业务 DLL 更新；修改主包里的 FrameworkSystem、启动管线顺序，或者新增业务要调用的框架接口，就需要重新出包。原生插件、Unity 引擎版本等主包能力发生变化时，也需要更新安装包。
+补充 AOT 元数据用于支持相关泛型执行需求，不会把已经编译进主包的 AOT 代码变成可替换代码。热更新业务仍然必须使用当前主包能够提供的类型和接口。
+代码更新与资源更新也需要区分：仅修改可更新资源包中的预制体或配置数据，可以走资源更新；修改主包内嵌且未纳入资源更新的启动场景、启动配置或展示资源，则需要随新主包发布。使用 Default 模式时，业务代码静态编译在主包内，修改业务代码同样需要重新出包。
+这一部分使用 IGameCodePreparation 作为统一接口，由启动配置决定采用哪一种实现。当前提供两种方式：
+
+DefaultGameCodePreparation：使用静态编译到主包中的业务程序集。
+HybridCLRCodePreparation：负责 HybridCLR 模式下的业务代码准备与加载。
+
+启动步骤只负责创建所选实现并调用 PrepareAsync，具体如何取得程序集、如何准备运行环境，由对应实现处理。准备完成后，将业务程序集保存到本轮启动上下文中，供后续创建业务入口使用。
+取得程序集后，还会根据配置中的业务安装类型，通过反射调用其 Install 方法。当前项目在这里安装 GameConfigLoader，把业务对配置加载的具体实现交给框架，随后配置模块才能继续初始化。
+后续如果需要接入其他代码准备方案，可以新增 IGameCodePreparation 实现，并在启动配置中选择它。实现沿用现有的创建约定，完成业务安装并提交准备结果，后面的模块初始化与业务入口流程就能继续复用。
+4. 初始化完成后，反射获得业务入口剩余框架模块全部初始化完成后，框架从前面准备好的业务程序集中，查找实现 IGameEntry 的具体类型，并通过反射创建实例。
+这一步由 StartGameEntryStep 发起，实际查找与创建交给加载器和激活器完成。调用关系如下：
+StartGameEntryStep.ExecuteAsync    → PreparedGameEntryLoader.LoadAsync    → GameEntryActivator.Create    → Activator.CreateInstance
+
+StartGameEntryStep.ExecuteAsync 中创建入口的核心代码如下：
+// 使用代码准备阶段保存的结果，创建当前业务入口。var loader = new PreparedGameEntryLoader(context.CodePreparationResult);m_gameEntry = await loader.LoadAsync(context.Services, cancellationToken);if (m_gameEntry == null)&#123;    throw new InvalidOperationException(&quot;业务入口加载器未返回有效的游戏入口。&quot;);&#125;
+
+加载器先检查代码是否准备完成，再将已经取得的程序集交给反射逻辑：
+// 业务程序集必须已经由前面的代码准备步骤提交。cancellationToken.ThrowIfCancellationRequested();if (!m_result.IsCompleted || m_result.RuntimeAssembly == null)&#123;    throw new InvalidOperationException(&quot;业务代码尚未准备完成，不能创建入口。&quot;);&#125;return UniTask.FromResult(GameEntryActivator.Create(m_result.RuntimeAssembly));
+
+GameEntryActivator 负责遍历程序集中的类型，筛选入口并创建实例。核心过程如下：
+internal static class GameEntryActivator&#123;    /// &lt;summary&gt;从指定业务程序集中创建唯一入口。&lt;/summary&gt;    /// &lt;param name=&quot;assembly&quot;&gt;代码准备阶段取得的业务程序集。&lt;/param&gt;    /// &lt;returns&gt;实现 IGameEntry 的业务入口实例。&lt;/returns&gt;    /// &lt;exception cref=&quot;ArgumentNullException&quot;&gt;业务程序集为空。&lt;/exception&gt;    /// &lt;exception cref=&quot;InvalidOperationException&quot;&gt;入口数量不等于一。&lt;/exception&gt;    public static IGameEntry Create(Assembly assembly)    &#123;        if (assembly == null)        &#123;            throw new ArgumentNullException(nameof(assembly));        &#125;        // 只在指定程序集中筛选实现入口接口的具体类型。        var candidates = new List&lt;Type&gt;();        foreach (var type in assembly.GetTypes())        &#123;            if (!type.IsAbstract &amp;&amp;                !type.IsGenericTypeDefinition &amp;&amp;                typeof(IGameEntry).IsAssignableFrom(type))            &#123;                candidates.Add(type);            &#125;        &#125;        // 入口必须唯一，避免无法确定业务启动目标。        if (candidates.Count != 1)        &#123;            throw new InvalidOperationException(&quot;业务程序集中必须有且只有一个 IGameEntry 实现。&quot;);        &#125;        // 使用无参构造函数创建入口，允许非 public 的构造函数。        return (IGameEntry)Activator.CreateInstance(candidates[0], true);    &#125;&#125;
+
+当前项目对程序集和入口有以下约定：
 
 
-以打开背包界面为例，业务层发起打开界面的请求，UI 模块通过资源模块加载预制体，资源模块再使用 YooAsset 完成底层加载。界面展示道具信息时，通过配置模块访问 Luban 生成的配置数据。界面关闭后，则按照框架约定清理监听、定时任务和资源引用。
-这样，第三方方案的接入细节集中在框架层，业务层能够围绕具体功能编写代码。后续升级依赖或调整接入方式时，也可以优先在封装位置处理，减少对业务代码的影响。
-封装的范围应当由实际使用需求决定。对于稳定且适合直接使用的数据类型，可以保留；对于重复出现的初始化、加载、清理和错误处理逻辑，则应统一收进框架。没有必要把第三方库的每一个接口都重新包装一遍。
-统一启动入口、时间、网络和 UI 模块也遵循同样的原则：围绕项目中重复出现的需求建立共同规则，并与已有基础能力协作。
-因此，AlloyFramework 的实现会从这七类需求出发，结合 YooAsset、Luban 和 HybridCLR，把通用能力封装成业务层容易使用的模块。后续文章将围绕这些模块的具体接入和封装展开，说明每一层承担什么职责，以及它们如何在项目中配合运行。
+
+项目
+当前约定
+
+
+
+业务程序集名称
+Game.Runtime，与 Game.Runtime.asmdef 中的 name 一致
+
+
+启动配置
+GameHotUpdateSettings.RuntimeAssemblyName 返回 Game.Runtime，不带 .dll 扩展名
+
+
+对应程序集文件
+Game.Runtime.dll，热更新时由代码准备流程加载
+
+
+前置安装类型
+Game.GameRuntimeInstaller，由 InstallerTypeName 指定，提供 public static void Install()
+
+
+业务入口类型
+当前是 Game.GameEntry，位于 Game.Runtime 程序集中，实现 IGameEntry
+
+
+Game.Runtime 是当前项目在启动配置中明确指定的名称，反射激活器本身接收的是 Assembly 对象。因此，更换项目程序集名称时，需要同步调整 asmdef、启动配置以及相关构建与热更新配置。
+当前启动路径只扫描代码准备阶段提交的这个程序集。如果项目拆分为多个业务程序集，需要把唯一的 IGameEntry 实现放在指定的入口程序集中。
+入口类本身不要求一定叫 GameEntry，框架通过接口识别它。它需要是能够实例化的非抽象、非开放泛型类型，并提供无参构造函数；当前反射调用也允许非 public 的无参构造函数。当前业务入口使用 [Preserve] 标记，保留反射所需的类型信息。
+入口创建完成后，框架通过 IGameEntry 接口依次调用业务初始化和业务主流程，具体执行逻辑由业务层提供。
+三、业务入口：初始化业务并执行游戏逻辑GameEntry 是业务层自身的统一入口，实现 IGameEntry 接口，由框架创建，无需再挂载到场景。
+IGameEntry 的定义如下：
+/// &lt;summary&gt;框架统一调用的业务初始化、游戏入口和退出清理契约。&lt;/summary&gt;public interface IGameEntry&#123;    /// &lt;summary&gt;安装业务模块；成功返回后框架才会调用 MainAsync。&lt;/summary&gt;    /// &lt;param name=&quot;loadingSession&quot;&gt;共享展示会话，业务模块可报告当前初始化操作，不关闭展示。&lt;/param&gt;    /// &lt;param name=&quot;cancellationToken&quot;&gt;用于取消初始化的令牌。&lt;/param&gt;    /// &lt;returns&gt;全部业务模块就绪的任务。&lt;/returns&gt;    UniTask InitializeAsync(        IStartupLoadingSession loadingSession,        CancellationToken cancellationToken);    /// &lt;summary&gt;进入游戏并等待首个业务界面就绪；返回后由框架关闭 Loading。&lt;/summary&gt;    /// &lt;param name=&quot;loadingSession&quot;&gt;框架已开始入口步骤的会话，仅报告内部进度，不开始、完成或关闭步骤。&lt;/param&gt;    /// &lt;param name=&quot;cancellationToken&quot;&gt;用于取消进入游戏的令牌。&lt;/param&gt;    /// &lt;returns&gt;游戏入口执行完成的任务。&lt;/returns&gt;    UniTask MainAsync(        IStartupLoadingSession loadingSession,        CancellationToken cancellationToken);    /// &lt;summary&gt;先释放界面和场景，再逆序退出业务模块；初始化中途失败时也会调用。&lt;/summary&gt;    /// &lt;returns&gt;游戏入口退出清理完成的任务。&lt;/returns&gt;    UniTask ShutdownAsync();&#125;
+
+业务入口分为初始化和正式进入游戏两个阶段。
+1. InitializeAsync：准备业务模块与框架扩展框架先调用 InitializeAsync。业务在这里注册自己的模型、安装框架所需的业务扩展，并初始化网络等项目相关能力。
+当前项目通过业务启动管线组织这些操作。以打开背包为例：框架知道如何加载、显示和关闭一个界面，但需要业务告诉它“背包使用哪个界面预制体”，以及“配置表中的背包跳转 ID 对应哪个界面”。业务在初始化时把这些界面信息和配置读取方法交给 UI 模块，后面就可以通过统一接口打开目标界面。
+前面的配置加载器和这里的 UI 扩展，都属于业务对框架的接入，只是安装时机不同：配置加载器需要在配置模块初始化前安装，UI 扩展则等框架与配置就绪后再安装。
+后续增加业务模块时，也可以加入业务启动管线，保持项目自身的初始化顺序清晰。
+2. MainAsync：执行业务自身的入口逻辑业务初始化完成后，框架调用 MainAsync，正式进入项目自己的流程。
+当前项目在这里加载 Scenes/SampleScene，然后打开首页。其他项目可以根据自己的需求进入登录、角色选择、新手引导或战斗场景，这些流程由业务层决定。
+业务入口等待初始场景和界面就绪后返回，框架结束启动 Loading。至此，框架的启动流程结束，后续游戏流程由业务层组织，框架继续提供资源、时间、配置、网络和 UI 等基础服务。
+3. 保留对应的退出入口业务入口还提供 ShutdownAsync，用于关闭业务界面、卸载场景和清理业务模块。框架退出时先调用业务退出，再逆序释放已经开始的框架步骤；启动中途失败时，也沿用对应的清理机制。
+这三块结构分别负责启动环境、模块准备和业务执行。通过统一的模块父类、启动步骤列表和业务入口接口，后续扩展可以在对应位置接入，继续沿用已有的执行顺序与生命周期管理。
 ]]></content>
       <tags>
         <tag>UnityFramework</tag>
@@ -345,20 +421,18 @@ MP4 负责组织数据，解封装负责取出压缩样本，解码负责还原�
       </tags>
   </entry>
   <entry>
-    <title>UI背景模糊的两种实现方法</title>
-    <url>/posts/8434956c.html</url>
-    <content><![CDATA[原理实现模糊的原理比较简单：一个像素本身的颜色通过某种算法，最终计算为周围颜色的一个均值或权重值，这样看起来的图就是模糊的了。通过计算均值颜色的算法选择不同，就产生了不同效果、不同效率的模糊。具体实现算法可以看左神的这篇文章：高品质后处理：十种图像模糊算法的总结与实现，里面把所有的模糊算法的数学原理和效果都列举完了，言简意赅，字字珠玑。下面介绍我在实际工程中的实现UI背景模糊两种实现方法。
-因为需要计算周围颜色的值，所以我们首先需要抓取到当前渲染的画面。目前我知道的抓取画面有两种方法：1、GrabPss。2、屏幕后处理。所以我这两把这两种方式分成了两种方法。
-方法一：GrabPassGrabPass是Unity的内置渲染管线中一个特殊的pass，可以在shader中将当前帧抓取到一张纹理贴图中。我的实现中获取了两次，分别做了垂直和水平方向的模糊处理。效果如下：通过调整Image位置和大小实现局部模糊：
-shader代码Shader &quot;FT/Blur/Back&quot;&#123;	Properties	&#123;		_MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;		_Color (&quot;Main Color&quot;, Color) = (1,1,1,1)        _Size (&quot;Size&quot;, Range(0, 20)) = 1	&#125;	Category &#123;            // We must be transparent, so other objects are drawn before this one.          Tags &#123; 			&quot;Queue&quot;=&quot;Transparent&quot; 			&quot;IgnoreProjector&quot;=&quot;True&quot; 			&quot;RenderType&quot;=&quot;Transparent&quot;			&quot;PreviewType&quot; = &quot;Plane&quot;			&quot;CanUseSpriteAtlas&quot; = &quot;True&quot;		&#125;              SubShader &#123;                // Horizontal blur              GrabPass 			&#123;                                      Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                  Name &quot;BackBlurHor&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord : TEXCOORD0;					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;					float4 color    : COLOR;                &#125;;                  v2f vert (appdata_t v) &#123;                      v2f o;                     o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;			    float4 _MainTex_TexelSize;                float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;                    kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;					return tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x + _GrabTexture_TexelSize.x * kernel * _Size, i.uvgrab.y, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                half4 frag( v2f i ) : COLOR &#123;                   	half4 sum = half4(0,0,0,0);                    sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);                    float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;  			            // Vertical blur              GrabPass &#123;                                          Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                  Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                Name &quot;BackBlurVer&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord: TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    v2f vert (appdata_t v) &#123;                      v2f o;                      o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;                  float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;					kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;                         return tex2Dproj( _GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x, i.uvgrab.y + _GrabTexture_TexelSize.y * kernel * _Size, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                  half4 frag( v2f i ) : COLOR				&#123;                    half4 sum = half4(0,0,0,0);                      sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);					float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;        &#125;	&#125;&#125;
-
-方法二：屏幕后处理Unity通过给相机添加脚本并重写OnRenderImage方法，可以拿到当前渲染画面的纹理，通过对改变此纹理可以实现各种后处理效果。这里我使用了双重模糊算法，通过2倍升&#x2F;降分辨率从而优化每帧传递给GPU的带宽和计算，并且因为先降低分辨率再放大本身就会产生模糊，所以双重模糊使用比较少的迭代次数就能获得其他方法比较高迭代次数的效果。效果如下：
-C#代码using UnityEngine;[ExecuteInEditMode][RequireComponent(typeof(Camera))]public class SimpleDualBlur : MonoBehaviour&#123;    [Range(0, 8)] public int iterations = 4;        public Shader blurShader;    private Material blurMaterial;    private Material BlurMaterial    &#123;        get        &#123;            if (blurMaterial == null)            &#123;                blurMaterial = new Material(blurShader);                blurMaterial.hideFlags = HideFlags.DontSave;            &#125;            return blurMaterial;        &#125;    &#125;    void OnDisable()    &#123;        if (blurMaterial)            DestroyImmediate(blurMaterial);    &#125;    void OnRenderImage(RenderTexture source, RenderTexture destination)    &#123;        if (BlurMaterial == null || iterations &lt;= 0)        &#123;            Graphics.Blit(source, destination);            return;        &#125;        int width = source.width;        int height = source.height;        // 第1个临时纹理        RenderTexture rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);        RenderTexture rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);        // 第1次下采样        Graphics.Blit(source, rt1);                // 双重模糊循环        // 下采样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 上样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = width * 2;            height = height * 2;            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = width * 2;            height = height * 2;            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 最终输出        Graphics.Blit(rt1, destination);        RenderTexture.ReleaseTemporary(rt1);        RenderTexture.ReleaseTemporary(rt2);    &#125;&#125;
-shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#123;        _MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;    &#125;        SubShader    &#123;        Cull Off        ZWrite Off        ZTest Always                // Pass 0: 下采样Pass (5点采样)        Pass        &#123;            Name &quot;DOWNSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_downsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_downsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                float2 offset = texelSize * 2.0; // 2倍下采样                                // 5点采样：中心 + 4个角                fixed4 col = tex2D(_MainTex, i.uv) * 0.6;              // 中心                col += tex2D(_MainTex, i.uv + float2(-offset.x, -offset.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(offset.x, -offset.y)) * 0.1;   // 右上                col += tex2D(_MainTex, i.uv + float2(-offset.x, offset.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(offset.x, offset.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;                // Pass 1: 上采样Pass (9点采样)        Pass        &#123;            Name &quot;UPSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_upsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_upsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                                // 9点采样：中心 + 周围8个点                fixed4 col = tex2D(_MainTex, i.uv) * 0.2;  // 中心 (1/9)                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, -texelSize.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(0.0, -texelSize.y)) * 0.1;           // 上                col += tex2D(_MainTex, i.uv + float2(texelSize.x, -texelSize.y)) * 0.1;   // 右上                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, 0.0)) * 0.1;           // 左                col += tex2D(_MainTex, i.uv + float2(texelSize.x, 0.0)) * 0.1;            // 右                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, texelSize.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(0.0, texelSize.y)) * 0.1;            // 下                col += tex2D(_MainTex, i.uv + float2(texelSize.x, texelSize.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;    &#125;    FallBack Off&#125;
-
-
-方法对比与性能分析通用性：GrabPass只适用于Unity的内置渲染管线，剩下的URP、HDRP、SRP统统都不支持；屏幕后处理则都通用，只需要实现对应的接口即可。需求实现：GrabPass因为生成了材质挂载到Image中，所以可以非常简单的通过调整Image的大小和位置，实现UI局部模糊；屏幕后处理则只能支持全屏。性能消耗：GrabPass在Unity的官方文档中明确指出：“会显著增加CPU和GPU帧时间。除了快速原型制作之外，您通常应该避免使用此命令，并尝试通过其他方式实现您的效果”。而这里使用材质挂载的方式，一个材质就两个pass，所以在多个材质的情况下性能会有严重的问题；对于屏幕后处理只会对渲染管线最后的画面做一次处理，通过双重模糊算法降低与GPU交互数据的带宽，性能较好。
-参考资料[1].【Unity渲染——屏幕后处理】Cg代码实现多种模糊算法
+    <title>C#匿名函数与闭包</title>
+    <url>/posts/278e5dd7.html</url>
+    <content><![CDATA[起因最近看到了一段C#程序，一开始就简单的以为只是一个for循环的0~9的打印，但是深入了解之后发现我错了，而且对其中的原理相知甚少。代码如下：
+public static void Main(string[] args)&#123;    Action[] actions = new Action[10];    for (int i = 0; i &lt; 10; i++)    &#123;        actions[i] = () =&gt; &#123;Console.WriteLine(i.ToString()); &#125;;    &#125;    foreach (var action in actions)    &#123;        action();    &#125;&#125;
+这段代码的运行结果输出是10个10，如果做对了，想必已经是了解其中的原理，下面的内容可以不用看了。
+原因原因其实很简单，使用编辑器查看IL代码，可以很清晰的看到：编译器为匿名函数生成了一个名为&lt;&gt;c__DisplayClass0_0的类，并把int i作为了类内的成员变量，并在类中生成了b__0()方法，在方法中打印成员变量i。在函数运行时，new了一个名为cDisplayClass00的实例，并且在for循环中是不断的自增实例中的变量，最后把自己的b__0()方法传入Action中。C#中class是默认分配在堆上的，所以每次增加的i变量都是同一个地址上的数据，最后执行action委托时，调用的也是同一个类的b__0()方法，所以最后的结果自然全是10。
+闭包中存在的问题既然匿名函数在使用时在堆上new了一个实例，分配了内存，所以必定涉及到了GC。那么代码中的哪种写法导会有严重的GC问题，哪种写法又能尽量避免GC。搜索之后，发现猫仙人的这篇文章总结得非常到位：文章传送连接，以下是我对他文章结论的进一步总结，具体论证细节可以点击连接去查看。
+捕获变量的分类外部变量的分类重要分为3种：1、捕获静态变量2、捕获实例字段3、捕获外部方法的局部变量其中分配内存的多少为：3&gt;2&gt;1&gt;无闭包，并且捕获外部方法的局部变量的内存分配量高达2n次，为了记录外部局部变量的值，编译器每次都new了一个新的匿名类实例和Action实例。
+优化方法文章中指出了，可以通过增加参数数量，使用方法参数去传递要捕获的变量，避免掉对外部变量的捕获，同时避免闭包的额外内存分配。对于该文章开头的代码，若想改成输出0~9，就有两种办法，以下给出代码截图。第二种用了优化建议，内存性能要优于第一种。
+捕获外部方法的局部变量编译器new了n个匿名类实例和Action实例
+增加参数变量编译器只new对应的Aciton实例
+总结对于以上验证，可以简单粗暴的认为：runtime直接不使用()&#x3D;&gt;{}这种匿名函数的写法，能非常有效的避免额外内存开销。
 ]]></content>
   </entry>
   <entry>
@@ -632,6 +706,724 @@ AVPro Video 3.3.4 官方版本记录（2025-12-02）
         <tag>视频播放</tag>
         <tag>原生插件</tag>
       </tags>
+  </entry>
+  <entry>
+    <title>UI背景模糊的两种实现方法</title>
+    <url>/posts/8434956c.html</url>
+    <content><![CDATA[原理实现模糊的原理比较简单：一个像素本身的颜色通过某种算法，最终计算为周围颜色的一个均值或权重值，这样看起来的图就是模糊的了。通过计算均值颜色的算法选择不同，就产生了不同效果、不同效率的模糊。具体实现算法可以看左神的这篇文章：高品质后处理：十种图像模糊算法的总结与实现，里面把所有的模糊算法的数学原理和效果都列举完了，言简意赅，字字珠玑。下面介绍我在实际工程中的实现UI背景模糊两种实现方法。
+因为需要计算周围颜色的值，所以我们首先需要抓取到当前渲染的画面。目前我知道的抓取画面有两种方法：1、GrabPss。2、屏幕后处理。所以我这两把这两种方式分成了两种方法。
+方法一：GrabPassGrabPass是Unity的内置渲染管线中一个特殊的pass，可以在shader中将当前帧抓取到一张纹理贴图中。我的实现中获取了两次，分别做了垂直和水平方向的模糊处理。效果如下：通过调整Image位置和大小实现局部模糊：
+shader代码Shader &quot;FT/Blur/Back&quot;&#123;	Properties	&#123;		_MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;		_Color (&quot;Main Color&quot;, Color) = (1,1,1,1)        _Size (&quot;Size&quot;, Range(0, 20)) = 1	&#125;	Category &#123;            // We must be transparent, so other objects are drawn before this one.          Tags &#123; 			&quot;Queue&quot;=&quot;Transparent&quot; 			&quot;IgnoreProjector&quot;=&quot;True&quot; 			&quot;RenderType&quot;=&quot;Transparent&quot;			&quot;PreviewType&quot; = &quot;Plane&quot;			&quot;CanUseSpriteAtlas&quot; = &quot;True&quot;		&#125;              SubShader &#123;                // Horizontal blur              GrabPass 			&#123;                                      Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                  Name &quot;BackBlurHor&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord : TEXCOORD0;					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;					float4 color    : COLOR;                &#125;;                  v2f vert (appdata_t v) &#123;                      v2f o;                     o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;			    float4 _MainTex_TexelSize;                float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;                    kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;					return tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x + _GrabTexture_TexelSize.x * kernel * _Size, i.uvgrab.y, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                half4 frag( v2f i ) : COLOR &#123;                   	half4 sum = half4(0,0,0,0);                    sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);                    float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;  			            // Vertical blur              GrabPass &#123;                                          Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;              &#125;              Pass &#123;                  Tags &#123; &quot;LightMode&quot; = &quot;Always&quot; &#125;                Name &quot;BackBlurVer&quot;                CGPROGRAM                  #pragma vertex vert                  #pragma fragment frag                  #pragma fragmentoption ARB_precision_hint_fastest                  #include &quot;UnityCG.cginc&quot;                    struct appdata_t &#123;                      float4 vertex : POSITION;                      float2 texcoord: TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    struct v2f &#123;                      float4 vertex : POSITION;                      float4 uvgrab : TEXCOORD0;  					float4 color    : COLOR;                &#125;;                    v2f vert (appdata_t v) &#123;                      v2f o;                      o.vertex = UnityObjectToClipPos(v.vertex);                      #if UNITY_UV_STARTS_AT_TOP                      float scale = -1.0;                      #else                      float scale = 1.0;                      #endif                      o.uvgrab.xy = (float2(o.vertex.x, o.vertex.y*scale) + o.vertex.w) * 0.5;                      o.uvgrab.zw = o.vertex.zw;  					o.color = v.color;                    return o;                  &#125;                    sampler2D _GrabTexture;                  float4 _GrabTexture_TexelSize;                  float _Size;                uniform float4 _Color;                half4 GrabPixel(v2f i, float weight, float kernel)&#123;					kernel = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y))) * kernel;                         return tex2Dproj( _GrabTexture, UNITY_PROJ_COORD(float4(i.uvgrab.x, i.uvgrab.y + _GrabTexture_TexelSize.y * kernel * _Size, i.uvgrab.z, i.uvgrab.w))) * weight;                &#125;                  half4 frag( v2f i ) : COLOR				&#123;                    half4 sum = half4(0,0,0,0);                      sum += GrabPixel(i, 0.05, -4.0);                    sum += GrabPixel(i, 0.09, -3.0);                    sum += GrabPixel(i, 0.12, -2.0);                    sum += GrabPixel(i, 0.15, -1.0);                    sum += GrabPixel(i, 0.18,  0.0);                    sum += GrabPixel(i, 0.15, +1.0);                    sum += GrabPixel(i, 0.12, +2.0);                    sum += GrabPixel(i, 0.09, +3.0);                    sum += GrabPixel(i, 0.05, +4.0);					float4 col5 = tex2Dproj(_GrabTexture, UNITY_PROJ_COORD(i.uvgrab));					fixed decayFactor = sign(sign(abs(i.uvgrab.x)) + sign(abs(i.uvgrab.y)));					sum = lerp(col5, sum, decayFactor) * i.color * _Color;                      return sum;                  &#125;                  ENDCG              &#125;        &#125;	&#125;&#125;
+
+方法二：屏幕后处理Unity通过给相机添加脚本并重写OnRenderImage方法，可以拿到当前渲染画面的纹理，通过对改变此纹理可以实现各种后处理效果。这里我使用了双重模糊算法，通过2倍升&#x2F;降分辨率从而优化每帧传递给GPU的带宽和计算，并且因为先降低分辨率再放大本身就会产生模糊，所以双重模糊使用比较少的迭代次数就能获得其他方法比较高迭代次数的效果。效果如下：
+C#代码using UnityEngine;[ExecuteInEditMode][RequireComponent(typeof(Camera))]public class SimpleDualBlur : MonoBehaviour&#123;    [Range(0, 8)] public int iterations = 4;        public Shader blurShader;    private Material blurMaterial;    private Material BlurMaterial    &#123;        get        &#123;            if (blurMaterial == null)            &#123;                blurMaterial = new Material(blurShader);                blurMaterial.hideFlags = HideFlags.DontSave;            &#125;            return blurMaterial;        &#125;    &#125;    void OnDisable()    &#123;        if (blurMaterial)            DestroyImmediate(blurMaterial);    &#125;    void OnRenderImage(RenderTexture source, RenderTexture destination)    &#123;        if (BlurMaterial == null || iterations &lt;= 0)        &#123;            Graphics.Blit(source, destination);            return;        &#125;        int width = source.width;        int height = source.height;        // 第1个临时纹理        RenderTexture rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);        RenderTexture rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);        // 第1次下采样        Graphics.Blit(source, rt1);                // 双重模糊循环        // 下采样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = Mathf.Max(width / 2, 1);            height = Mathf.Max(height / 2, 1);            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 上样        for (int i = 0; i &lt; iterations; i++)        &#123;            RenderTexture.ReleaseTemporary(rt2);            width = width * 2;            height = height * 2;            rt2 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt1, rt2, BlurMaterial, 0);            RenderTexture.ReleaseTemporary(rt1);            width = width * 2;            height = height * 2;            rt1 = RenderTexture.GetTemporary(width, height, 0, source.format);            Graphics.Blit(rt2, rt1, BlurMaterial, 0);        &#125;        // 最终输出        Graphics.Blit(rt1, destination);        RenderTexture.ReleaseTemporary(rt1);        RenderTexture.ReleaseTemporary(rt2);    &#125;&#125;
+shader代码Shader &quot;Hidden/SimpleDualBlur&quot;&#123;    Properties    &#123;        _MainTex (&quot;Texture&quot;, 2D) = &quot;white&quot; &#123;&#125;    &#125;        SubShader    &#123;        Cull Off        ZWrite Off        ZTest Always                // Pass 0: 下采样Pass (5点采样)        Pass        &#123;            Name &quot;DOWNSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_downsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_downsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                float2 offset = texelSize * 2.0; // 2倍下采样                                // 5点采样：中心 + 4个角                fixed4 col = tex2D(_MainTex, i.uv) * 0.6;              // 中心                col += tex2D(_MainTex, i.uv + float2(-offset.x, -offset.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(offset.x, -offset.y)) * 0.1;   // 右上                col += tex2D(_MainTex, i.uv + float2(-offset.x, offset.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(offset.x, offset.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;                // Pass 1: 上采样Pass (9点采样)        Pass        &#123;            Name &quot;UPSAMPLE&quot;                        CGPROGRAM            #pragma vertex vert            #pragma fragment frag_upsample            #include &quot;UnityCG.cginc&quot;                        struct appdata            &#123;                float4 vertex : POSITION;                float2 uv : TEXCOORD0;            &#125;;                        struct v2f            &#123;                float2 uv : TEXCOORD0;                float4 vertex : SV_POSITION;            &#125;;                        sampler2D _MainTex;            float4 _MainTex_TexelSize;                        v2f vert(appdata v)            &#123;                v2f o;                o.vertex = UnityObjectToClipPos(v.vertex);                o.uv = v.uv;                return o;            &#125;                        fixed4 frag_upsample(v2f i) : SV_Target            &#123;                float2 texelSize = _MainTex_TexelSize.xy;                                // 9点采样：中心 + 周围8个点                fixed4 col = tex2D(_MainTex, i.uv) * 0.2;  // 中心 (1/9)                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, -texelSize.y)) * 0.1;  // 左上                col += tex2D(_MainTex, i.uv + float2(0.0, -texelSize.y)) * 0.1;           // 上                col += tex2D(_MainTex, i.uv + float2(texelSize.x, -texelSize.y)) * 0.1;   // 右上                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, 0.0)) * 0.1;           // 左                col += tex2D(_MainTex, i.uv + float2(texelSize.x, 0.0)) * 0.1;            // 右                                col += tex2D(_MainTex, i.uv + float2(-texelSize.x, texelSize.y)) * 0.1;   // 左下                col += tex2D(_MainTex, i.uv + float2(0.0, texelSize.y)) * 0.1;            // 下                col += tex2D(_MainTex, i.uv + float2(texelSize.x, texelSize.y)) * 0.1;    // 右下                                return col;            &#125;            ENDCG        &#125;    &#125;    FallBack Off&#125;
+
+
+方法对比与性能分析通用性：GrabPass只适用于Unity的内置渲染管线，剩下的URP、HDRP、SRP统统都不支持；屏幕后处理则都通用，只需要实现对应的接口即可。需求实现：GrabPass因为生成了材质挂载到Image中，所以可以非常简单的通过调整Image的大小和位置，实现UI局部模糊；屏幕后处理则只能支持全屏。性能消耗：GrabPass在Unity的官方文档中明确指出：“会显著增加CPU和GPU帧时间。除了快速原型制作之外，您通常应该避免使用此命令，并尝试通过其他方式实现您的效果”。而这里使用材质挂载的方式，一个材质就两个pass，所以在多个材质的情况下性能会有严重的问题；对于屏幕后处理只会对渲染管线最后的画面做一次处理，通过双重模糊算法降低与GPU交互数据的带宽，性能较好。
+参考资料[1].【Unity渲染——屏幕后处理】Cg代码实现多种模糊算法
+]]></content>
+  </entry>
+  <entry>
+    <title>AlloyFramework(一)：最小的游戏框架需要包含几个模块</title>
+    <url>/posts/c2cb4e7b.html</url>
+    <content><![CDATA[写一个 Unity Demo 时，我们通常希望尽快把核心玩法跑起来。但真正开始动手后就会发现：在玩法之外，总有一批基础逻辑需要先写。
+程序从哪里启动？资源怎么加载？倒计时怎么管理？配置表怎么读取？怎样与服务器通信？资源和代码怎么更新？界面如何打开、关闭和切换？
+换一个 Demo，这些问题依然存在。项目规模扩大之后，它们还会带来初始化顺序、资源释放、异步取消、异常恢复等更具体的问题。
+这就是我想搭建 AlloyFramework 的原因：把项目中反复出现的通用需求整理出来，形成可以复用的基础能力，让开发新项目时能够把更多精力放在玩法和业务上。
+这一篇先不讨论具体代码，也不把需求描述当作已经完成的功能清单。我们先回答一个问题：一个最小的游戏框架，需要替项目承担哪些职责？
+一、统一的启动入口：让游戏按确定的顺序进入运行状态Unity 提供了 Awake、OnEnable、Start 等生命周期方法，但这些方法并不会自动形成一条清晰的业务启动流程。
+项目很小时，把初始化代码写在几个组件里似乎就够了。随着模块增加，依赖关系会逐渐显现：读取配置之前可能需要准备资源包，打开登录界面之前需要初始化 UI，而正式进入游戏之前，可能还要完成版本检查和更新。
+如果这些操作散落在不同对象的生命周期中，启动顺序就很难直观看清，也容易出现某个模块已经开始工作、它依赖的模块却尚未准备好的问题。
+因此，框架需要一个统一的启动入口，负责组织启动阶段和模块之间的依赖。
+它至少应该满足以下需求：
+
+明确启动流程，让每个阶段的职责和执行顺序可以被理解。
+支持异步初始化，让资源准备、配置加载等操作可以被等待。
+提供启动状态与进度，方便界面展示当前正在进行的工作。
+在启动失败时保留明确的失败原因，并由业务决定重试、退出或其他处理方式。
+允许项目接入自己的业务步骤，例如登录、角色选择和首个场景加载。
+
+统一入口并不意味着把所有初始化代码塞进一个巨大的类里。各模块仍然负责自己的初始化，入口负责把它们组织起来。
+最终需要达到的效果是：当我们想知道“游戏是怎么启动的”时，可以找到一条明确的执行路径。
+二、资源加载模块：统一资源获取与生命周期管理游戏离不开资源。界面预制体、图集、音效、场景和配置文件，都需要在合适的时机加载，并在不再使用时释放。
+Demo 阶段可以通过直接引用或简单加载快速完成需求。但进入实际项目后，资源来源和使用方式会更加复杂：编辑器下需要方便调试，发布后可能需要从资源包加载，部分资源还可能需要先下载。
+如果每个业务模块都自行处理这些细节，加载代码会逐渐分散，释放规则也容易不一致。
+资源模块的核心需求，是为业务提供统一的资源获取方式，并建立清晰的使用与释放约定。
+它至少需要考虑：
+
+支持异步加载，避免耗时操作阻塞游戏流程。
+对资源定位建立统一规则，减少业务对物理路径和打包方式的依赖。
+明确资源句柄、实例和加载结果的所有权，知道由谁负责释放。
+在底层方案支持的基础上，管理重复加载、依赖资源和资源复用。
+提供失败结果与取消机制，处理资源不存在、下载失败或使用者提前退出等情况。
+
+例如，一个界面在资源加载完成前就被关闭，稍后返回的加载结果应该如何处理？这类问题如果没有统一约定，很容易变成项目中的隐性泄漏。
+资源模块的价值，不只是少写几行加载代码，更是让资源从申请到释放有一致的生命周期。
+三、时间模块：为延时、计时和周期任务建立共同规则技能冷却、活动倒计时、定时刷新、延迟关闭界面，这些需求都与时间有关。
+直接在 Update 中累计时间，或者为每个功能单独写协程，都能完成某个具体需求。但当这样的逻辑越来越多时，暂停是否生效、对象销毁后任务是否继续、重复任务如何停止，就会变成反复处理的问题。
+时间模块需要统一常见的定时任务，并明确不同时间语义。
+它至少应该提供：
+
+一次性延时任务与周期任务。
+任务取消能力，以及与业务对象生命周期配套的清理方式。
+受游戏时间缩放影响和不受其影响的计时方式。
+一致的触发与异常处理规则，避免某个任务异常破坏其他任务的调度。
+
+这里还需要区分游戏运行时间与真实世界时间。技能表现可能跟随游戏暂停，运营活动的结束时间通常不能因为游戏暂停就延后。
+对于服务器决定的活动时间，框架可以提供服务器时间偏移或校准后的查询能力，但不能把本地倒计时当作最终结算依据。客户端展示剩余时间，关键规则仍需要由服务器确认。
+时间模块的目标，是让业务说明“什么时候执行、是否跟随暂停、何时停止”，而不用反复实现计时细节。
+四、配置表模块：让规则数据有统一的访问入口角色属性、道具信息、关卡参数和技能数值，往往需要通过配置来管理。
+把这些数据写在代码里，修改成本会随着内容增加而上升。改为配置表后，又会产生新的问题：表如何加载？什么时候可用？如何根据 ID 查找？找不到记录怎么办？表之间的引用如何验证？
+配置模块需要把这些访问与生命周期问题组织起来，让业务可以稳定地读取规则数据。
+它至少需要满足：
+
+统一配置初始化与读取入口，保证业务访问时所需数据已经就绪。
+提供明确的数据类型与查询方式，减少字符串约定和重复解析。
+对缺失记录、非法数据和引用错误提供可定位的信息。
+与资源加载及版本更新流程配合，保证当前代码能够正确读取当前配置。
+
+配置生成工具和运行时配置模块可以各司其职。前者负责导出与生成，后者负责加载、访问以及项目需要的适配逻辑，没有必要重新实现已有工具已经解决的问题。
+配置表也应与玩家存档区分开。道具的基础属性属于配置，玩家拥有多少道具属于运行时或存档数据，两者的修改方式和生命周期不同。
+五、网络模块：统一通信流程，让业务专注于协议含义联网项目中，登录、角色数据、背包操作和战斗交互都需要网络通信。
+如果每个业务自行建立连接、序列化消息、等待返回并处理超时，很快就会出现大量重复代码，而且很难保持一致的错误处理行为。
+网络模块需要提供稳定的通信基础能力，让业务更多关注“发送什么请求”和“如何处理结果”。
+它通常需要考虑：
+
+连接建立、主动关闭以及连接状态通知。
+消息发送、接收、序列化和协议分发。
+请求与响应的对应关系，以及超时、取消和错误返回。
+服务器主动推送消息的订阅与解绑。
+根据项目需要提供心跳、断线检测和重连支持。
+
+这里尤其需要划清基础能力与业务决策的边界。网络模块可以发现连接中断并尝试恢复连接，但是否重新登录、是否返回登录界面，需要业务决定。
+同样，请求超时不一定代表服务器没有执行操作。购买、领取奖励等请求不能简单地一律自动重发，需要结合协议的幂等设计和业务状态处理。
+对于纯单机 Demo，网络模块可以不启用。框架具备这一能力，不代表每个项目都必须依赖它。
+六、热更新：让资源与代码具备可控的版本演进能力项目发布之后，内容和逻辑仍然可能变化。更新一张图片、调整配置、增加活动内容，或者修复一段业务逻辑，都可能涉及版本更新。
+热更新需要分别看待资源更新与代码更新。
+资源更新关注资源清单、版本检查、差异下载、文件校验，以及新资源何时可以投入使用。代码更新则关注热更新代码的构建、加载、执行入口，以及它与主包代码之间的兼容关系。
+两者需要协同，但并不是同一件事。
+从框架需求出发，至少应该明确：
+
+如何识别本地版本与目标版本，以及本次需要更新的内容。
+如何展示下载进度，并处理网络失败、存储空间不足和校验失败。
+如何确认目标版本所需文件完整，避免在部分下载完成时切换到不可用状态。
+如何约束代码、配置和资源之间的兼容关系。
+更新完成后，如何交回启动流程并进入后续业务阶段。
+
+代码热更新也有适用边界，它受目标平台、发布渠道和所选技术方案限制。不能假定所有平台都支持同样的方式，也不能假定所有改动都可以绕过主包更新。
+因此，热更新的核心需求是建立可检查、可恢复的版本切换流程。至于采用何种资源方案和代码方案，可以在后续实现中展开。
+七、UI 模块：统一界面的生命周期与交互秩序UI 往往是项目中增长最快的部分之一。登录界面、主界面、背包、设置、提示框和加载界面，看起来只是不同的预制体，实际却共享很多管理需求。
+界面如何打开和关闭？重复打开时复用还是新建？窗口之间如何排序？关闭弹窗后返回哪里？界面关闭时，消息监听和定时任务是否一起清理？
+如果各个界面各自处理这些问题，随着数量增加，交互行为和资源管理就很容易失去一致性。
+UI 模块至少需要提供：
+
+统一的界面打开、关闭与实例管理方式。
+明确的生命周期，让初始化、显示、隐藏和销毁各有职责。
+层级、遮罩与输入阻挡规则，维护合理的显示和交互顺序。
+界面参数传递方式，支持不同业务场景复用同一个界面。
+与资源模块配合的加载和释放规则。
+按项目需要支持返回栈、弹窗队列、界面缓存和打开关闭动效。
+移动端异形屏与安全区域适配，兼顾不同宽高比、横竖屏变化和系统手势区域。
+提供 AlloyFramework 自行封装的通用 UI 组件，例如无限列表，供业务界面复用。
+
+移动端还需要专门考虑异形屏适配。刘海、挖孔、圆角以及底部手势区域，都可能影响界面的显示和操作。仅仅按照分辨率缩放 UI，并不能保证按钮、文字和重要信息始终处于合适的位置。
+因此，AlloyFramework 的 UI 模块需要提供统一的安全区域适配能力，根据设备报告的可用区域调整内容布局，并在屏幕尺寸、横竖屏方向或安全区域发生变化时重新计算。对于底部手势区域等系统交互边界，还需要结合平台表现和项目需求预留合适的操作间距。
+适配时也需要区分不同内容的布局要求：背景和全屏遮罩通常需要铺满屏幕，返回按钮、确认按钮以及关键文字则应放在安全区域内。框架应允许界面配置哪些容器需要适配、适配哪些边缘，以及是否增加额外留白，避免把整个界面统一缩进后产生背景露边或布局失衡。
+这些规则应由 UI 模块集中提供，让业务界面通过配置使用，并结合不同宽高比和典型异形屏设备验证显示与点击效果，减少每个界面重复编写适配逻辑。
+并不是所有界面都适合同一种管理策略。常驻主界面、可返回的功能页面和一次性提示框，生命周期可能不同，框架应该允许这些差异被明确表达。
+UI 框架负责界面管理规则，背包如何排序、任务奖励如何领取等内容仍属于业务。把这个边界保留下来，框架才能被不同项目复用。
+八、AlloyFramework 的实现思路：不重复造轮子，封装成熟方案供业务使用前面七个模块描述了游戏开发中反复出现的需求。落实到 AlloyFramework 的实现上，并不需要把每个模块的底层能力都从头写一遍。
+AlloyFramework 的一个基本原则就是不重复造轮子。对于已有成熟方案的领域，选择合适的工具，在其基础上做一层面向业务的封装，再把它们接入统一的框架流程。
+其中，资源模块使用 YooAsset，配置表使用 Luban，代码热更新使用 HybridCLR。资源热更新由 YooAsset 承担相应的底层能力，框架负责将资源更新与代码加载组织起来。
+1. 资源模块：基于 YooAsset，统一业务的资源使用方式YooAsset 提供资源包管理、资源加载、版本清单和资源下载等能力。AlloyFramework 在此基础上封装业务常用的加载入口，并约定资源的持有和释放方式。
+例如，UI 模块需要加载一个界面预制体时，可以通过框架的资源接口发起加载。资源包如何初始化、当前使用哪种运行模式，以及加载句柄如何配合界面生命周期释放，这些共性问题由框架统一组织。
+这层封装的重点是建立适合项目使用的接口和生命周期规则，让各个业务模块遵循同一套约定。
+2. 配置表模块：基于 Luban，衔接导出数据与运行时访问Luban 负责配置数据的导出、校验和配套代码生成。AlloyFramework 的配置表模块围绕这些产物，组织运行时的数据加载、表实例初始化和统一访问入口。
+业务需要读取一条道具配置时，应该能够通过明确的类型和 ID 获取数据。配置文件从哪里加载、何时完成初始化，以及初始化失败如何反馈，则由框架与资源模块、启动流程共同处理。
+封装时可以保留 Luban 生成的强类型数据结构，把框架代码集中在加载和接入部分，避免为了统一接口再复制一套配置模型。
+3. 热更新模块：结合 YooAsset 与 HybridCLR，组织完整更新流程在热更新方案中，YooAsset 与 HybridCLR 各自承担不同的职责。
+YooAsset 负责更新所需资源文件的版本管理与下载。热更新程序集等文件也可以作为资源交付，再由框架组织后续加载。HybridCLR 提供代码热更新所需的运行时能力，并支持按需要补充 AOT 元数据。
+AlloyFramework 需要把这些能力接入启动流程：准备资源包、检查版本、下载所需文件、准备代码运行环境、加载热更新程序集，再进入对应的业务入口。
+这里的封装价值在于流程衔接，包括阶段状态、进度反馈、失败处理，以及主包与热更新代码之间的入口约定。HybridCLR 本身不负责远端文件下载，资源下载完成也不代表代码已经完成加载，这些步骤需要由框架明确组织。
+4. 框架层：把独立能力组织成业务可以直接使用的模块采用成熟方案之后，AlloyFramework 仍然需要解决项目中的共性问题：模块如何初始化，资源由谁释放，配置何时可用，更新失败后如何反馈，以及 UI 如何使用这些基础能力。
+这几层的职责可以这样理解：
+
+
+
+层次
+主要职责
+示例
+
+
+
+第三方方案
+提供专业领域的基础能力
+YooAsset、Luban、HybridCLR
+
+
+AlloyFramework
+封装常用接口，统一生命周期，组织模块协作
+资源接口、配置初始化、更新流程、UI 管理
+
+
+业务层
+使用框架能力实现具体玩法和产品需求
+登录、背包、任务、战斗
+
+
+以打开背包界面为例，业务层发起打开界面的请求，UI 模块通过资源模块加载预制体，资源模块再使用 YooAsset 完成底层加载。界面展示道具信息时，通过配置模块访问 Luban 生成的配置数据。界面关闭后，则按照框架约定清理监听、定时任务和资源引用。
+这样，第三方方案的接入细节集中在框架层，业务层能够围绕具体功能编写代码。后续升级依赖或调整接入方式时，也可以优先在封装位置处理，减少对业务代码的影响。
+封装的范围应当由实际使用需求决定。对于稳定且适合直接使用的数据类型，可以保留；对于重复出现的初始化、加载、清理和错误处理逻辑，则应统一收进框架。没有必要把第三方库的每一个接口都重新包装一遍。
+统一启动入口、时间、网络和 UI 模块也遵循同样的原则：围绕项目中重复出现的需求建立共同规则，并与已有基础能力协作。
+因此，AlloyFramework 的实现会从这七类需求出发，结合 YooAsset、Luban 和 HybridCLR，把通用能力封装成业务层容易使用的模块。后续文章将围绕这些模块的具体接入和封装展开，说明每一层承担什么职责，以及它们如何在项目中配合运行。
+]]></content>
+      <tags>
+        <tag>UnityFramework</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>UniTask学习与使用</title>
+    <url>/posts/4483a5b.html</url>
+    <content><![CDATA[UniTask 学习文档
+基于UniTask 源码整理，版本适配 Unity 2019.3+
+
+
+目录
+什么是 UniTask
+核心类型与基本用法
+时间与帧等待
+PlayerLoopTiming — Unity 生命周期时序
+取消机制 (CancellationToken)
+Unity 对象操作
+Unity 生命周期异步触发器 (AsyncTrigger)
+条件等待
+并发控制 WhenAll &#x2F; WhenAny
+线程切换
+UniTaskCompletionSource 手动控制任务
+错误处理与 Forget
+UniTaskVoid — 即发即弃
+TimeoutController 超时控制
+AsyncLazy 懒加载异步
+UniTask Tracker 调试工具
+最佳实践与常见陷阱
+
+
+1. 什么是 UniTaskUniTask 是由 Cysharp 开源的、专为 Unity 设计的高性能异步库，命名空间为 Cysharp.Threading.Tasks。
+要理解 UniTask 为什么有存在的必要，得先看清楚为什么 .NET 原生的 Task 在 Unity 里不够好——它不是不能用，而是从设计目标到运行机制都和 Unity 错位。
+1.1 为什么不能直接用 System.Threading.Tasks.TaskTask 是为通用 .NET 服务端、桌面端设计的，它的设计假设是多线程 ThreadPool 调度 + GC 不敏感。这两个假设在 Unity 里都站不住脚。
+(1) Task 是引用类型，每次都堆分配每写一个 async Task 方法、每 new Task(...) 一次、每 await 一个尚未完成的 Task，背后都至少分配这几个对象：
+
+Task &#x2F; Task&lt;T&gt; 对象本身（引用类型）
+异步状态机被装箱成的 IAsyncStateMachine 引用类型实例
+MoveNextRunner 委托
+续体回调（continuation）
+若使用 CancellationToken，还有 CancellationTokenRegistration
+
+在 Unity 这种主循环每帧 16ms(60帧) 必须搞定一切的环境里，高频路径上跑 Task（比如每个子弹、每个 AI 决策都 await 一下）会迅速把 GC 曲线拉成锯齿，触发不定时的卡顿。这是 Task 在 Unity 里最致命的问题。
+UniTask 用 struct 实现 UniTask 类型，配合自定义的 AsyncUniTaskMethodBuilder 和对象池，同步完成路径零分配，异步路径上也远低于 Task。
+(2) Task 的调度器和 Unity 主循环没关系Task 默认通过 ThreadPool 调度续体，或者通过捕获的 SynchronizationContext 切回原线程。Unity 虽然提供了 UnitySynchronizationContext 让续体能回到主线程，但这个机制有几个问题：
+
+时序不可控：续体只能粗粒度地”回到主线程下一个能跑的时机”，你说不清是 Update、LateUpdate 还是某个具体的 PlayerLoop 节点。
+会走一遍 Post 队列：哪怕续体逻辑上是同步可执行的，也会被 Post 进队列绕一圈，引入额外开销和帧延迟。
+WebGL 上行为微妙：WebGL 是单线程的，ConfigureAwait(false) 之类的玩法跟桌面端语义不一致，容易踩坑。
+
+UniTask 把异步续体直接挂在 Unity PlayerLoop 的指定节点上跑，时序精确到 PreUpdate、Update、PreLateUpdate、LateUpdate、PostLateUpdate 等等，整个过程不切线程、不走 SyncContext。
+(3) Task 不认识 Unity 的异步对象Unity 自己的异步 API（AsyncOperation、UnityWebRequest、Resources.LoadAsync、SceneManager.LoadSceneAsync、Addressables 等）返回的都不是 Task。想 await 它们，要么自己写 TaskCompletionSource 包一层（又是堆分配），要么用社区的扩展方法。
+UniTask 对所有这些 Unity 异步 API 提供了原生扩展，可以直接 await someAsyncOperation，无需任何包装。
+(4) Task 的生命周期跟 Unity 对象毫无关联经典事故：
+async Task LoadAndShowAsync()&#123;    await Task.Delay(2000);    text.text = &quot;done&quot;;  // 如果这个对象已经被 Destroy，这里就 MissingReferenceException&#125;
+
+Task 不知道 Unity 里”这个 GameObject 已经被销毁”是什么意思。你得自己手写 CancellationToken 并且在 OnDestroy 里 cancel。
+UniTask 提供了 this.GetCancellationTokenOnDestroy() &#x2F; GetCancellationTokenOnDisable() 等扩展，一行代码就把异步任务的生命周期绑到 MonoBehaviour 上，对象销毁时所有相关 await 自动取消。
+(5) Task 的取消是”协作式”但不友好Task.Delay(1000, token) 取消时会抛 TaskCanceledException，你必须 try&#x2F;catch 它——否则在 async void（这本身又是另一个坑）里直接炸主线程。
+UniTask 提供更友好的取消语义：可以选择抛 OperationCanceledException，也可以选择返回一个标记取消的 UniTask（通过 SuppressCancellationThrow()），让上层代码不必到处包 try&#x2F;catch。
+(6) 调试和观测能力弱Task 在 Unity 里基本是”黑盒”：当前有多少个未完成的 Task、它们卡在哪一行、由哪个对象持有——Profiler 里看不出来，调试只能靠日志。
+UniTask 自带 Tracker 窗口（Window → UniTask Tracker），可以实时看到所有活跃的 UniTask、栈位置、发起者，泄漏几乎无所遁形。
+1.2 Task vs UniTask 对比总览
+
+
+维度
+System.Threading.Tasks.Task
+UniTask
+
+
+
+类型
+class（引用类型，堆分配）
+struct（值类型，栈分配）
+
+
+内存分配
+每次 await 都产生多个堆对象
+同步完成零分配；异步路径用对象池
+
+
+调度器
+ThreadPool &#x2F; SynchronizationContext
+直接挂载 Unity PlayerLoop，可精确到具体时序节点
+
+
+线程模型
+默认可能跑在线程池
+默认全程主线程；显式 SwitchToThreadPool 才换线程
+
+
+Unity 异步 API
+无法直接 await，需要手写包装
+原生支持 AsyncOperation、UnityWebRequest、Addressables 等
+
+
+生命周期联动
+完全独立，对象销毁也不会自动取消
+GetCancellationTokenOnDestroy() 一行搞定
+
+
+取消语义
+强制抛 TaskCanceledException
+可抛异常也可静默返回
+
+
+Fire-and-forget
+只能 async void（吞异常）
+UniTaskVoid + .Forget()，显式且安全
+
+
+调试工具
+基本没有
+Tracker 窗口、栈追踪
+
+
+WebGL 兼容性
+SyncContext 行为微妙
+专门适配，行为一致
+
+
+设计目标
+通用 .NET 异步（服务端为主）
+专为 Unity 主循环设计
+
+
+1.3 那 Task 是不是就完全不用了？不是。在以下场景仍然推荐用 Task：
+
+调用第三方库的 API，对方返回 Task（这种情况可以 await task.AsUniTask() 转成 UniTask 再继续）。
+真正需要跨线程并行的 CPU 密集计算（虽然 UniTask 也支持，但 Task + Parallel 在这块生态更完整）。
+编写跨平台 .NET 库，库本身不依赖 Unity。
+
+经验法则：写 Unity 游戏逻辑层（GamePlay、UI、剧情、加载流程）→ UniTask；写跨平台底层 &#x2F; 调用第三方 .NET 库 → Task，必要时用 AsUniTask() 桥接。
+
+2. UniTask的核心类型与基本用法2.1 UniTask 与 UniTask&lt;T&gt;// 无返回值的异步方法public async UniTask DoSomethingAsync()&#123;    await UniTask.Delay(1000); // 等待 1 秒    Debug.Log(&quot;完成&quot;);&#125;// 有返回值的异步方法public async UniTask&lt;int&gt; LoadDataAsync()&#123;    await UniTask.Delay(500);    return 42;&#125;// 调用方 awaitprivate async UniTask StartAsync()&#123;    await DoSomethingAsync();    int result = await LoadDataAsync();    Debug.Log(result); // 42&#125;
+
+2.2 快速创建已完成的任务// 已成功完成UniTask completed = UniTask.CompletedTask;UniTask&lt;int&gt; withValue = UniTask.FromResult(100);// 已取消UniTask canceled = UniTask.FromCanceled(cancellationToken);// 已失败UniTask faulted = UniTask.FromException(new Exception(&quot;出错了&quot;));
+
+2.3 Preserve — 允许多次 awaitUniTask 默认只能被 await 一次（类似消费一次的流）。若需多次 await 同一个任务，先调用 Preserve()：
+var task = SomeHeavyTask().Preserve();// 可以被多个地方同时 awaitawait task;await task; // 不会报错，复用结果
+
+
+3. 时间与帧等待3.1 DelayType — 时间类型选择public enum DelayType&#123;    DeltaTime,          // 使用 Time.deltaTime（受 Time.timeScale 影响）    UnscaledDeltaTime,  // 使用 Time.unscaledDeltaTime（不受 timeScale 影响）    Realtime            // 使用 Stopwatch，真实物理时间&#125;
+
+3.2 Delay — 按时间等待// 等待 2 秒（受 timeScale 影响）await UniTask.Delay(2000);await UniTask.Delay(TimeSpan.FromSeconds(2));// 等待 2 秒（忽略 timeScale，等同于 UnscaledDeltaTime）await UniTask.Delay(2000, ignoreTimeScale: true);// 完整参数版本await UniTask.Delay(    TimeSpan.FromSeconds(2),    delayType: DelayType.Realtime,    delayTiming: PlayerLoopTiming.Update,    cancellationToken: this.GetCancellationTokenOnDestroy());// WaitForSeconds 等效（float 版）await UniTask.WaitForSeconds(2.5f);await UniTask.WaitForSeconds(2.5f, ignoreTimeScale: true);
+
+3.3 DelayFrame — 按帧等待// 等待 10 帧await UniTask.DelayFrame(10);// 指定在哪个 PlayerLoop 阶段计帧await UniTask.DelayFrame(10, PlayerLoopTiming.FixedUpdate);
+
+3.4 Yield — 让出当前帧// 让出到下一个 Update（最轻量）await UniTask.Yield();await UniTask.Yield(PlayerLoopTiming.PreLateUpdate);// 注意：Yield 在同一帧已过该时机时会在当前帧末尾执行// 若要保证一定在「下一帧」执行，用 NextFrameawait UniTask.NextFrame();await UniTask.NextFrame(PlayerLoopTiming.Update);
+
+3.5 WaitForFixedUpdate &#x2F; WaitForEndOfFrame// 等待到下一个 FixedUpdate 结束await UniTask.WaitForFixedUpdate();// 等待帧渲染结束（需要传入 MonoBehaviour，用于内部开启协程）await UniTask.WaitForEndOfFrame(this);// Unity 2023.1+ 可直接使用// await UniTask.WaitForEndOfFrame(cancellationToken);
+
+
+内部实现说明：WaitForFixedUpdate 等价于 UniTask.Yield(PlayerLoopTiming.LastFixedUpdate)。WaitForEndOfFrame 内部通过 StartCoroutine + WaitForEndOfFrame 协程实现，因此需要传入 MonoBehaviour。
+
+
+4. PlayerLoopTiming — Unity 生命周期时序UniTask 将续体（continuation）注入 Unity 的 PlayerLoop，精确控制代码在哪个阶段恢复执行。
+Initialization         → LastInitializationEarlyUpdate            → LastEarlyUpdateFixedUpdate            → LastFixedUpdatePreUpdate              → LastPreUpdateUpdate          ★默认  → LastUpdatePreLateUpdate          → LastPreLateUpdatePostLateUpdate         → LastPostLateUpdateTimeUpdate (2020.2+)   → LastTimeUpdate
+
+对应 Unity 生命周期：
+Initialization    → 场景初始化阶段EarlyUpdate       → Input 处理前FixedUpdate       → 物理更新（FixedUpdate）PreUpdate         → Update 前Update            → MonoBehaviour.Update()PreLateUpdate     → LateUpdate 前PostLateUpdate    → LateUpdate 后（相机、渲染）
+
+实际使用建议：
+// 大多数逻辑：默认 Update 即可await UniTask.Yield();// 物理相关逻辑await UniTask.Yield(PlayerLoopTiming.FixedUpdate);// 需要在所有 Update 完成后执行（如跟随相机）await UniTask.Yield(PlayerLoopTiming.PostLateUpdate);
+
+
+5. 取消机制 (CancellationToken)5.1 GetCancellationTokenOnDestroy — 对象销毁自动取消这是 UniTask 与 Unity 对象生命周期结合最关键的 API：
+public class MyBehaviour : MonoBehaviour&#123;    async UniTask Start()    &#123;        // 当该 GameObject 被销毁时，自动取消        var token = this.GetCancellationTokenOnDestroy();        await UniTask.Delay(5000, cancellationToken: token);        // 如果 GameObject 提前销毁，上面会抛出 OperationCanceledException        Debug.Log(&quot;5秒后执行&quot;);    &#125;&#125;
+
+
+内部原理：GetCancellationTokenOnDestroy() 会自动向 GameObject 挂载一个 AsyncDestroyTrigger 组件。该组件在 OnDestroy() 时调用 CancellationTokenSource.Cancel()，从而取消所有持有该 token 的任务。
+
+5.2 手动创建 CancellationTokenSourcepublic class MyBehaviour : MonoBehaviour&#123;    CancellationTokenSource _cts;    void Start()    &#123;        _cts = new CancellationTokenSource();        DoLoopAsync(_cts.Token).Forget();    &#125;    // 手动取消（如按下按钮）    public void StopTask()    &#123;        _cts.Cancel();        _cts.Dispose();    &#125;    async UniTaskVoid DoLoopAsync(CancellationToken token)    &#123;        while (!token.IsCancellationRequested)        &#123;            Debug.Log(&quot;循环中...&quot;);            await UniTask.Delay(1000, cancellationToken: token);        &#125;    &#125;    void OnDestroy()    &#123;        _cts?.Cancel();        _cts?.Dispose();    &#125;&#125;
+
+5.3 链接多个 Token// 任意一个取消，整体取消var cts = CancellationTokenSource.CreateLinkedTokenSource(    this.GetCancellationTokenOnDestroy(),    manualCts.Token);var linkedToken = cts.Token;
+
+5.4 SuppressCancellationThrow — 不抛出异常// 普通写法：取消时会抛 OperationCanceledExceptiontry&#123;    await UniTask.Delay(1000, cancellationToken: token);&#125;catch (OperationCanceledException)&#123;    Debug.Log(&quot;已取消&quot;);&#125;// 使用 SuppressCancellationThrow：返回 bool 而非抛异常bool isCanceled = await UniTask.Delay(1000, cancellationToken: token)    .SuppressCancellationThrow();if (isCanceled)&#123;    Debug.Log(&quot;已取消，不抛异常&quot;);    return;&#125;
+
+5.5 WaitUntilCanceled — 等待直到 Token 被取消// 挂起直到 token 被取消await token.WaitUntilCanceled();Debug.Log(&quot;Token 已被取消，继续执行&quot;);// 等价写法（UniTask 静态方法）await UniTask.WaitUntilCanceled(token);
+
+5.6 cancelImmediately 参数默认情况下，取消检测发生在 PlayerLoop 的下一次循环（即下一帧或下一个时机）。若需要立即响应取消，使用 cancelImmediately: true：
+// 立即响应取消，而非等到下一帧await UniTask.Delay(5000, cancellationToken: token, cancelImmediately: true);
+
+
+注意：cancelImmediately: true 会向 CancellationToken 注册回调，有轻微额外开销，仅在需要即时响应时使用。
+
+
+6. Unity 对象操作6.1 AsyncOperation 异步加载// 场景加载var op = UnityEngine.SceneManagement.SceneManager.LoadSceneAsync(&quot;GameScene&quot;);await op;// 带进度回调await op.ToUniTask(    progress: Progress.Create&lt;float&gt;(p =&gt; Debug.Log($&quot;加载进度: &#123;p:P0&#125;&quot;)),    cancellationToken: this.GetCancellationTokenOnDestroy());// 带取消await op.WithCancellation(this.GetCancellationTokenOnDestroy());
+
+6.2 资源加载 (Resources.LoadAsync)// 加载资源var resourceRequest = Resources.LoadAsync&lt;Texture2D&gt;(&quot;MyTexture&quot;);await resourceRequest;var texture = resourceRequest.asset as Texture2D;// 带进度和取消var req = Resources.LoadAsync&lt;AudioClip&gt;(&quot;BGM&quot;);var clip = await req.ToUniTask(    progress: Progress.Create&lt;float&gt;(p =&gt; progressBar.value = p),    cancellationToken: token) as AudioClip;
+
+6.3 UnityWebRequest 网络请求using UnityEngine.Networking;// GET 请求var request = UnityWebRequest.Get(&quot;https://api.example.com/data&quot;);await request.SendWebRequest().WithCancellation(token);if (request.result == UnityWebRequest.Result.Success)&#123;    Debug.Log(request.downloadHandler.text);&#125;// 带错误处理try&#123;    var req = UnityWebRequest.Get(&quot;https://api.example.com/data&quot;);    await req.SendWebRequest().WithCancellation(token);    Debug.Log(req.downloadHandler.text);&#125;catch (UnityWebRequestException e)&#123;    Debug.LogError($&quot;请求失败: &#123;e.Error&#125;&quot;);&#125;
+
+6.4 AssetBundle 加载// 加载 AssetBundlevar bundleReq = AssetBundle.LoadFromFileAsync(&quot;path/to/bundle&quot;);var bundle = await bundleReq;// 从 Bundle 加载资源var assetReq = bundle.LoadAssetAsync&lt;GameObject&gt;(&quot;Prefab&quot;);var prefab = await assetReq as GameObject;// 带进度var bundle2 = await AssetBundle.LoadFromFileAsync(&quot;path/to/bundle&quot;)    .ToUniTask(Progress.Create&lt;float&gt;(p =&gt; Debug.Log($&quot;&#123;p:P&#125;&quot;)));
+
+6.5 AsyncInstantiate（Unity 2022.2+）// 异步实例化，避免主线程卡顿var instance = await Object.InstantiateAsync(prefab, parent);
+
+6.6 MonoBehaviour.StartAsyncCoroutine// 将 CancellationToken 自动绑定到组件生命周期await monoBehaviour.StartAsyncCoroutine(async (token) =&gt;&#123;    await UniTask.Delay(1000, cancellationToken: token);    // 做一些事&#125;);
+
+
+7. Unity 生命周期异步触发器 (AsyncTrigger)UniTask 提供了一套 AsyncTrigger 系统，将 MonoBehaviour 的各类消息事件（FixedUpdate、OnCollisionEnter 等）转换为可 await 的异步流。
+7.1 获取 Trigger所有 Trigger 都通过扩展方法从 GameObject 或 Component 获取：
+// 在组件上首次调用时，会自动向 GameObject 添加对应 Trigger 组件var fixedUpdateTrigger = this.GetAsyncFixedUpdateTrigger();var updateTrigger      = this.GetAsyncUpdateTrigger();var lateUpdateTrigger  = this.GetAsyncLateUpdateTrigger();
+
+7.2 一次性等待（await 单次触发）async UniTask Start()&#123;    var token = this.GetCancellationTokenOnDestroy();    // 等待下一次 FixedUpdate    await this.GetAsyncFixedUpdateTrigger().FixedUpdateAsync(token);    Debug.Log(&quot;FixedUpdate 触发了&quot;);    // 等待 OnTriggerEnter    var collider = await this.GetAsyncOnTriggerEnterTrigger().OnTriggerEnterAsync(token);    Debug.Log($&quot;碰到了: &#123;collider.name&#125;&quot;);    // 等待 OnCollisionEnter    var collision = await this.GetAsyncOnCollisionEnterTrigger().OnCollisionEnterAsync(token);    Debug.Log($&quot;碰撞: &#123;collision.gameObject.name&#125;&quot;);&#125;
+
+7.3 持续监听（async foreach 异步流）async UniTask MonitorUpdates()&#123;    var token = this.GetCancellationTokenOnDestroy();    // 异步 foreach：每次 LateUpdate 都执行一次循环体    await foreach (var _ in this.GetAsyncLateUpdateTrigger()        .WithCancellation(token))    &#123;        // 相当于在 LateUpdate 里写逻辑        UpdateCamera();    &#125;&#125;
+
+7.4 常用 Trigger 列表
+
+
+Trigger 获取方法
+对应 Unity 消息
+
+
+
+GetAsyncUpdateTrigger()
+Update
+
+
+GetAsyncFixedUpdateTrigger()
+FixedUpdate
+
+
+GetAsyncLateUpdateTrigger()
+LateUpdate
+
+
+GetAsyncOnTriggerEnterTrigger()
+OnTriggerEnter
+
+
+GetAsyncOnTriggerExitTrigger()
+OnTriggerExit
+
+
+GetAsyncOnCollisionEnterTrigger()
+OnCollisionEnter
+
+
+GetAsyncOnCollisionExitTrigger()
+OnCollisionExit
+
+
+GetAsyncOnMouseDownTrigger()
+OnMouseDown
+
+
+GetAsyncOnEnableTrigger()
+OnEnable
+
+
+GetAsyncOnDisableTrigger()
+OnDisable
+
+
+GetAsyncDestroyTrigger()
+OnDestroy
+
+
+GetAsyncAnimatorIKTrigger()
+OnAnimatorIK
+
+
+GetAsyncOnBecameVisibleTrigger()
+OnBecameVisible
+
+
+GetAsyncOnBecameInvisibleTrigger()
+OnBecameInvisible
+
+
+7.5 OnDestroyAsync — 等待对象销毁// 等待某个其他对象被销毁await enemy.GetAsyncDestroyTrigger().OnDestroyAsync();Debug.Log(&quot;敌人已被销毁&quot;);// 获取绑定到自身生命周期的 CancellationTokenvar token = this.GetAsyncDestroyTrigger().CancellationToken;// 等效于var token2 = this.GetCancellationTokenOnDestroy();
+
+
+8. 条件等待8.1 WaitUntil — 等待条件为 truebool isReady = false;// 等待 isReady 变为 true（每帧检测）await UniTask.WaitUntil(() =&gt; isReady);// 带取消await UniTask.WaitUntil(() =&gt; isReady,     cancellationToken: this.GetCancellationTokenOnDestroy());// 指定检测时机await UniTask.WaitUntil(() =&gt; isReady, PlayerLoopTiming.FixedUpdate);
+
+8.2 WaitWhile — 等待条件为 false// 等待 isLoading 变为 falseawait UniTask.WaitWhile(() =&gt; isLoading);
+
+8.3 WaitUntilValueChanged — 等待值变化// 等待 transform.position 发生变化，返回新值var newPos = await UniTask.WaitUntilValueChanged(    transform,     t =&gt; t.position,    cancellationToken: token);Debug.Log($&quot;位置变化为: &#123;newPos&#125;&quot;);// 等待组件属性变化var newHp = await UniTask.WaitUntilValueChanged(    enemy,     e =&gt; e.HP,    cancellationToken: token);
+
+
+注意：对于 Unity 对象（继承自 UnityEngine.Object），WaitUntilValueChanged 内部会额外处理对象被销毁的情况（避免访问已销毁对象）。
+
+8.4 WaitUntilCanceled — 等待取消// 持续运行直到被取消await UniTask.WaitUntilCanceled(token);// token 被取消后继续执行（不抛异常）
+
+
+9. 并发控制 WhenAll &#x2F; WhenAny9.1 WhenAll — 等待所有任务完成// 并行执行多个任务，全部完成后继续await UniTask.WhenAll(    LoadSceneAsync(),    LoadAudioAsync(),    LoadConfigAsync());// 收集返回值（所有任务返回同类型）int[] results = await UniTask.WhenAll(    FetchScoreAsync(userId1),    FetchScoreAsync(userId2),    FetchScoreAsync(userId3));// 不同类型返回值（使用元组，最多支持 15 个）var (texture, clip, config) = await UniTask.WhenAll(    LoadTextureAsync(),   // UniTask&lt;Texture2D&gt;    LoadAudioAsync(),     // UniTask&lt;AudioClip&gt;    LoadConfigAsync()     // UniTask&lt;Config&gt;);
+
+9.2 WhenAny — 等待任意一个任务完成// 返回率先完成的任务索引int winIndex = await UniTask.WhenAny(    Task1Async(),    Task2Async(),    Task3Async());Debug.Log($&quot;第 &#123;winIndex&#125; 个任务率先完成&quot;);// 与超时结合——实现&quot;超时或完成&quot;逻辑var (hasResult, result) = await UniTask.WhenAny(    LoadDataAsync(),                       // 正常加载    UniTask.Delay(5000).AsAsyncUnitUniTask() // 5秒超时                                           // 注：实际超时推荐用 TimeoutController);if (!hasResult)&#123;    Debug.Log(&quot;加载超时&quot;);&#125;
+
+
+10. 线程切换UniTask 提供了简洁的线程切换 API，用于在 Unity 主线程和后台线程之间切换。
+10.1 SwitchToThreadPool — 切换到后台线程async UniTask HeavyComputeAsync()&#123;    Debug.Log(&quot;开始（主线程）&quot;);    // 切换到线程池（后台线程）    await UniTask.SwitchToThreadPool();    // 以下代码在后台线程执行，不会阻塞主线程    var result = DoHeavyCompute();    // 切换回主线程（Update 时机）    await UniTask.SwitchToMainThread();    // 以下代码在主线程执行，可安全访问 Unity API    Debug.Log($&quot;计算结果: &#123;result&#125;&quot;);    someText.text = result.ToString();&#125;
+
+10.2 RunOnThreadPool — 封装后台任务// 在后台线程执行，完成后自动返回主线程（configureAwait=true 默认行为）await UniTask.RunOnThreadPool(() =&gt;&#123;    // 这里是后台线程    Thread.Sleep(2000); // 模拟耗时&#125;);// 这里已回到主线程// 不自动返回主线程await UniTask.RunOnThreadPool(() =&gt; HeavyWork(), configureAwait: false);
+
+10.3 ReturnToMainThread — using 作用域自动还原async UniTask ProcessAsync()&#123;    // using 结束时自动返回主线程    await using (UniTask.ReturnToMainThread())    &#123;        await UniTask.SwitchToThreadPool();        // 后台线程处理        var data = ProcessData();    &#125;    // 已返回主线程    UpdateUI(data);&#125;
+
+
+11. UniTaskCompletionSource 手动控制任务类似 TaskCompletionSource&lt;T&gt;，用于将回调式 API 转换为可 await 的任务。
+11.1 基本用法// 无返回值版本var tcs = new UniTaskCompletionSource();// 某处完成tcs.TrySetResult();// 某处失败tcs.TrySetException(new Exception(&quot;失败&quot;));// 某处取消tcs.TrySetCanceled();// 等待await tcs.Task;// 有返回值版本var tcs2 = new UniTaskCompletionSource&lt;string&gt;();tcs2.TrySetResult(&quot;Hello&quot;);string result = await tcs2.Task;
+
+11.2 封装回调 API// 将 Unity 事件回调转为可 await 的 UniTaskpublic static UniTask&lt;PointerEventData&gt; WaitForClickAsync(Button button, CancellationToken token)&#123;    var tcs = new UniTaskCompletionSource&lt;PointerEventData&gt;();    button.onClick.AddListener(() =&gt;    &#123;        tcs.TrySetResult(null);    &#125;);    token.RegisterWithoutCaptureExecutionContext(() =&gt;    &#123;        tcs.TrySetCanceled(token);    &#125;);    return tcs.Task;&#125;// 使用await WaitForClickAsync(myButton, this.GetCancellationTokenOnDestroy());Debug.Log(&quot;按钮被点击&quot;);
+
+11.3 AutoResetUniTaskCompletionSource适用于需要重复使用（Reset）的场景，内部会自动入池：
+// 每次使用后自动重置，可重用var source = AutoResetUniTaskCompletionSource.Create();source.TrySetResult();await source.Task;// source 自动回池，下次 Create 可能返回同一对象
+
+
+12. 错误处理与 Forget12.1 标准 try-catchasync UniTask LoadAsync(CancellationToken token)&#123;    try    &#123;        await UniTask.Delay(1000, cancellationToken: token);        await LoadDataAsync();    &#125;    catch (OperationCanceledException)    &#123;        // 被取消，通常静默处理        Debug.Log(&quot;加载被取消&quot;);    &#125;    catch (Exception e)    &#123;        Debug.LogError($&quot;加载失败: &#123;e&#125;&quot;);    &#125;&#125;
+
+12.2 Forget — 即发即弃且屏蔽警告直接调用返回 UniTask 的方法而不 await，编译器会警告。使用 .Forget() 明确表示这是有意的：
+// ❌ 有编译器警告DoSomethingAsync();// ✅ 明确忽略结果DoSomethingAsync().Forget();// ✅ 带错误处理的 ForgetDoSomethingAsync().Forget(ex =&gt; Debug.LogException(ex));
+
+12.3 UniTask.Never — 永不完成的任务// 创建一个永远不完成的任务（除非 token 取消）await UniTask.Never(token);// 只有 token 被取消时才会抛 OperationCanceledException
+
+
+13. UniTaskVoid — 即发即弃在 C# 里，被 async 修饰的方法签名只能返回 Task &#x2F; Task&lt;T&gt; &#x2F; void（或自定义 awaitable，比如 UniTask &#x2F; UniTaskVoid）。当你不打算 await 这个方法——即”即发即弃 (fire-and-forget)”——就需要在 async void 和 async UniTaskVoid 之间做选择。两者看起来很像，差异很大。
+13.1 async void 在 Unity 里到底有什么问题async void 是 C# 语言为”事件处理器”开的口子（典型场景是 WinForms 的 Button_Click），它不是为普通业务代码设计的。具体毛病有四类：
+(1) 异常会逃出调用栈，没人能 catch
+async Task 抛出的异常会被打包到返回的 Task 上，await 方或 Task.Exception 可以拿到；async void 没有 Task 对象，异常会被原样抛到当前的 SynchronizationContext——在 Unity 里通常表现为：要么 Console 里冒一条难以定位的红色 Error，要么直接干扰主循环。
+async void Bad()&#123;    await UniTask.Delay(100);    throw new Exception(&quot;boom&quot;);  // 无法被外层 try/catch 捕获&#125;try &#123; Bad(); &#125;catch &#123; /* 永远进不来 */ &#125;
+
+第一次 await 之后，控制权已经还给调用方了，try 块早已退出，异常发生时根本不在这个栈上。
+(2) 堆分配多
+async void &#x2F; async Task 默认使用 .NET 的 AsyncVoidMethodBuilder &#x2F; AsyncTaskMethodBuilder，每次调用都会分配状态机盒子、Task 对象、MoveNextRunner 等。按钮、Update 之类的高频路径里跑一堆 async void，GC 压力很显眼。UniTaskVoid 走的是 UniTask 自家的 AsyncUniTaskVoidMethodBuilder，同步完成路径零分配，异步路径上也通过对象池显著少于 Task。
+(3) 无法被等待、无法被组合
+async void 返回 void，调用方什么句柄都拿不到：
+
+不能再补一个 await 等它完成；
+不能塞进 WhenAll &#x2F; WhenAny；
+不能链式接 ContinueWith。
+
+UniTaskVoid 也不是为 await 设计的（它的存在意义就是即发即弃），但 UniTask 强制要求你在调用处加 .Forget()，让”我知道我不等它”这件事变成显式的代码意图，而不是一个看上去像普通函数调用的隐式语义。
+(4) 它无视 UniTask 的 PlayerLoop 调度
+UniTask 的核心优势是把异步续体（continuation）直接挂到 Unity 的 PlayerLoop 上跑，时序可控、不会切线程。但 async void 用的是默认 builder，续体走的是 SynchronizationContext.Post——在 Unity 里这条路径会绕一圈 UnitySynchronizationContext，时序不如 UniTask 精确，且 WebGL 上行为偶有差异。
+13.2 UniTaskVoid 怎么解决这些问题把上面四点逐一对回去：
+
+
+
+维度
+async void
+async UniTaskVoid
+
+
+
+异常去向
+抛到 SynchronizationContext，外层 catch 不住
+由 UniTask 的全局未处理异常钩子接管 (UniTaskScheduler.UnobservedTaskException)
+
+
+堆分配
+每次调用都有
+同步完成路径零分配；异步路径用对象池
+
+
+调用语义
+看起来像普通方法调用，意图不明确
+必须 .Forget()，意图显式
+
+
+调度
+走 SynchronizationContext
+走 UniTask 的 PlayerLoop
+
+
+可被 Tracker 观测
+否
+是（Window → UniTask Tracker 能看到）
+
+
+要点：UniTaskVoid 不是”能被等待的 void”，它仍然是即发即弃，只是把”丢出去之后会怎样”这件事做得更安全、更可观测了。
+13.3 标准用法// 1) 声明为 UniTaskVoid（注意没有 &lt;T&gt;，本来就不返回值）async UniTaskVoid FireAndForgetAsync()&#123;    await UniTask.Delay(1000);    Debug.Log(&quot;执行完毕（没有人等我）&quot;);&#125;// 2) 调用处必须 .Forget()，否则编译器会给 CS4014 警告FireAndForgetAsync().Forget();// 3) 也可以传一个异常处理回调进 Forget，避免靠全局钩子兜底FireAndForgetAsync().Forget(ex =&gt; Debug.LogError($&quot;failed: &#123;ex&#125;&quot;));// 4) 匿名 lambda 场景用 UniTask.VoidUniTask.Void(async () =&gt;&#123;    await UniTask.Delay(500);    Debug.Log(&quot;匿名即发即弃&quot;);&#125;);
+
+13.4 该用 UniTask 还是 UniTaskVoid：决策表
+
+
+你的场景
+推荐返回类型
+
+
+
+方法会被 await，调用方关心完成时机
+UniTask &#x2F; UniTask&lt;T&gt;
+
+
+调用方完全不关心结果、不需要等待（按钮回调、定时触发、日志上报）
+UniTaskVoid
+
+
+实现接口&#x2F;重写基类，签名要求 void（如 IPointerClickHandler.OnPointerClick）
+方法体里 UniTask.Void(async () =&gt; &#123; ... &#125;)
+
+
+需要把异常打包给上层
+绝对用 UniTask，绝不用 UniTaskVoid
+
+
+一条经验法则：只要你自己写的方法，永远不要返回 async void。async void 唯一合理的使用场景是你被迫去实现一个签名为 void 的回调（比如某些第三方库的事件签名），即便如此，更推荐在里面包一层 UniTask.Void。
+13.5 配合 UnityAction（UI 按钮等）// ❌ 不推荐：async void 吞异常 + 堆分配 + 调度走 SyncContextbutton.onClick.AddListener(async () =&gt; &#123; await DoThingAsync(); &#125;);// ✅ 推荐：UniTask.UnityAction 内部用 UniTaskVoid 包装button.onClick.AddListener(UniTask.UnityAction(async () =&gt;&#123;    await UniTask.Delay(500);    DoThing();&#125;));// 带 CancellationToken，组件销毁时自动取消button.onClick.AddListener(    UniTask.UnityAction(async token =&gt;    &#123;        await UniTask.Delay(500, cancellationToken: token);    &#125;,    this.GetCancellationTokenOnDestroy()));
+
+13.6 一个容易踩的坑：UniTaskVoid 不能被 awaitasync UniTaskVoid FooAsync() &#123; /* ... */ &#125;// ❌ 编译错误：UniTaskVoid 没有 GetAwaiterawait FooAsync();// 如果你后悔了想等它，把签名改回 UniTask 才是正解
+
+如果你发现自己反复想 await 一个 UniTaskVoid，那说明它本来就不该是 UniTaskVoid——改成 UniTask。
+
+14. TimeoutController 超时控制TimeoutController 可复用的超时控制器，避免每次超时都 new 一个 CancellationTokenSource。
+public class MyBehaviour : MonoBehaviour&#123;    // 声明为字段，可以复用    TimeoutController _timeoutController = new TimeoutController();        // 也可以与外部 CancellationToken 联动    // TimeoutController _timeoutController;        async UniTask Start()    &#123;        var destroyToken = this.GetCancellationTokenOnDestroy();        var timeoutController = new TimeoutController(            new CancellationTokenSource() // 外部 token 也可以，但这里用新的        );                try        &#123;            // 给出 3 秒超时的 token            var timeoutToken = _timeoutController.Timeout(TimeSpan.FromSeconds(3));                        // 使用此 token 执行操作            await LoadDataAsync(timeoutToken);        &#125;        catch (OperationCanceledException)        &#123;            if (_timeoutController.IsTimeout())            &#123;                Debug.Log(&quot;加载超时！&quot;);            &#125;        &#125;        finally        &#123;            // 重置超时控制器（如果没有超时，可以复用）            _timeoutController.Reset();        &#125;    &#125;    void OnDestroy()    &#123;        _timeoutController.Dispose();    &#125;&#125;
+
+
+15. AsyncLazy 懒加载异步用于只需要初始化一次的异步资源，多次调用只执行一次实际工作：
+// 定义懒加载AsyncLazy&lt;Config&gt; _lazyConfig = UniTask.Lazy(async () =&gt;&#123;    await UniTask.Delay(100); // 模拟加载    return new Config &#123; Version = &quot;1.0&quot; &#125;;&#125;);// 多次调用只执行一次加载async UniTask UseConfigAsync()&#123;    var config = await _lazyConfig; // 第一次：实际加载    var config2 = await _lazyConfig; // 第二次：直接返回缓存结果&#125;
+
+
+16. UniTask Tracker 调试工具UniTask 内置了任务追踪窗口，可以在 Editor 中查看所有正在运行的 UniTask：
+
+菜单：Window → UniTask Tracker
+可以看到所有活跃的 UniTask 及其调用栈
+可以检测是否有泄漏的（永不完成的）任务
+
+// 在代码中启用追踪（默认 Debug 模式下开启）#if UNITY_EDITORTaskTracker.EnableTracking = true;TaskTracker.EnableStackTrace = true;#endif
+
+
+17. 最佳实践与常见陷阱✅ 推荐做法1. 始终传递 CancellationToken// ❌ 错误：没有取消支持，GameObject 销毁后可能崩溃async UniTask BadExample()&#123;    await UniTask.Delay(5000);    transform.position = Vector3.zero; // GameObject 可能已销毁！&#125;// ✅ 正确：绑定到对象生命周期async UniTask GoodExample()&#123;    var token = this.GetCancellationTokenOnDestroy();    await UniTask.Delay(5000, cancellationToken: token);    transform.position = Vector3.zero; // 安全，因为 GameObject 仍存活&#125;
+
+2. 异步方法命名加 Async 后缀public async UniTask LoadDataAsync() &#123; &#125;    // ✅public async UniTask LoadData() &#123; &#125;          // ❌
+
+3. 合理使用 WhenAll 并行化// ❌ 串行：耗时 = A + B + Cawait LoadAAsync();await LoadBAsync();await LoadCAsync();// ✅ 并行：耗时 = max(A, B, C)await UniTask.WhenAll(LoadAAsync(), LoadBAsync(), LoadCAsync());
+
+4. Start() 返回 UniTask 代替协程// ❌ 旧协程写法IEnumerator Start()&#123;    yield return new WaitForSeconds(1f);    Debug.Log(&quot;完成&quot;);&#125;// ✅ UniTask 写法，更简洁、可取消async UniTask Start()&#123;    await UniTask.Delay(1000, cancellationToken: this.GetCancellationTokenOnDestroy());    Debug.Log(&quot;完成&quot;);&#125;
+
+⚠️ 常见陷阱陷阱 1：Yield 并非总是下一帧// ⚠️ Yield 在同一帧、同一 PlayerLoop 时机触发时，//    可能在当前帧末尾立即继续，而非严格等到&quot;下一帧&quot;await UniTask.Yield();// ✅ 明确等到下一帧await UniTask.NextFrame();
+
+陷阱 2：WaitForEndOfFrame 需要 MonoBehaviour// ❌ Unity 2023 之前这样写不安全（行为不一致）await UniTask.WaitForEndOfFrame();// ✅ 传入 MonoBehaviourawait UniTask.WaitForEndOfFrame(this);
+
+陷阱 3：UniTask 只能 await 一次var task = SomeAsync();await task;   // ✅ 第一次 OKawait task;   // ❌ 可能引发异常或未定义行为// ✅ 需要多次 await 时使用 Preservevar shared = SomeAsync().Preserve();await shared;await shared; // ✅ 安全
+
+陷阱 4：忘记处理 OperationCanceledException// ❌ 取消异常会变成未处理异常，出现报错async UniTask RunAsync()&#123;    await UniTask.Delay(1000, cancellationToken: token);    // 如果被取消，异常往上传播，若无人处理会打印错误&#125;// ✅ 在入口处处理async UniTask RunAsync()&#123;    try    &#123;        await UniTask.Delay(1000, cancellationToken: token);    &#125;    catch (OperationCanceledException)    &#123;        // 正常取消，不报错    &#125;&#125;// 或者调用时 catchRunAsync().Forget(ex =&gt;&#123;    if (ex is not OperationCanceledException)        Debug.LogException(ex);&#125;);
+
+陷阱 5：在非主线程访问 Unity API// ❌ 在线程池线程访问 Unity API 会抛异常await UniTask.SwitchToThreadPool();var pos = transform.position; // ❌ 危险！// ✅ 切回主线程再访问await UniTask.SwitchToThreadPool();var data = HeavyCompute(); // ✅ 纯 C# 运算await UniTask.SwitchToMainThread();transform.position = data; // ✅ 主线程安全
+
+
+快速参考表
+
+
+API
+说明
+
+
+
+UniTask.Delay(ms)
+按毫秒等待
+
+
+UniTask.DelayFrame(n)
+按帧等待
+
+
+UniTask.Yield()
+让出到当前时机的下一次触发
+
+
+UniTask.NextFrame()
+等待到严格的下一帧
+
+
+UniTask.WaitForFixedUpdate()
+等待下一个 FixedUpdate
+
+
+UniTask.WaitForEndOfFrame(mono)
+等待帧结束
+
+
+UniTask.WaitUntil(() =&gt; cond)
+等待条件成立
+
+
+UniTask.WaitWhile(() =&gt; cond)
+等待条件不再成立
+
+
+UniTask.WaitUntilValueChanged(target, t =&gt; t.Value)
+等待值变化
+
+
+UniTask.WhenAll(tasks)
+等待所有任务
+
+
+UniTask.WhenAny(tasks)
+等待任意任务完成
+
+
+UniTask.SwitchToMainThread()
+切换到主线程
+
+
+UniTask.SwitchToThreadPool()
+切换到后台线程
+
+
+UniTask.RunOnThreadPool(action)
+在后台线程运行并返回主线程
+
+
+this.GetCancellationTokenOnDestroy()
+获取绑定对象生命周期的 Token
+
+
+task.Forget()
+即发即弃，抑制警告
+
+
+task.SuppressCancellationThrow()
+取消时返回 bool 而非抛异常
+
+
+task.Preserve()
+允许多次 await
+
+
+UniTaskCompletionSource
+手动控制任务完成
+
+
+TimeoutController
+可复用的超时控制
+
+
+UniTask.Lazy(factory)
+懒加载异步
+
+
+GetAsyncDestroyTrigger()
+等待对象销毁
+
+
+GetAsyncUpdateTrigger()
+订阅 Update 事件流
+
+
+GetAsyncOnTriggerEnterTrigger()
+异步等待触发器进入
+
+
+]]></content>
   </entry>
   <entry>
     <title>UniTask 0GC实现原理</title>
@@ -1194,547 +1986,276 @@ Sprite Atlas
       </tags>
   </entry>
   <entry>
-    <title>UniTask学习与使用</title>
-    <url>/posts/4483a5b.html</url>
-    <content><![CDATA[UniTask 学习文档
-基于UniTask 源码整理，版本适配 Unity 2019.3+
+    <title>Unity-AssetBundle加载与卸载</title>
+    <url>/posts/38e927b7.html</url>
+    <content><![CDATA[AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。
+下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。
+一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。
+但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。
+这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一定会销毁此前加载的对象。
+二、管理目标：明确谁在使用，什么时候能释放这个场景需要解决的，不只是让内存下降，还包括保证资源在使用期间有效，以及避免下次打开界面时无意间再加载一份。
+具体可以归纳为三个目标：
 
+使用期间保持有效。 界面实例、对象池或其他系统仍在引用资源时，不能提前销毁资源。
+重复进入时可复用。 同一份逻辑资源仍然存活时，应有明确的复用或释放策略。
+退出后能够验证。 能够确认引用已经解除、对象得到回收，而不只是观察进程内存有没有立刻下降。
 
-目录
-什么是 UniTask
-核心类型与基本用法
-时间与帧等待
-PlayerLoopTiming — Unity 生命周期时序
-取消机制 (CancellationToken)
-Unity 对象操作
-Unity 生命周期异步触发器 (AsyncTrigger)
-条件等待
-并发控制 WhenAll &#x2F; WhenAny
-线程切换
-UniTaskCompletionSource 手动控制任务
-错误处理与 Forget
-UniTaskVoid — 即发即弃
-TimeoutController 超时控制
-AsyncLazy 懒加载异步
-UniTask Tracker 调试工具
-最佳实践与常见陷阱
+要做到这些，需要先分清各个 API 实际处理的是哪一部分。
+三、处理过程：把加载、使用和回收串起来1. 先确定内存在哪里以本地 AB 包为例，加载过程及各部分的关系如下：
 
+    flowchart TD
+    D[&quot;磁盘：AB 文件&quot;]
+    B[&quot;Native：包管理结构与读取缓冲&quot;]
+    R[&quot;Native：资源对象与所需 CPU 数据&quot;]
+    MB[&quot;Managed：AssetBundle 包装&quot;]
+    MR[&quot;Managed：Texture2D、Mesh 等包装&quot;]
+    G[&quot;GPU：纹理、顶点与索引缓冲&quot;]
 
-1. 什么是 UniTaskUniTask 是由 Cysharp 开源的、专为 Unity 设计的高性能异步库，命名空间为 Cysharp.Threading.Tasks。
-要理解 UniTask 为什么有存在的必要，得先看清楚为什么 .NET 原生的 Task 在 Unity 里不够好——它不是不能用，而是从设计目标到运行机制都和 Unity 错位。
-1.1 为什么不能直接用 System.Threading.Tasks.TaskTask 是为通用 .NET 服务端、桌面端设计的，它的设计假设是多线程 ThreadPool 调度 + GC 不敏感。这两个假设在 Unity 里都站不住脚。
-(1) Task 是引用类型，每次都堆分配每写一个 async Task 方法、每 new Task(...) 一次、每 await 一个尚未完成的 Task，背后都至少分配这几个对象：
+    D --&gt;|LoadFromFile| B
+    MB -.-&gt;|引用底层包对象| B
+    B --&gt;|LoadAsset：从文件读取所需数据| R
+    MR -.-&gt;|引用底层资源对象| R
+    R --&gt;|图形数据上传| G
+  
 
-Task &#x2F; Task&lt;T&gt; 对象本身（引用类型）
-异步状态机被装箱成的 IAsyncStateMachine 引用类型实例
-MoveNextRunner 委托
-续体回调（continuation）
-若使用 CancellationToken，还有 CancellationTokenRegistration
 
-在 Unity 这种主循环每帧 16ms(60帧) 必须搞定一切的环境里，高频路径上跑 Task（比如每个子弹、每个 AI 决策都 await 一下）会迅速把 GC 曲线拉成锯齿，触发不定时的卡顿。这是 Task 在 Unity 里最致命的问题。
-UniTask 用 struct 实现 UniTask 类型，配合自定义的 AsyncUniTaskMethodBuilder 和对象池，同步完成路径零分配，异步路径上也远低于 Task。
-(2) Task 的调度器和 Unity 主循环没关系Task 默认通过 ThreadPool 调度续体，或者通过捕获的 SynchronizationContext 切回原线程。Unity 虽然提供了 UnitySynchronizationContext 让续体能回到主线程，但这个机制有几个问题：
+磁盘到 Native： LoadFromFile 建立包的访问入口；LoadAsset 再读取所需资源，创建 Native 对象及数据。打开包不等于全部资源都已加载。
+Managed 是脚本访问入口： 加载接口向 C# 提供相应包装对象；图中虚线表示引用关系，像素、顶点等大块数据不必经过托管堆再上传。
+需要 GPU 使用的数据才上传： 例如纹理像素、Mesh 顶点和索引。上传可能发生在加载期间或分帧进行，并非统一等到首次渲染；CPU 副本是否保留取决于 Read&#x2F;Write 等设置。[2][3]
 
-时序不可控：续体只能粗粒度地”回到主线程下一个能跑的时机”，你说不清是 Update、LateUpdate 还是某个具体的 PlayerLoop 节点。
-会走一遍 Post 队列：哪怕续体逻辑上是同步可执行的，也会被 Post 进队列绕一圈，引入额外开销和帧延迟。
-WebGL 上行为微妙：WebGL 是单线程的，ConfigureAwait(false) 之类的玩法跟桌面端语义不一致，容易踩坑。
+清理时也要分别处理：资源卸载负责 Native 对象及相关 GPU 资源，GC 负责不可达的托管包装和业务对象。 图中表示逻辑归属，统一内存设备上的 CPU 与 GPU 可能共享物理内存。
+2. 将打开包和加载资源分开处理加载 AssetBundle 常用的四类接口如下。这里按数据来源分类，前三类分别提供同步与 Async 异步版本；第四类通过网络请求异步加载。[9][10][11][12]
 
-UniTask 把异步续体直接挂在 Unity PlayerLoop 的指定节点上跑，时序精确到 PreUpdate、Update、PreLateUpdate、LateUpdate、PostLateUpdate 等等，整个过程不切线程、不走 SyncContext。
-(3) Task 不认识 Unity 的异步对象Unity 自己的异步 API（AsyncOperation、UnityWebRequest、Resources.LoadAsync、SceneManager.LoadSceneAsync、Addressables 等）返回的都不是 Task。想 await 它们，要么自己写 TaskCompletionSource 包一层（又是堆分配），要么用社区的扩展方法。
-UniTask 对所有这些 Unity 异步 API 提供了原生扩展，可以直接 await someAsyncOperation，无需任何包装。
-(4) Task 的生命周期跟 Unity 对象毫无关联经典事故：
-async Task LoadAndShowAsync()&#123;    await Task.Delay(2000);    text.text = &quot;done&quot;;  // 如果这个对象已经被 Destroy，这里就 MissingReferenceException&#125;
 
-Task 不知道 Unity 里”这个 GameObject 已经被销毁”是什么意思。你得自己手写 CancellationToken 并且在 OnDestroy 里 cancel。
-UniTask 提供了 this.GetCancellationTokenOnDestroy() &#x2F; GetCancellationTokenOnDisable() 等扩展，一行代码就把异步任务的生命周期绑到 MonoBehaviour 上，对象销毁时所有相关 await 自动取消。
-(5) Task 的取消是”协作式”但不友好Task.Delay(1000, token) 取消时会抛 TaskCanceledException，你必须 try&#x2F;catch 它——否则在 async void（这本身又是另一个坑）里直接炸主线程。
-UniTask 提供更友好的取消语义：可以选择抛 OperationCanceledException，也可以选择返回一个标记取消的 UniTask（通过 SuppressCancellationThrow()），让上层代码不必到处包 try&#x2F;catch。
-(6) 调试和观测能力弱Task 在 Unity 里基本是”黑盒”：当前有多少个未完成的 Task、它们卡在哪一行、由哪个对象持有——Profiler 里看不出来，调试只能靠日志。
-UniTask 自带 Tracker 窗口（Window → UniTask Tracker），可以实时看到所有活跃的 UniTask、栈位置、发起者，泄漏几乎无所遁形。
-1.2 Task vs UniTask 对比总览
 
+加载来源
+接口
+适用场景与内存特点
 
-维度
-System.Threading.Tasks.Task
-UniTask
 
 
+本地文件
+AssetBundle.LoadFromFile &#x2F; LoadFromFileAsync
+包已经落盘时优先考虑；无需业务代码先创建完整的托管数组，支持通过 offset 指定包在文件中的起始位置
 
-类型
-class（引用类型，堆分配）
-struct（值类型，栈分配）
 
+内存字节
+AssetBundle.LoadFromMemory &#x2F; LoadFromMemoryAsync
+已取得完整 AB 字节，例如整包解密后的数据；输入 byte[] 与 Unity 加载包所需内存可能同时存在
 
-内存分配
-每次 await 都产生多个堆对象
-同步完成零分配；异步路径用对象池
 
+托管流
+AssetBundle.LoadFromStream &#x2F; LoadFromStreamAsync
+从支持读取和定位的流加载，适合自定义解密流；需维护流的生命周期与随机读取能力
 
-调度器
-ThreadPool &#x2F; SynchronizationContext
-直接挂载 Unity PlayerLoop，可精确到具体时序节点
 
+网络请求
+UnityWebRequestAssetBundle.GetAssetBundle
+从 URL 下载并加载；使用专用的 DownloadHandlerAssetBundle，提供版本号或 Hash 的重载可接入 Unity 缓存
 
-线程模型
-默认可能跑在线程池
-默认全程主线程；显式 SwitchToThreadPool 才换线程
 
+从文件加载：本地包的常用入口// 让 Unity 直接访问文件，避免先创建完整的托管字节数组。AssetBundle fileBundle = AssetBundle.LoadFromFile(path);
 
-Unity 异步 API
-无法直接 await，需要手写包装
-原生支持 AsyncOperation、UnityWebRequest、Addressables 等
+本地包通常优先使用 LoadFromFile 或 LoadFromFileAsync。未压缩和 LZ4 包可以从文件按需读取；LZMA 包仍需要解压，不能把“从文件加载”理解为不占内存。offset 可以跳过自定义文件头，但不会替你解密 AB 正文。
+从内存加载：先准备完整字节// 先将整个文件读入托管数组，再交给 Unity。byte[] bundleBytes = File.ReadAllBytes(path);AssetBundle memoryBundle = AssetBundle.LoadFromMemory(bundleBytes);
 
+byte[] 本身就会占用一份托管内存，Unity 侧还需要加载包所需的内存。加载期间，两部分占用可能同时存在。实际峰值还受压缩格式和引擎实现影响，不能简单固定为“文件大小的两倍”。如果先读取密文再生成另一份明文数组，还要计入解密过程的额外占用。
+从流加载：按需读取，也要管理流的生命周期LoadFromStream 接收 System.IO.Stream。流必须支持 Read、Seek 和 Length，并按 Unity 的调用要求处理读取；相关方法可能从 Unity 的工作线程调用。自定义解密流还需要支持随机定位后的正确解密，不能直接假设顺序读取的解密流就能使用。
+包仍在使用时，流必须保持打开，直到 AssetBundle 卸载后再释放。 不要用一个在加载方法返回时就结束的 using 块包住流。流式解密有机会减少整包明文数组的占用，但解压、读取缓冲和具体算法仍会影响内存峰值。
+从网络加载：请求完成后取得包UnityWebRequestAssetBundle.GetAssetBundle(url) 创建请求，调用 SendWebRequest() 后等待完成，确认 request.result 成功，再通过 DownloadHandlerAssetBundle.GetContent(request) 取得包。请求使用完毕后应释放；取得的 AssetBundle 则按自身生命周期卸载。
+这里使用专门处理 AB 的下载处理器，无需业务代码先把响应转成完整 byte[] 再调用 LoadFromMemory。只有 URL 的重载不会自动启用版本缓存；需要缓存时，应使用提供版本号或 Hash 的重载。若服务端文件经过自定义加密，该接口不会自动识别解密规则，应先下载文件或字节，再通过相应解密加载路径打开包。
+以上接口解决的都是“如何打开包”。异步版本可以改变等待方式，但不保证所有工作都在后台执行，也不会自动消除解压或解密的内存峰值。
+前文已经解释了包的按需读取与解压机制，这里只保留一个与内存管理有关的区别：LoadFromFile 返回的是包的访问入口，LoadAsset 返回的是具体资源对象。打开包不代表包内所有资源都已加载；卸载入口，也不必然销毁已经加载的对象。[1]
+3. 确认资源对象和 GPU 数据的加载过程Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(    &quot;assets/game/textures/warrior_diffuse.png&quot;);
 
-生命周期联动
-完全独立，对象销毁也不会自动取消
-GetCancellationTokenOnDestroy() 一行搞定
+调用 LoadAsset 后，Unity 会创建对应的底层资源对象，并向 C# 返回 Texture2D 包装对象。下文默认相关依赖包已经准备好，依赖解析过程沿用前文，不再展开。
+纹理和 Mesh 还涉及 GPU 数据的上传。这里容易产生一个误解：认为 LoadAsset 只准备 CPU 数据，直到第一次渲染时才上传显存。
+实际并没有这样统一的时间界限。Unity 有同步和异步上传管线，数据可能在加载过程中就上传到 GPU，也可能通过缓冲区分帧传输。具体行为取决于资源设置、加载路径及平台，不能仅凭“还没有渲染过”判断显存占用。[2]
+Mesh.UploadMeshData(true) 可以提交 Mesh 数据，并释放脚本读取所需的 CPU 数据副本；这里释放的是 Native 侧的 CPU 数据，不是 C# 包装，GPU 数据仍然保留。它主要用于明确管理 Mesh 数据，并不是加载 AB 资源时必须补上的步骤。
+Read&#x2F;Write 保留的是什么纹理开启 Read/Write Enabled 后，Unity 会保留可供 CPU 访问的像素数据，以支持 GetPixels 等操作。这份数据会增加常驻内存开销。[3]
+如果纹理只用于渲染，通常应关闭该选项；如果运行时确实需要读取或修改像素，则需要保留。UI 图集、大尺寸贴图尤其值得检查。
+关闭 Read&#x2F;Write 能减少 CPU 副本的占用，但不宜把收益一概写成“总内存减半”。纹理格式、MipMap、流送设置、平台，以及对象自身的开销都会影响最终结果。
+4. 根据使用情况选择卸载方式bundle.Unload(unloadAllLoadedObjects: true);// 或bundle.Unload(unloadAllLoadedObjects: false);
 
+两种调用都会卸载包本身，使这个 AssetBundle 无法继续用于加载资源。区别在于，是否同时销毁此前从包中加载出来的对象。[4]
+Unload(true)：包和已加载资源一起卸载Unload(true) 会释放包自身的 Native 管理数据，并销毁属于这个包的已加载资源对象，释放它们的 Native 数据；纹理、Mesh 等对象对应的 GPU 资源也会进入图形系统的释放流程，即使场景中的其他对象仍在引用它们。
+这里的销毁主要针对引擎对象，不意味着 C# 托管包装已经被回收。包装对象仍由 GC 管理；只要业务代码还持有引用，它就可能继续占用托管堆空间。GPU 资源的实际释放也可能等待渲染任务或驱动处理完成。
+例如，从包里加载 Prefab 后调用 Instantiate，场景中的实例通常还在，但它引用的共享 Mesh、材质、纹理可能已被卸载，导致模型无法正常显示。粉红色通常指向 Shader 缺失、错误或不受支持，不能直接归因于“少了一张纹理”。
+底层对象销毁后，已有的 C# 变量不会自动被重新赋值。Unity 重载了 ==，会将底层对象已经失效的包装对象判为空：[5]
+Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(assetName);bundle.Unload(true);Debug.Log(texture == null);                 // trueDebug.Log(ReferenceEquals(texture, null));  // false：托管引用仍存在
 
-取消语义
-强制抛 TaskCanceledException
-可抛异常也可静默返回
+这也是判断 Unity 对象时，== null 与普通 C# 引用判空可能不一致的原因。对象失效后，访问需要底层对象的成员可能报错，并不意味着每次访问都会导致程序崩溃。
+Unload(false)：卸载包，保留已加载资源Unload(false) 释放的是包自身的 Native 管理数据和相关读取资源。已加载纹理、Mesh、材质的 Native 对象与数据，以及它们对应的 GPU 资源仍然保留，可以继续使用。
+它不会直接回收 AssetBundle、Texture2D 等 C# 包装，也不会释放调用方传给 LoadFromMemory 的托管 byte[]。这些托管对象都需要在不再可达后，由 GC 回收。
+但这些资源也不再由原来的包实例管理。后续重新打开同一个包，不会自动把旧资源重新关联回来。
+5. 处理重复加载留下的副本下面这段代码就可能产生两个独立的纹理对象：
+AssetBundle bundleA = AssetBundle.LoadFromFile(path);Texture2D textureA = bundleA.LoadAsset&lt;Texture2D&gt;(assetName);bundleA.Unload(false);AssetBundle bundleB = AssetBundle.LoadFromFile(path);Texture2D textureB = bundleB.LoadAsset&lt;Texture2D&gt;(assetName);
 
+第一次卸载时，textureA 被保留下来。第二次加载时，Unity 不会因为磁盘上的资源路径相同，就自动复用这份旧对象，而是可能创建新的 textureB。[1]
+如果旧纹理仍被 UI、材质、静态字段或资源缓存引用，两份对象就会同时存在。继续反复执行这个流程，资源占用便可能逐轮增加。
+不过，重复副本不一定就是永久泄漏。能否回收，要看资源是否还有使用者，以及是否执行了合适的卸载操作：
 
-Fire-and-forget
-只能 async void（吞异常）
-UniTaskVoid + .Forget()，显式且安全
+对不再需要、且符合 API 限制的单个资源，可以使用 Resources.UnloadAsset。该接口不适用于 GameObject 或 Component。[6]
+清除相关引用后，可以在合适的时机调用 Resources.UnloadUnusedAssets()，清理 Unity 判断为未使用的资源。它有全局检查成本，通常安排在加载界面等能够接受开销的位置。
 
+重新加载包，再对新包调用 Unload(true)，并不能顺带销毁上一次 Unload(false) 留下的旧资源。
+6. 使用 UnloadUnusedAssets 做阶段性清理前面提到，Unload(false) 会留下已加载的资源。等使用者退出后，可以通过 Resources.UnloadUnusedAssets() 清理其中不再使用的部分。它也能处理其他加载路径留下的未使用资源，并不局限于 AB 包。
+这个接口清理的重点是未使用资源的 Native 对象及其数据，并让相应 GPU 资源进入释放流程。 它与 C# GC 是不同的回收机制：即使具体版本的执行过程中伴随托管 GC，也不能据此认为所有托管包装、数组和缓存容器都已回收。仍然可达的托管对象依然会保留。[8]
+“未使用”由谁判断这个接口不接收包名或资源列表。Unity 会检查 GameObject 层级、脚本组件及静态变量中的引用，判断哪些资源仍然可达。[7]
+从行为上，可以把这次清理理解成三个步骤：
 
-调试工具
-基本没有
-Tracker 窗口、栈追踪
+查找仍在使用的资源。 从上述引用入口出发，沿对象之间的引用关系，确定需要保留的资源。
+识别未使用资源。 将没有被这些引用关系保留的资源列入清理范围；它不是只检查刚关闭的界面或刚卸载的包。
+卸载资源。 销毁符合条件的 Native 资源对象、释放相关数据，并让对应 GPU 资源进入释放流程。
 
+这是便于理解的概括，并非对引擎内部具体算法和线程分工的保证。开销不仅来自最终释放了多少资源，也来自查找、遍历引用关系以及销毁对象的过程。 即使最后只回收少量内存，也可能已经付出了明显的检查成本。
+因此，界面关闭了，不代表界面用过的纹理就能回收。隐藏的 UI、对象池中的角色、静态字典里的资源缓存，都可能继续持有引用。调用这个接口不会替你清空这些缓存。
+还有一个细节：它不会像 C# GC 那样检查脚本执行栈。 仅被普通方法局部变量引用的资源，不能据此保证保留。需要跨越清理过程继续使用的资源，应由明确的持有者保存，例如存活组件的字段；协程局部变量可能被编译成状态机字段，也不宜一概当作普通栈变量理解。[7]
+各接口到底清理哪一层内存
 
-WebGL 兼容性
-SyncContext 行为微妙
-专门适配，行为一致
 
+操作
+Native 内存
+GPU 内存
+Managed 托管内存
 
-设计目标
-通用 .NET 异步（服务端为主）
-专为 Unity 主循环设计
 
 
-1.3 那 Task 是不是就完全不用了？不是。在以下场景仍然推荐用 Task：
+bundle.Unload(false)
+释放包自身的管理数据和读取资源；保留已加载资源的 Native 数据
+保留已加载资源的 GPU 数据
+不直接回收包装或输入数组；不再可达后由 GC 回收
 
-调用第三方库的 API，对方返回 Task（这种情况可以 await task.AsUniTask() 转成 UniTask 再继续）。
-真正需要跨线程并行的 CPU 密集计算（虽然 UniTask 也支持，但 Task + Parallel 在这块生态更完整）。
-编写跨平台 .NET 库，库本身不依赖 Unity。
 
-经验法则：写 Unity 游戏逻辑层（GamePlay、UI、剧情、加载流程）→ UniTask；写跨平台底层 &#x2F; 调用第三方 .NET 库 → Task，必要时用 AsUniTask() 桥接。
+bundle.Unload(true)
+释放包自身及属于它的已加载资源的 Native 数据
+对应资源进入释放流程
+不直接回收仍被持有的 C# 包装；不再可达后由 GC 回收
 
-2. UniTask的核心类型与基本用法2.1 UniTask 与 UniTask&lt;T&gt;// 无返回值的异步方法public async UniTask DoSomethingAsync()&#123;    await UniTask.Delay(1000); // 等待 1 秒    Debug.Log(&quot;完成&quot;);&#125;// 有返回值的异步方法public async UniTask&lt;int&gt; LoadDataAsync()&#123;    await UniTask.Delay(500);    return 42;&#125;// 调用方 awaitprivate async UniTask StartAsync()&#123;    await DoSomethingAsync();    int result = await LoadDataAsync();    Debug.Log(result); // 42&#125;
 
-2.2 快速创建已完成的任务// 已成功完成UniTask completed = UniTask.CompletedTask;UniTask&lt;int&gt; withValue = UniTask.FromResult(100);// 已取消UniTask canceled = UniTask.FromCanceled(cancellationToken);// 已失败UniTask faulted = UniTask.FromException(new Exception(&quot;出错了&quot;));
+Resources.UnloadAsset(asset)
+卸载指定资源的 Native 对象和数据，受资源类型限制
+对应资源进入释放流程
+不直接回收仍被持有的包装；不再可达后由 GC 回收
 
-2.3 Preserve — 允许多次 awaitUniTask 默认只能被 await 一次（类似消费一次的流）。若需多次 await 同一个任务，先调用 Preserve()：
-var task = SomeHeavyTask().Preserve();// 可以被多个地方同时 awaitawait task;await task; // 不会报错，复用结果
 
+Resources.UnloadUnusedAssets()
+清理 Unity 判断为未使用的资源的 Native 对象和数据
+被清理资源对应的 GPU 数据进入释放流程
+不能保证包装和业务对象立即回收；其托管内存仍取决于 GC 可达性及回收时机
 
-3. 时间与帧等待3.1 DelayType — 时间类型选择public enum DelayType&#123;    DeltaTime,          // 使用 Time.deltaTime（受 Time.timeScale 影响）    UnscaledDeltaTime,  // 使用 Time.unscaledDeltaTime（不受 timeScale 影响）    Realtime            // 使用 Stopwatch，真实物理时间&#125;
 
-3.2 Delay — 按时间等待// 等待 2 秒（受 timeScale 影响）await UniTask.Delay(2000);await UniTask.Delay(TimeSpan.FromSeconds(2));// 等待 2 秒（忽略 timeScale，等同于 UnscaledDeltaTime）await UniTask.Delay(2000, ignoreTimeScale: true);// 完整参数版本await UniTask.Delay(    TimeSpan.FromSeconds(2),    delayType: DelayType.Realtime,    delayTiming: PlayerLoopTiming.Update,    cancellationToken: this.GetCancellationTokenOnDestroy());// WaitForSeconds 等效（float 版）await UniTask.WaitForSeconds(2.5f);await UniTask.WaitForSeconds(2.5f, ignoreTimeScale: true);
+Object.Destroy(instance)
+按销毁规则释放指定实例及相关引擎对象；通常延迟执行，不会自动卸载共享纹理、材质等资源
+不会仅因销毁一个场景实例就释放其引用的共享资源
+C# 包装及脚本的托管部分在不再可达后由 GC 回收
 
-3.3 DelayFrame — 按帧等待// 等待 10 帧await UniTask.DelayFrame(10);// 指定在哪个 PlayerLoop 阶段计帧await UniTask.DelayFrame(10, PlayerLoopTiming.FixedUpdate);
 
-3.4 Yield — 让出当前帧// 让出到下一个 Update（最轻量）await UniTask.Yield();await UniTask.Yield(PlayerLoopTiming.PreLateUpdate);// 注意：Yield 在同一帧已过该时机时会在当前帧末尾执行// 若要保证一定在「下一帧」执行，用 NextFrameawait UniTask.NextFrame();await UniTask.NextFrame(PlayerLoopTiming.Update);
+GC.Collect()
+不直接卸载 Unity 资源的 Native 对象
+不直接释放
+触发托管 GC，回收符合条件的不可达对象
 
-3.5 WaitForFixedUpdate &#x2F; WaitForEndOfFrame// 等待到下一个 FixedUpdate 结束await UniTask.WaitForFixedUpdate();// 等待帧渲染结束（需要传入 MonoBehaviour，用于内部开启协程）await UniTask.WaitForEndOfFrame(this);// Unity 2023.1+ 可直接使用// await UniTask.WaitForEndOfFrame(cancellationToken);
 
+reference = null &#x2F; cache.Clear()
+不直接释放
+不直接释放
+解除引用；不立即回收对象，清空集合通常也保留其容量
 
-内部实现说明：WaitForFixedUpdate 等价于 UniTask.Yield(PlayerLoopTiming.LastFixedUpdate)。WaitForEndOfFrame 内部通过 StartCoroutine + WaitForEndOfFrame 协程实现，因此需要传入 MonoBehaviour。
 
+表中的 GPU 释放指生命周期上的释放请求，不保证调用返回时驱动已归还物理显存；没有 GPU 数据的资源自然不涉及这一列。上述卸载操作也不会删除磁盘上的 AB 文件或下载缓存。
+例如，LoadFromMemory(data) 使用的 data 是托管数组。卸载包负责释放 Unity 侧的包数据；调用方不再持有 data 后，数组才具备被 GC 回收的条件。这是两笔独立的内存，不能只调用一次 Unload 就认为全部清完。
+因此，清理通常分成两个责任：先按资源生命周期释放 Native 对象及相关 GPU 资源，再解除不需要的托管持有关系，让 GC 回收包装和业务对象。解除引用可以先做，但解除引用本身不等于已经释放 Native 或 GPU 数据。
+将清理安排在场景切换的 Loading 阶段UnloadUnusedAssets() 属于开销可能较大的集中清理操作，建议安排在场景切换的 Loading 界面中执行。 它虽然返回 AsyncOperation，但不意味着所有工作都在后台执行，也不保证每帧的耗时足够小。在正常游玩、镜头运动或 UI 动画期间调用，可能让主线程超过单帧预算，造成掉帧或明显卡顿。
+推荐顺序是：先显示 Loading 界面并让它至少完成一帧显示，再卸载旧场景或销毁旧实例、清除不需要的缓存引用，等待销毁完成后执行清理，最后继续新场景的加载流程。若新旧场景共享资源，应先确定需要保留的资源由常驻持有者引用，避免刚清理完又重新加载。
+Loading 界面用于承接这段等待，并不能消除清理成本；其中的转圈动画或进度条也可能短暂停顿。不要在每次 Release、关闭小弹窗或每隔几秒时调用，实际耗时应在目标设备上通过 Profiler 确认。
+下面保留界面退出的简化示例：假设包已通过 Unload(false) 卸载，调用前 Loading 界面已经显示，且负责执行协程的组件在清理期间保持存活。
+using System.Collections;using UnityEngine;public sealed class PanelResourceOwner : MonoBehaviour&#123;    private GameObject panelInstance;    private Texture2D cachedTexture;    public IEnumerator CloseAndCleanup()    &#123;        if (panelInstance != null)            Destroy(panelInstance);        panelInstance = null;        cachedTexture = null;        // 其他缓存、材质或组件若仍引用资源，也需要先解除持有。        // Destroy 延迟执行，留出时间让实例完成销毁。        yield return null;        // 在 Loading 阶段等待集中清理完成；异步接口仍可能产生耗时峰值。        yield return Resources.UnloadUnusedAssets();    &#125;&#125;
 
-4. PlayerLoopTiming — Unity 生命周期时序UniTask 将续体（continuation）注入 Unity 的 PlayerLoop，精确控制代码在哪个阶段恢复执行。
-Initialization         → LastInitializationEarlyUpdate            → LastEarlyUpdateFixedUpdate            → LastFixedUpdatePreUpdate              → LastPreUpdateUpdate          ★默认  → LastUpdatePreLateUpdate          → LastPreLateUpdatePostLateUpdate         → LastPostLateUpdateTimeUpdate (2020.2+)   → LastTimeUpdate
+示例中的 Destroy 负责结束界面实例的 Native 生命周期，字段设为 null 负责解除托管引用，UnloadUnusedAssets() 则清理已无使用者的资源 Native 数据及相关 GPU 资源。三步处理的是不同的对象或存储部分。
+这里没有紧接着调用 GC.Collect()。是否主动触发托管 GC，需要根据项目的托管分配和卡顿情况单独判断，并不是资源清理的固定步骤。
+清理完成后，再结束 Loading 阶段、恢复正常交互。是否在每次场景切换都执行，应结合内存峰值与目标设备耗时决定，避免没有回收收益的频繁扫描。
+7. 将持有关系落实到管理器工程上常见的做法，是统一管理包及其依赖，复用已打开的包，在确认没有使用者后调用 Unload(true)。
+下面只展示包层计数的基本逻辑：
+using System;using System.Collections.Generic;using UnityEngine;public sealed class BundleRefCounter&#123;    private sealed class Entry    &#123;        public AssetBundle Bundle;        public int RefCount;    &#125;    private readonly Dictionary&lt;string, Entry&gt; entries =        new Dictionary&lt;string, Entry&gt;();    // 在 Unity 主线程调用。bundleId 由调用方统一，避免路径别名。    public AssetBundle Acquire(string bundleId, string path)    &#123;        if (entries.TryGetValue(bundleId, out Entry entry))        &#123;            entry.RefCount++;            return entry.Bundle;        &#125;        AssetBundle bundle = AssetBundle.LoadFromFile(path);        if (bundle == null)            throw new InvalidOperationException($&quot;加载 AB 包失败：&#123;path&#125;&quot;);        entries.Add(bundleId, new Entry        &#123;            Bundle = bundle,            RefCount = 1        &#125;);        return bundle;    &#125;    public void Release(string bundleId)    &#123;        if (!entries.TryGetValue(bundleId, out Entry entry))            throw new InvalidOperationException($&quot;未持有 AB 包：&#123;bundleId&#125;&quot;);        entry.RefCount--;        if (entry.RefCount &gt; 0)            return;        entry.Bundle.Unload(true);        entries.Remove(bundleId);    &#125;&#125;
 
-对应 Unity 生命周期：
-Initialization    → 场景初始化阶段EarlyUpdate       → Input 处理前FixedUpdate       → 物理更新（FixedUpdate）PreUpdate         → Update 前Update            → MonoBehaviour.Update()PreLateUpdate     → LateUpdate 前PostLateUpdate    → LateUpdate 后（相机、渲染）
+这段代码本身并不知道场景里还有谁在使用纹理。计数是否可靠，取决于调用方是否遵守约定：一次 Acquire 所代表的持有期，必须覆盖相关资源的整个使用期。
+例如，加载 Prefab 并生成角色后，不能因为“加载结束了”就立即 Release。角色实例、对象池或缓存仍可能引用包里的共享资源，必须等这些使用者都退出后再归还持有权。调用 Destroy 的对象也可能要到帧末才真正销毁，释放顺序需要考虑这一点。
+实际管理器还需要处理几个问题：
 
-实际使用建议：
-// 大多数逻辑：默认 Update 即可await UniTask.Yield();// 物理相关逻辑await UniTask.Yield(PlayerLoopTiming.FixedUpdate);// 需要在所有 Update 完成后执行（如跟随相机）await UniTask.Yield(PlayerLoopTiming.PostLateUpdate);
+依赖包的持有关系。 依赖链沿用前文的加载流程；这里还需要让每个使用者持有相应依赖，直到使用结束，防止共享材质、Shader 或纹理被提前卸载。
+异步请求合并。 多个请求同时加载同一个包时，应共享进行中的任务；加载失败或取消时，要正确回滚计数。
+资源缓存与包状态一致。 缓存中的资源不能在所属包已经 Unload(true) 后继续被当作有效对象返回。
 
+引用计数不是唯一方案。生命周期边界清晰的项目，也可以在关卡退出后统一卸载该关卡独占的包。无论采用哪种方式，最终都需要能回答同一个问题：这个包里的资源，现在还有谁在用？
+四、结果验证：确认副本不再累积，使用中的资源仍有效管理策略调整后，需要验证的是资源生命周期是否符合预期，而不只是某一帧的进程内存数值。
+对于角色预览界面，可以在目标设备的 Player 中，记录打开前、打开后、关闭清理后的 Memory Profiler 快照，再重复若干次相同操作。
 
-5. 取消机制 (CancellationToken)5.1 GetCancellationTokenOnDestroy — 对象销毁自动取消这是 UniTask 与 Unity 对象生命周期结合最关键的 API：
-public class MyBehaviour : MonoBehaviour&#123;    async UniTask Start()    &#123;        // 当该 GameObject 被销毁时，自动取消        var token = this.GetCancellationTokenOnDestroy();        await UniTask.Delay(5000, cancellationToken: token);        // 如果 GameObject 提前销毁，上面会抛出 OperationCanceledException        Debug.Log(&quot;5秒后执行&quot;);    &#125;&#125;
 
 
-内部原理：GetCancellationTokenOnDestroy() 会自动向 GameObject 挂载一个 AsyncDestroyTrigger 组件。该组件在 OnDestroy() 时调用 CancellationTokenSource.Cancel()，从而取消所有持有该 token 的任务。
+验证场景
+应观察到的结果
 
-5.2 手动创建 CancellationTokenSourcepublic class MyBehaviour : MonoBehaviour&#123;    CancellationTokenSource _cts;    void Start()    &#123;        _cts = new CancellationTokenSource();        DoLoopAsync(_cts.Token).Forget();    &#125;    // 手动取消（如按下按钮）    public void StopTask()    &#123;        _cts.Cancel();        _cts.Dispose();    &#125;    async UniTaskVoid DoLoopAsync(CancellationToken token)    &#123;        while (!token.IsCancellationRequested)        &#123;            Debug.Log(&quot;循环中...&quot;);            await UniTask.Delay(1000, cancellationToken: token);        &#125;    &#125;    void OnDestroy()    &#123;        _cts?.Cancel();        _cts?.Dispose();    &#125;&#125;
 
-5.3 链接多个 Token// 任意一个取消，整体取消var cts = CancellationTokenSource.CreateLinkedTokenSource(    this.GetCancellationTokenOnDestroy(),    manualCts.Token);var linkedToken = cts.Token;
 
-5.4 SuppressCancellationThrow — 不抛出异常// 普通写法：取消时会抛 OperationCanceledExceptiontry&#123;    await UniTask.Delay(1000, cancellationToken: token);&#125;catch (OperationCanceledException)&#123;    Debug.Log(&quot;已取消&quot;);&#125;// 使用 SuppressCancellationThrow：返回 bool 而非抛异常bool isCanceled = await UniTask.Delay(1000, cancellationToken: token)    .SuppressCancellationThrow();if (isCanceled)&#123;    Debug.Log(&quot;已取消，不抛异常&quot;);    return;&#125;
+同时存在多个使用者
+释放其中一个后，其余对象仍能正常显示，共享资源保持有效
 
-5.5 WaitUntilCanceled — 等待直到 Token 被取消// 挂起直到 token 被取消await token.WaitUntilCanceled();Debug.Log(&quot;Token 已被取消，继续执行&quot;);// 等价写法（UniTask 静态方法）await UniTask.WaitUntilCanceled(token);
 
-5.6 cancelImmediately 参数默认情况下，取消检测发生在 PlayerLoop 的下一次循环（即下一帧或下一个时机）。若需要立即响应取消，使用 cancelImmediately: true：
-// 立即响应取消，而非等到下一帧await UniTask.Delay(5000, cancellationToken: token, cancelImmediately: true);
+最后一个使用者退出
+确认销毁完成、缓存清除后，相关资源能够按策略卸载
 
 
-注意：cancelImmediately: true 会向 CancellationToken 注册回调，有轻微额外开销，仅在需要即时响应时使用。
+反复打开和关闭界面
+同名纹理、Mesh、材质的实例数不持续逐轮增加；允许策略明确的缓存保留
 
 
-6. Unity 对象操作6.1 AsyncOperation 异步加载// 场景加载var op = UnityEngine.SceneManagement.SceneManager.LoadSceneAsync(&quot;GameScene&quot;);await op;// 带进度回调await op.ToUniTask(    progress: Progress.Create&lt;float&gt;(p =&gt; Debug.Log($&quot;加载进度: &#123;p:P0&#125;&quot;)),    cancellationToken: this.GetCancellationTokenOnDestroy());// 带取消await op.WithCancellation(this.GetCancellationTokenOnDestroy());
+执行 UnloadUnusedAssets()
+未使用资源得到清理，仍被有效使用者持有的资源保留
 
-6.2 资源加载 (Resources.LoadAsync)// 加载资源var resourceRequest = Resources.LoadAsync&lt;Texture2D&gt;(&quot;MyTexture&quot;);await resourceRequest;var texture = resourceRequest.asset as Texture2D;// 带进度和取消var req = Resources.LoadAsync&lt;AudioClip&gt;(&quot;BGM&quot;);var clip = await req.ToUniTask(    progress: Progress.Create&lt;float&gt;(p =&gt; progressBar.value = p),    cancellationToken: token) as AudioClip;
 
-6.3 UnityWebRequest 网络请求using UnityEngine.Networking;// GET 请求var request = UnityWebRequest.Get(&quot;https://api.example.com/data&quot;);await request.SendWebRequest().WithCancellation(token);if (request.result == UnityWebRequest.Result.Success)&#123;    Debug.Log(request.downloadHandler.text);&#125;// 带错误处理try&#123;    var req = UnityWebRequest.Get(&quot;https://api.example.com/data&quot;);    await req.SendWebRequest().WithCancellation(token);    Debug.Log(req.downloadHandler.text);&#125;catch (UnityWebRequestException e)&#123;    Debug.LogError($&quot;请求失败: &#123;e.Error&#125;&quot;);&#125;
+主包释放、其他对象仍使用依赖包
+共享依赖保持有效，直到最后一个持有者退出
 
-6.4 AssetBundle 加载// 加载 AssetBundlevar bundleReq = AssetBundle.LoadFromFileAsync(&quot;path/to/bundle&quot;);var bundle = await bundleReq;// 从 Bundle 加载资源var assetReq = bundle.LoadAssetAsync&lt;GameObject&gt;(&quot;Prefab&quot;);var prefab = await assetReq as GameObject;// 带进度var bundle2 = await AssetBundle.LoadFromFileAsync(&quot;path/to/bundle&quot;)    .ToUniTask(Progress.Create&lt;float&gt;(p =&gt; Debug.Log($&quot;&#123;p:P&#125;&quot;)));
 
-6.5 AsyncInstantiate（Unity 2022.2+）// 异步实例化，避免主线程卡顿var instance = await Object.InstantiateAsync(prefab, parent);
+这里列出的是验证标准，并非项目实测数据。具体节省多少内存、清理耗时多长，需要结合资源规模、Unity 版本与目标设备测量。
+验证时也应分开看 Native 资源数量与占用、Managed 包装及业务容器的占用，以及图形内存。Native 资源已释放但包装仍被静态集合引用，和包装已经回收但共享资源仍在使用，是两种不同情况。
+如果资源实例数仍然上涨，优先检查重复加载与旧缓存；如果资源无法回收，检查对象池、静态字段和存活组件的引用。如果对象数量已经恢复，而进程内存没有立即下降，再分析 Unity 分配器保留内存、尚未回收的托管包装，以及 GPU 侧延迟释放等因素。
+回到最初的预览界面：打开包、加载 Prefab、创建角色、销毁角色、卸载资源，是需要衔接的几个步骤。明确每一步的持有者和结束条件，才能同时避免提前卸载与重复副本。Unload(true)、Unload(false) 和 UnloadUnusedAssets() 也就各自有了明确的使用位置。
+参考资料
+前文：Unity-AssetBundle结构解析
 
-6.6 MonoBehaviour.StartAsyncCoroutine// 将 CancellationToken 自动绑定到组件生命周期await monoBehaviour.StartAsyncCoroutine(async (token) =&gt;&#123;    await UniTask.Delay(1000, cancellationToken: token);    // 做一些事&#125;);
+以下链接以 Unity 2022.3 文档为主。不同版本和平台的底层实现可能有所变化，具体占用与耗时应以目标设备实测为准。
 
+Using AssetBundles Natively
 
-7. Unity 生命周期异步触发器 (AsyncTrigger)UniTask 提供了一套 AsyncTrigger 系统，将 MonoBehaviour 的各类消息事件（FixedUpdate、OnCollisionEnter 等）转换为可 await 的异步流。
-7.1 获取 Trigger所有 Trigger 都通过扩展方法从 GameObject 或 Component 获取：
-// 在组件上首次调用时，会自动向 GameObject 添加对应 Trigger 组件var fixedUpdateTrigger = this.GetAsyncFixedUpdateTrigger();var updateTrigger      = this.GetAsyncUpdateTrigger();var lateUpdateTrigger  = this.GetAsyncLateUpdateTrigger();
+Loading texture and mesh data
 
-7.2 一次性等待（await 单次触发）async UniTask Start()&#123;    var token = this.GetCancellationTokenOnDestroy();    // 等待下一次 FixedUpdate    await this.GetAsyncFixedUpdateTrigger().FixedUpdateAsync(token);    Debug.Log(&quot;FixedUpdate 触发了&quot;);    // 等待 OnTriggerEnter    var collider = await this.GetAsyncOnTriggerEnterTrigger().OnTriggerEnterAsync(token);    Debug.Log($&quot;碰到了: &#123;collider.name&#125;&quot;);    // 等待 OnCollisionEnter    var collision = await this.GetAsyncOnCollisionEnterTrigger().OnCollisionEnterAsync(token);    Debug.Log($&quot;碰撞: &#123;collision.gameObject.name&#125;&quot;);&#125;
+Texture.isReadable
 
-7.3 持续监听（async foreach 异步流）async UniTask MonitorUpdates()&#123;    var token = this.GetCancellationTokenOnDestroy();    // 异步 foreach：每次 LateUpdate 都执行一次循环体    await foreach (var _ in this.GetAsyncLateUpdateTrigger()        .WithCancellation(token))    &#123;        // 相当于在 LateUpdate 里写逻辑        UpdateCamera();    &#125;&#125;
+AssetBundle.Unload
 
-7.4 常用 Trigger 列表
+UnityEngine.Object.operator &#x3D;&#x3D;
 
+Resources.UnloadAsset
 
-Trigger 获取方法
-对应 Unity 消息
+Resources.UnloadUnusedAssets
 
+Managed memory：GC 与 Native 资源回收的区别
 
+AssetBundle.LoadFromFile
 
-GetAsyncUpdateTrigger()
-Update
+AssetBundle.LoadFromMemory
 
+AssetBundle.LoadFromStream
 
-GetAsyncFixedUpdateTrigger()
-FixedUpdate
-
-
-GetAsyncLateUpdateTrigger()
-LateUpdate
-
-
-GetAsyncOnTriggerEnterTrigger()
-OnTriggerEnter
-
-
-GetAsyncOnTriggerExitTrigger()
-OnTriggerExit
-
-
-GetAsyncOnCollisionEnterTrigger()
-OnCollisionEnter
-
-
-GetAsyncOnCollisionExitTrigger()
-OnCollisionExit
-
-
-GetAsyncOnMouseDownTrigger()
-OnMouseDown
-
-
-GetAsyncOnEnableTrigger()
-OnEnable
-
-
-GetAsyncOnDisableTrigger()
-OnDisable
-
-
-GetAsyncDestroyTrigger()
-OnDestroy
-
-
-GetAsyncAnimatorIKTrigger()
-OnAnimatorIK
-
-
-GetAsyncOnBecameVisibleTrigger()
-OnBecameVisible
-
-
-GetAsyncOnBecameInvisibleTrigger()
-OnBecameInvisible
-
-
-7.5 OnDestroyAsync — 等待对象销毁// 等待某个其他对象被销毁await enemy.GetAsyncDestroyTrigger().OnDestroyAsync();Debug.Log(&quot;敌人已被销毁&quot;);// 获取绑定到自身生命周期的 CancellationTokenvar token = this.GetAsyncDestroyTrigger().CancellationToken;// 等效于var token2 = this.GetCancellationTokenOnDestroy();
-
-
-8. 条件等待8.1 WaitUntil — 等待条件为 truebool isReady = false;// 等待 isReady 变为 true（每帧检测）await UniTask.WaitUntil(() =&gt; isReady);// 带取消await UniTask.WaitUntil(() =&gt; isReady,     cancellationToken: this.GetCancellationTokenOnDestroy());// 指定检测时机await UniTask.WaitUntil(() =&gt; isReady, PlayerLoopTiming.FixedUpdate);
-
-8.2 WaitWhile — 等待条件为 false// 等待 isLoading 变为 falseawait UniTask.WaitWhile(() =&gt; isLoading);
-
-8.3 WaitUntilValueChanged — 等待值变化// 等待 transform.position 发生变化，返回新值var newPos = await UniTask.WaitUntilValueChanged(    transform,     t =&gt; t.position,    cancellationToken: token);Debug.Log($&quot;位置变化为: &#123;newPos&#125;&quot;);// 等待组件属性变化var newHp = await UniTask.WaitUntilValueChanged(    enemy,     e =&gt; e.HP,    cancellationToken: token);
-
-
-注意：对于 Unity 对象（继承自 UnityEngine.Object），WaitUntilValueChanged 内部会额外处理对象被销毁的情况（避免访问已销毁对象）。
-
-8.4 WaitUntilCanceled — 等待取消// 持续运行直到被取消await UniTask.WaitUntilCanceled(token);// token 被取消后继续执行（不抛异常）
-
-
-9. 并发控制 WhenAll &#x2F; WhenAny9.1 WhenAll — 等待所有任务完成// 并行执行多个任务，全部完成后继续await UniTask.WhenAll(    LoadSceneAsync(),    LoadAudioAsync(),    LoadConfigAsync());// 收集返回值（所有任务返回同类型）int[] results = await UniTask.WhenAll(    FetchScoreAsync(userId1),    FetchScoreAsync(userId2),    FetchScoreAsync(userId3));// 不同类型返回值（使用元组，最多支持 15 个）var (texture, clip, config) = await UniTask.WhenAll(    LoadTextureAsync(),   // UniTask&lt;Texture2D&gt;    LoadAudioAsync(),     // UniTask&lt;AudioClip&gt;    LoadConfigAsync()     // UniTask&lt;Config&gt;);
-
-9.2 WhenAny — 等待任意一个任务完成// 返回率先完成的任务索引int winIndex = await UniTask.WhenAny(    Task1Async(),    Task2Async(),    Task3Async());Debug.Log($&quot;第 &#123;winIndex&#125; 个任务率先完成&quot;);// 与超时结合——实现&quot;超时或完成&quot;逻辑var (hasResult, result) = await UniTask.WhenAny(    LoadDataAsync(),                       // 正常加载    UniTask.Delay(5000).AsAsyncUnitUniTask() // 5秒超时                                           // 注：实际超时推荐用 TimeoutController);if (!hasResult)&#123;    Debug.Log(&quot;加载超时&quot;);&#125;
-
-
-10. 线程切换UniTask 提供了简洁的线程切换 API，用于在 Unity 主线程和后台线程之间切换。
-10.1 SwitchToThreadPool — 切换到后台线程async UniTask HeavyComputeAsync()&#123;    Debug.Log(&quot;开始（主线程）&quot;);    // 切换到线程池（后台线程）    await UniTask.SwitchToThreadPool();    // 以下代码在后台线程执行，不会阻塞主线程    var result = DoHeavyCompute();    // 切换回主线程（Update 时机）    await UniTask.SwitchToMainThread();    // 以下代码在主线程执行，可安全访问 Unity API    Debug.Log($&quot;计算结果: &#123;result&#125;&quot;);    someText.text = result.ToString();&#125;
-
-10.2 RunOnThreadPool — 封装后台任务// 在后台线程执行，完成后自动返回主线程（configureAwait=true 默认行为）await UniTask.RunOnThreadPool(() =&gt;&#123;    // 这里是后台线程    Thread.Sleep(2000); // 模拟耗时&#125;);// 这里已回到主线程// 不自动返回主线程await UniTask.RunOnThreadPool(() =&gt; HeavyWork(), configureAwait: false);
-
-10.3 ReturnToMainThread — using 作用域自动还原async UniTask ProcessAsync()&#123;    // using 结束时自动返回主线程    await using (UniTask.ReturnToMainThread())    &#123;        await UniTask.SwitchToThreadPool();        // 后台线程处理        var data = ProcessData();    &#125;    // 已返回主线程    UpdateUI(data);&#125;
-
-
-11. UniTaskCompletionSource 手动控制任务类似 TaskCompletionSource&lt;T&gt;，用于将回调式 API 转换为可 await 的任务。
-11.1 基本用法// 无返回值版本var tcs = new UniTaskCompletionSource();// 某处完成tcs.TrySetResult();// 某处失败tcs.TrySetException(new Exception(&quot;失败&quot;));// 某处取消tcs.TrySetCanceled();// 等待await tcs.Task;// 有返回值版本var tcs2 = new UniTaskCompletionSource&lt;string&gt;();tcs2.TrySetResult(&quot;Hello&quot;);string result = await tcs2.Task;
-
-11.2 封装回调 API// 将 Unity 事件回调转为可 await 的 UniTaskpublic static UniTask&lt;PointerEventData&gt; WaitForClickAsync(Button button, CancellationToken token)&#123;    var tcs = new UniTaskCompletionSource&lt;PointerEventData&gt;();    button.onClick.AddListener(() =&gt;    &#123;        tcs.TrySetResult(null);    &#125;);    token.RegisterWithoutCaptureExecutionContext(() =&gt;    &#123;        tcs.TrySetCanceled(token);    &#125;);    return tcs.Task;&#125;// 使用await WaitForClickAsync(myButton, this.GetCancellationTokenOnDestroy());Debug.Log(&quot;按钮被点击&quot;);
-
-11.3 AutoResetUniTaskCompletionSource适用于需要重复使用（Reset）的场景，内部会自动入池：
-// 每次使用后自动重置，可重用var source = AutoResetUniTaskCompletionSource.Create();source.TrySetResult();await source.Task;// source 自动回池，下次 Create 可能返回同一对象
-
-
-12. 错误处理与 Forget12.1 标准 try-catchasync UniTask LoadAsync(CancellationToken token)&#123;    try    &#123;        await UniTask.Delay(1000, cancellationToken: token);        await LoadDataAsync();    &#125;    catch (OperationCanceledException)    &#123;        // 被取消，通常静默处理        Debug.Log(&quot;加载被取消&quot;);    &#125;    catch (Exception e)    &#123;        Debug.LogError($&quot;加载失败: &#123;e&#125;&quot;);    &#125;&#125;
-
-12.2 Forget — 即发即弃且屏蔽警告直接调用返回 UniTask 的方法而不 await，编译器会警告。使用 .Forget() 明确表示这是有意的：
-// ❌ 有编译器警告DoSomethingAsync();// ✅ 明确忽略结果DoSomethingAsync().Forget();// ✅ 带错误处理的 ForgetDoSomethingAsync().Forget(ex =&gt; Debug.LogException(ex));
-
-12.3 UniTask.Never — 永不完成的任务// 创建一个永远不完成的任务（除非 token 取消）await UniTask.Never(token);// 只有 token 被取消时才会抛 OperationCanceledException
-
-
-13. UniTaskVoid — 即发即弃在 C# 里，被 async 修饰的方法签名只能返回 Task &#x2F; Task&lt;T&gt; &#x2F; void（或自定义 awaitable，比如 UniTask &#x2F; UniTaskVoid）。当你不打算 await 这个方法——即”即发即弃 (fire-and-forget)”——就需要在 async void 和 async UniTaskVoid 之间做选择。两者看起来很像，差异很大。
-13.1 async void 在 Unity 里到底有什么问题async void 是 C# 语言为”事件处理器”开的口子（典型场景是 WinForms 的 Button_Click），它不是为普通业务代码设计的。具体毛病有四类：
-(1) 异常会逃出调用栈，没人能 catch
-async Task 抛出的异常会被打包到返回的 Task 上，await 方或 Task.Exception 可以拿到；async void 没有 Task 对象，异常会被原样抛到当前的 SynchronizationContext——在 Unity 里通常表现为：要么 Console 里冒一条难以定位的红色 Error，要么直接干扰主循环。
-async void Bad()&#123;    await UniTask.Delay(100);    throw new Exception(&quot;boom&quot;);  // 无法被外层 try/catch 捕获&#125;try &#123; Bad(); &#125;catch &#123; /* 永远进不来 */ &#125;
-
-第一次 await 之后，控制权已经还给调用方了，try 块早已退出，异常发生时根本不在这个栈上。
-(2) 堆分配多
-async void &#x2F; async Task 默认使用 .NET 的 AsyncVoidMethodBuilder &#x2F; AsyncTaskMethodBuilder，每次调用都会分配状态机盒子、Task 对象、MoveNextRunner 等。按钮、Update 之类的高频路径里跑一堆 async void，GC 压力很显眼。UniTaskVoid 走的是 UniTask 自家的 AsyncUniTaskVoidMethodBuilder，同步完成路径零分配，异步路径上也通过对象池显著少于 Task。
-(3) 无法被等待、无法被组合
-async void 返回 void，调用方什么句柄都拿不到：
-
-不能再补一个 await 等它完成；
-不能塞进 WhenAll &#x2F; WhenAny；
-不能链式接 ContinueWith。
-
-UniTaskVoid 也不是为 await 设计的（它的存在意义就是即发即弃），但 UniTask 强制要求你在调用处加 .Forget()，让”我知道我不等它”这件事变成显式的代码意图，而不是一个看上去像普通函数调用的隐式语义。
-(4) 它无视 UniTask 的 PlayerLoop 调度
-UniTask 的核心优势是把异步续体（continuation）直接挂到 Unity 的 PlayerLoop 上跑，时序可控、不会切线程。但 async void 用的是默认 builder，续体走的是 SynchronizationContext.Post——在 Unity 里这条路径会绕一圈 UnitySynchronizationContext，时序不如 UniTask 精确，且 WebGL 上行为偶有差异。
-13.2 UniTaskVoid 怎么解决这些问题把上面四点逐一对回去：
-
-
-
-维度
-async void
-async UniTaskVoid
-
-
-
-异常去向
-抛到 SynchronizationContext，外层 catch 不住
-由 UniTask 的全局未处理异常钩子接管 (UniTaskScheduler.UnobservedTaskException)
-
-
-堆分配
-每次调用都有
-同步完成路径零分配；异步路径用对象池
-
-
-调用语义
-看起来像普通方法调用，意图不明确
-必须 .Forget()，意图显式
-
-
-调度
-走 SynchronizationContext
-走 UniTask 的 PlayerLoop
-
-
-可被 Tracker 观测
-否
-是（Window → UniTask Tracker 能看到）
-
-
-要点：UniTaskVoid 不是”能被等待的 void”，它仍然是即发即弃，只是把”丢出去之后会怎样”这件事做得更安全、更可观测了。
-13.3 标准用法// 1) 声明为 UniTaskVoid（注意没有 &lt;T&gt;，本来就不返回值）async UniTaskVoid FireAndForgetAsync()&#123;    await UniTask.Delay(1000);    Debug.Log(&quot;执行完毕（没有人等我）&quot;);&#125;// 2) 调用处必须 .Forget()，否则编译器会给 CS4014 警告FireAndForgetAsync().Forget();// 3) 也可以传一个异常处理回调进 Forget，避免靠全局钩子兜底FireAndForgetAsync().Forget(ex =&gt; Debug.LogError($&quot;failed: &#123;ex&#125;&quot;));// 4) 匿名 lambda 场景用 UniTask.VoidUniTask.Void(async () =&gt;&#123;    await UniTask.Delay(500);    Debug.Log(&quot;匿名即发即弃&quot;);&#125;);
-
-13.4 该用 UniTask 还是 UniTaskVoid：决策表
-
-
-你的场景
-推荐返回类型
-
-
-
-方法会被 await，调用方关心完成时机
-UniTask &#x2F; UniTask&lt;T&gt;
-
-
-调用方完全不关心结果、不需要等待（按钮回调、定时触发、日志上报）
-UniTaskVoid
-
-
-实现接口&#x2F;重写基类，签名要求 void（如 IPointerClickHandler.OnPointerClick）
-方法体里 UniTask.Void(async () =&gt; &#123; ... &#125;)
-
-
-需要把异常打包给上层
-绝对用 UniTask，绝不用 UniTaskVoid
-
-
-一条经验法则：只要你自己写的方法，永远不要返回 async void。async void 唯一合理的使用场景是你被迫去实现一个签名为 void 的回调（比如某些第三方库的事件签名），即便如此，更推荐在里面包一层 UniTask.Void。
-13.5 配合 UnityAction（UI 按钮等）// ❌ 不推荐：async void 吞异常 + 堆分配 + 调度走 SyncContextbutton.onClick.AddListener(async () =&gt; &#123; await DoThingAsync(); &#125;);// ✅ 推荐：UniTask.UnityAction 内部用 UniTaskVoid 包装button.onClick.AddListener(UniTask.UnityAction(async () =&gt;&#123;    await UniTask.Delay(500);    DoThing();&#125;));// 带 CancellationToken，组件销毁时自动取消button.onClick.AddListener(    UniTask.UnityAction(async token =&gt;    &#123;        await UniTask.Delay(500, cancellationToken: token);    &#125;,    this.GetCancellationTokenOnDestroy()));
-
-13.6 一个容易踩的坑：UniTaskVoid 不能被 awaitasync UniTaskVoid FooAsync() &#123; /* ... */ &#125;// ❌ 编译错误：UniTaskVoid 没有 GetAwaiterawait FooAsync();// 如果你后悔了想等它，把签名改回 UniTask 才是正解
-
-如果你发现自己反复想 await 一个 UniTaskVoid，那说明它本来就不该是 UniTaskVoid——改成 UniTask。
-
-14. TimeoutController 超时控制TimeoutController 可复用的超时控制器，避免每次超时都 new 一个 CancellationTokenSource。
-public class MyBehaviour : MonoBehaviour&#123;    // 声明为字段，可以复用    TimeoutController _timeoutController = new TimeoutController();        // 也可以与外部 CancellationToken 联动    // TimeoutController _timeoutController;        async UniTask Start()    &#123;        var destroyToken = this.GetCancellationTokenOnDestroy();        var timeoutController = new TimeoutController(            new CancellationTokenSource() // 外部 token 也可以，但这里用新的        );                try        &#123;            // 给出 3 秒超时的 token            var timeoutToken = _timeoutController.Timeout(TimeSpan.FromSeconds(3));                        // 使用此 token 执行操作            await LoadDataAsync(timeoutToken);        &#125;        catch (OperationCanceledException)        &#123;            if (_timeoutController.IsTimeout())            &#123;                Debug.Log(&quot;加载超时！&quot;);            &#125;        &#125;        finally        &#123;            // 重置超时控制器（如果没有超时，可以复用）            _timeoutController.Reset();        &#125;    &#125;    void OnDestroy()    &#123;        _timeoutController.Dispose();    &#125;&#125;
-
-
-15. AsyncLazy 懒加载异步用于只需要初始化一次的异步资源，多次调用只执行一次实际工作：
-// 定义懒加载AsyncLazy&lt;Config&gt; _lazyConfig = UniTask.Lazy(async () =&gt;&#123;    await UniTask.Delay(100); // 模拟加载    return new Config &#123; Version = &quot;1.0&quot; &#125;;&#125;);// 多次调用只执行一次加载async UniTask UseConfigAsync()&#123;    var config = await _lazyConfig; // 第一次：实际加载    var config2 = await _lazyConfig; // 第二次：直接返回缓存结果&#125;
-
-
-16. UniTask Tracker 调试工具UniTask 内置了任务追踪窗口，可以在 Editor 中查看所有正在运行的 UniTask：
-
-菜单：Window → UniTask Tracker
-可以看到所有活跃的 UniTask 及其调用栈
-可以检测是否有泄漏的（永不完成的）任务
-
-// 在代码中启用追踪（默认 Debug 模式下开启）#if UNITY_EDITORTaskTracker.EnableTracking = true;TaskTracker.EnableStackTrace = true;#endif
-
-
-17. 最佳实践与常见陷阱✅ 推荐做法1. 始终传递 CancellationToken// ❌ 错误：没有取消支持，GameObject 销毁后可能崩溃async UniTask BadExample()&#123;    await UniTask.Delay(5000);    transform.position = Vector3.zero; // GameObject 可能已销毁！&#125;// ✅ 正确：绑定到对象生命周期async UniTask GoodExample()&#123;    var token = this.GetCancellationTokenOnDestroy();    await UniTask.Delay(5000, cancellationToken: token);    transform.position = Vector3.zero; // 安全，因为 GameObject 仍存活&#125;
-
-2. 异步方法命名加 Async 后缀public async UniTask LoadDataAsync() &#123; &#125;    // ✅public async UniTask LoadData() &#123; &#125;          // ❌
-
-3. 合理使用 WhenAll 并行化// ❌ 串行：耗时 = A + B + Cawait LoadAAsync();await LoadBAsync();await LoadCAsync();// ✅ 并行：耗时 = max(A, B, C)await UniTask.WhenAll(LoadAAsync(), LoadBAsync(), LoadCAsync());
-
-4. Start() 返回 UniTask 代替协程// ❌ 旧协程写法IEnumerator Start()&#123;    yield return new WaitForSeconds(1f);    Debug.Log(&quot;完成&quot;);&#125;// ✅ UniTask 写法，更简洁、可取消async UniTask Start()&#123;    await UniTask.Delay(1000, cancellationToken: this.GetCancellationTokenOnDestroy());    Debug.Log(&quot;完成&quot;);&#125;
-
-⚠️ 常见陷阱陷阱 1：Yield 并非总是下一帧// ⚠️ Yield 在同一帧、同一 PlayerLoop 时机触发时，//    可能在当前帧末尾立即继续，而非严格等到&quot;下一帧&quot;await UniTask.Yield();// ✅ 明确等到下一帧await UniTask.NextFrame();
-
-陷阱 2：WaitForEndOfFrame 需要 MonoBehaviour// ❌ Unity 2023 之前这样写不安全（行为不一致）await UniTask.WaitForEndOfFrame();// ✅ 传入 MonoBehaviourawait UniTask.WaitForEndOfFrame(this);
-
-陷阱 3：UniTask 只能 await 一次var task = SomeAsync();await task;   // ✅ 第一次 OKawait task;   // ❌ 可能引发异常或未定义行为// ✅ 需要多次 await 时使用 Preservevar shared = SomeAsync().Preserve();await shared;await shared; // ✅ 安全
-
-陷阱 4：忘记处理 OperationCanceledException// ❌ 取消异常会变成未处理异常，出现报错async UniTask RunAsync()&#123;    await UniTask.Delay(1000, cancellationToken: token);    // 如果被取消，异常往上传播，若无人处理会打印错误&#125;// ✅ 在入口处处理async UniTask RunAsync()&#123;    try    &#123;        await UniTask.Delay(1000, cancellationToken: token);    &#125;    catch (OperationCanceledException)    &#123;        // 正常取消，不报错    &#125;&#125;// 或者调用时 catchRunAsync().Forget(ex =&gt;&#123;    if (ex is not OperationCanceledException)        Debug.LogException(ex);&#125;);
-
-陷阱 5：在非主线程访问 Unity API// ❌ 在线程池线程访问 Unity API 会抛异常await UniTask.SwitchToThreadPool();var pos = transform.position; // ❌ 危险！// ✅ 切回主线程再访问await UniTask.SwitchToThreadPool();var data = HeavyCompute(); // ✅ 纯 C# 运算await UniTask.SwitchToMainThread();transform.position = data; // ✅ 主线程安全
-
-
-快速参考表
-
-
-API
-说明
-
-
-
-UniTask.Delay(ms)
-按毫秒等待
-
-
-UniTask.DelayFrame(n)
-按帧等待
-
-
-UniTask.Yield()
-让出到当前时机的下一次触发
-
-
-UniTask.NextFrame()
-等待到严格的下一帧
-
-
-UniTask.WaitForFixedUpdate()
-等待下一个 FixedUpdate
-
-
-UniTask.WaitForEndOfFrame(mono)
-等待帧结束
-
-
-UniTask.WaitUntil(() =&gt; cond)
-等待条件成立
-
-
-UniTask.WaitWhile(() =&gt; cond)
-等待条件不再成立
-
-
-UniTask.WaitUntilValueChanged(target, t =&gt; t.Value)
-等待值变化
-
-
-UniTask.WhenAll(tasks)
-等待所有任务
-
-
-UniTask.WhenAny(tasks)
-等待任意任务完成
-
-
-UniTask.SwitchToMainThread()
-切换到主线程
-
-
-UniTask.SwitchToThreadPool()
-切换到后台线程
-
-
-UniTask.RunOnThreadPool(action)
-在后台线程运行并返回主线程
-
-
-this.GetCancellationTokenOnDestroy()
-获取绑定对象生命周期的 Token
-
-
-task.Forget()
-即发即弃，抑制警告
-
-
-task.SuppressCancellationThrow()
-取消时返回 bool 而非抛异常
-
-
-task.Preserve()
-允许多次 await
-
-
-UniTaskCompletionSource
-手动控制任务完成
-
-
-TimeoutController
-可复用的超时控制
-
-
-UniTask.Lazy(factory)
-懒加载异步
-
-
-GetAsyncDestroyTrigger()
-等待对象销毁
-
-
-GetAsyncUpdateTrigger()
-订阅 Update 事件流
-
-
-GetAsyncOnTriggerEnterTrigger()
-异步等待触发器进入
+UnityWebRequestAssetBundle.GetAssetBundle
 
 
 ]]></content>
+      <tags>
+        <tag>Unity-AssetsBundle</tag>
+      </tags>
   </entry>
   <entry>
     <title>Unity-AssetBundle结构解析</title>
@@ -2208,278 +2729,6 @@ UIParticle 解决层级问题的关键，是将粒子生成的几何转换为 UI
       </tags>
   </entry>
   <entry>
-    <title>Unity-AssetBundle加载与卸载</title>
-    <url>/posts/38e927b7.html</url>
-    <content><![CDATA[AssetBundle 的加载与卸载：从内存增长到生命周期管理上一篇《Unity-AssetBundle结构解析》已经介绍了 UnityFS 容器、SerializedFile、清单与跨包引用，以及压缩方式对读取行为的影响。本文接着讨论资源进入内存以后的事情：C# 引用、引擎对象和 GPU 数据各由谁持有，界面关闭后又该如何释放。
-下面以反复打开、关闭角色预览界面为例，按照问题背景、管理目标、处理过程和结果验证的顺序，梳理加载与卸载之间的关系。
-一、问题背景：界面关了，资源为什么还在角色预览界面的逻辑很直观：打开时加载角色包，读取 Prefab 并创建实例；关闭时销毁角色，再卸载 AB 包。
-但只要卸载时机或资源归属处理不当，就可能出现两种现象：使用 Unload(false) 后，角色还能正常显示，但反复开关界面，内存中逐渐出现多份相同纹理；改为 Unload(true) 后，资源被释放了，仍在使用这些资源的角色却丢失了 Mesh 或材质。
-这两个现象指向同一个问题：界面实例、AB 包和资源对象，并不共享同一个生命周期。 销毁实例，不等于已经释放它用过的全部资源；卸载包，也不一定会销毁此前加载的对象。
-二、管理目标：明确谁在使用，什么时候能释放这个场景需要解决的，不只是让内存下降，还包括保证资源在使用期间有效，以及避免下次打开界面时无意间再加载一份。
-具体可以归纳为三个目标：
-
-使用期间保持有效。 界面实例、对象池或其他系统仍在引用资源时，不能提前销毁资源。
-重复进入时可复用。 同一份逻辑资源仍然存活时，应有明确的复用或释放策略。
-退出后能够验证。 能够确认引用已经解除、对象得到回收，而不只是观察进程内存有没有立刻下降。
-
-要做到这些，需要先分清各个 API 实际处理的是哪一部分。
-三、处理过程：把加载、使用和回收串起来1. 先确定内存在哪里以本地 AB 包为例，加载过程及各部分的关系如下：
-
-    flowchart TD
-    D[&quot;磁盘：AB 文件&quot;]
-    B[&quot;Native：包管理结构与读取缓冲&quot;]
-    R[&quot;Native：资源对象与所需 CPU 数据&quot;]
-    MB[&quot;Managed：AssetBundle 包装&quot;]
-    MR[&quot;Managed：Texture2D、Mesh 等包装&quot;]
-    G[&quot;GPU：纹理、顶点与索引缓冲&quot;]
-
-    D --&gt;|LoadFromFile| B
-    MB -.-&gt;|引用底层包对象| B
-    B --&gt;|LoadAsset：从文件读取所需数据| R
-    MR -.-&gt;|引用底层资源对象| R
-    R --&gt;|图形数据上传| G
-  
-
-
-磁盘到 Native： LoadFromFile 建立包的访问入口；LoadAsset 再读取所需资源，创建 Native 对象及数据。打开包不等于全部资源都已加载。
-Managed 是脚本访问入口： 加载接口向 C# 提供相应包装对象；图中虚线表示引用关系，像素、顶点等大块数据不必经过托管堆再上传。
-需要 GPU 使用的数据才上传： 例如纹理像素、Mesh 顶点和索引。上传可能发生在加载期间或分帧进行，并非统一等到首次渲染；CPU 副本是否保留取决于 Read&#x2F;Write 等设置。[2][3]
-
-清理时也要分别处理：资源卸载负责 Native 对象及相关 GPU 资源，GC 负责不可达的托管包装和业务对象。 图中表示逻辑归属，统一内存设备上的 CPU 与 GPU 可能共享物理内存。
-2. 将打开包和加载资源分开处理加载 AssetBundle 常用的四类接口如下。这里按数据来源分类，前三类分别提供同步与 Async 异步版本；第四类通过网络请求异步加载。[9][10][11][12]
-
-
-
-加载来源
-接口
-适用场景与内存特点
-
-
-
-本地文件
-AssetBundle.LoadFromFile &#x2F; LoadFromFileAsync
-包已经落盘时优先考虑；无需业务代码先创建完整的托管数组，支持通过 offset 指定包在文件中的起始位置
-
-
-内存字节
-AssetBundle.LoadFromMemory &#x2F; LoadFromMemoryAsync
-已取得完整 AB 字节，例如整包解密后的数据；输入 byte[] 与 Unity 加载包所需内存可能同时存在
-
-
-托管流
-AssetBundle.LoadFromStream &#x2F; LoadFromStreamAsync
-从支持读取和定位的流加载，适合自定义解密流；需维护流的生命周期与随机读取能力
-
-
-网络请求
-UnityWebRequestAssetBundle.GetAssetBundle
-从 URL 下载并加载；使用专用的 DownloadHandlerAssetBundle，提供版本号或 Hash 的重载可接入 Unity 缓存
-
-
-从文件加载：本地包的常用入口// 让 Unity 直接访问文件，避免先创建完整的托管字节数组。AssetBundle fileBundle = AssetBundle.LoadFromFile(path);
-
-本地包通常优先使用 LoadFromFile 或 LoadFromFileAsync。未压缩和 LZ4 包可以从文件按需读取；LZMA 包仍需要解压，不能把“从文件加载”理解为不占内存。offset 可以跳过自定义文件头，但不会替你解密 AB 正文。
-从内存加载：先准备完整字节// 先将整个文件读入托管数组，再交给 Unity。byte[] bundleBytes = File.ReadAllBytes(path);AssetBundle memoryBundle = AssetBundle.LoadFromMemory(bundleBytes);
-
-byte[] 本身就会占用一份托管内存，Unity 侧还需要加载包所需的内存。加载期间，两部分占用可能同时存在。实际峰值还受压缩格式和引擎实现影响，不能简单固定为“文件大小的两倍”。如果先读取密文再生成另一份明文数组，还要计入解密过程的额外占用。
-从流加载：按需读取，也要管理流的生命周期LoadFromStream 接收 System.IO.Stream。流必须支持 Read、Seek 和 Length，并按 Unity 的调用要求处理读取；相关方法可能从 Unity 的工作线程调用。自定义解密流还需要支持随机定位后的正确解密，不能直接假设顺序读取的解密流就能使用。
-包仍在使用时，流必须保持打开，直到 AssetBundle 卸载后再释放。 不要用一个在加载方法返回时就结束的 using 块包住流。流式解密有机会减少整包明文数组的占用，但解压、读取缓冲和具体算法仍会影响内存峰值。
-从网络加载：请求完成后取得包UnityWebRequestAssetBundle.GetAssetBundle(url) 创建请求，调用 SendWebRequest() 后等待完成，确认 request.result 成功，再通过 DownloadHandlerAssetBundle.GetContent(request) 取得包。请求使用完毕后应释放；取得的 AssetBundle 则按自身生命周期卸载。
-这里使用专门处理 AB 的下载处理器，无需业务代码先把响应转成完整 byte[] 再调用 LoadFromMemory。只有 URL 的重载不会自动启用版本缓存；需要缓存时，应使用提供版本号或 Hash 的重载。若服务端文件经过自定义加密，该接口不会自动识别解密规则，应先下载文件或字节，再通过相应解密加载路径打开包。
-以上接口解决的都是“如何打开包”。异步版本可以改变等待方式，但不保证所有工作都在后台执行，也不会自动消除解压或解密的内存峰值。
-前文已经解释了包的按需读取与解压机制，这里只保留一个与内存管理有关的区别：LoadFromFile 返回的是包的访问入口，LoadAsset 返回的是具体资源对象。打开包不代表包内所有资源都已加载；卸载入口，也不必然销毁已经加载的对象。[1]
-3. 确认资源对象和 GPU 数据的加载过程Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(    &quot;assets/game/textures/warrior_diffuse.png&quot;);
-
-调用 LoadAsset 后，Unity 会创建对应的底层资源对象，并向 C# 返回 Texture2D 包装对象。下文默认相关依赖包已经准备好，依赖解析过程沿用前文，不再展开。
-纹理和 Mesh 还涉及 GPU 数据的上传。这里容易产生一个误解：认为 LoadAsset 只准备 CPU 数据，直到第一次渲染时才上传显存。
-实际并没有这样统一的时间界限。Unity 有同步和异步上传管线，数据可能在加载过程中就上传到 GPU，也可能通过缓冲区分帧传输。具体行为取决于资源设置、加载路径及平台，不能仅凭“还没有渲染过”判断显存占用。[2]
-Mesh.UploadMeshData(true) 可以提交 Mesh 数据，并释放脚本读取所需的 CPU 数据副本；这里释放的是 Native 侧的 CPU 数据，不是 C# 包装，GPU 数据仍然保留。它主要用于明确管理 Mesh 数据，并不是加载 AB 资源时必须补上的步骤。
-Read&#x2F;Write 保留的是什么纹理开启 Read/Write Enabled 后，Unity 会保留可供 CPU 访问的像素数据，以支持 GetPixels 等操作。这份数据会增加常驻内存开销。[3]
-如果纹理只用于渲染，通常应关闭该选项；如果运行时确实需要读取或修改像素，则需要保留。UI 图集、大尺寸贴图尤其值得检查。
-关闭 Read&#x2F;Write 能减少 CPU 副本的占用，但不宜把收益一概写成“总内存减半”。纹理格式、MipMap、流送设置、平台，以及对象自身的开销都会影响最终结果。
-4. 根据使用情况选择卸载方式bundle.Unload(unloadAllLoadedObjects: true);// 或bundle.Unload(unloadAllLoadedObjects: false);
-
-两种调用都会卸载包本身，使这个 AssetBundle 无法继续用于加载资源。区别在于，是否同时销毁此前从包中加载出来的对象。[4]
-Unload(true)：包和已加载资源一起卸载Unload(true) 会释放包自身的 Native 管理数据，并销毁属于这个包的已加载资源对象，释放它们的 Native 数据；纹理、Mesh 等对象对应的 GPU 资源也会进入图形系统的释放流程，即使场景中的其他对象仍在引用它们。
-这里的销毁主要针对引擎对象，不意味着 C# 托管包装已经被回收。包装对象仍由 GC 管理；只要业务代码还持有引用，它就可能继续占用托管堆空间。GPU 资源的实际释放也可能等待渲染任务或驱动处理完成。
-例如，从包里加载 Prefab 后调用 Instantiate，场景中的实例通常还在，但它引用的共享 Mesh、材质、纹理可能已被卸载，导致模型无法正常显示。粉红色通常指向 Shader 缺失、错误或不受支持，不能直接归因于“少了一张纹理”。
-底层对象销毁后，已有的 C# 变量不会自动被重新赋值。Unity 重载了 ==，会将底层对象已经失效的包装对象判为空：[5]
-Texture2D texture = bundle.LoadAsset&lt;Texture2D&gt;(assetName);bundle.Unload(true);Debug.Log(texture == null);                 // trueDebug.Log(ReferenceEquals(texture, null));  // false：托管引用仍存在
-
-这也是判断 Unity 对象时，== null 与普通 C# 引用判空可能不一致的原因。对象失效后，访问需要底层对象的成员可能报错，并不意味着每次访问都会导致程序崩溃。
-Unload(false)：卸载包，保留已加载资源Unload(false) 释放的是包自身的 Native 管理数据和相关读取资源。已加载纹理、Mesh、材质的 Native 对象与数据，以及它们对应的 GPU 资源仍然保留，可以继续使用。
-它不会直接回收 AssetBundle、Texture2D 等 C# 包装，也不会释放调用方传给 LoadFromMemory 的托管 byte[]。这些托管对象都需要在不再可达后，由 GC 回收。
-但这些资源也不再由原来的包实例管理。后续重新打开同一个包，不会自动把旧资源重新关联回来。
-5. 处理重复加载留下的副本下面这段代码就可能产生两个独立的纹理对象：
-AssetBundle bundleA = AssetBundle.LoadFromFile(path);Texture2D textureA = bundleA.LoadAsset&lt;Texture2D&gt;(assetName);bundleA.Unload(false);AssetBundle bundleB = AssetBundle.LoadFromFile(path);Texture2D textureB = bundleB.LoadAsset&lt;Texture2D&gt;(assetName);
-
-第一次卸载时，textureA 被保留下来。第二次加载时，Unity 不会因为磁盘上的资源路径相同，就自动复用这份旧对象，而是可能创建新的 textureB。[1]
-如果旧纹理仍被 UI、材质、静态字段或资源缓存引用，两份对象就会同时存在。继续反复执行这个流程，资源占用便可能逐轮增加。
-不过，重复副本不一定就是永久泄漏。能否回收，要看资源是否还有使用者，以及是否执行了合适的卸载操作：
-
-对不再需要、且符合 API 限制的单个资源，可以使用 Resources.UnloadAsset。该接口不适用于 GameObject 或 Component。[6]
-清除相关引用后，可以在合适的时机调用 Resources.UnloadUnusedAssets()，清理 Unity 判断为未使用的资源。它有全局检查成本，通常安排在加载界面等能够接受开销的位置。
-
-重新加载包，再对新包调用 Unload(true)，并不能顺带销毁上一次 Unload(false) 留下的旧资源。
-6. 使用 UnloadUnusedAssets 做阶段性清理前面提到，Unload(false) 会留下已加载的资源。等使用者退出后，可以通过 Resources.UnloadUnusedAssets() 清理其中不再使用的部分。它也能处理其他加载路径留下的未使用资源，并不局限于 AB 包。
-这个接口清理的重点是未使用资源的 Native 对象及其数据，并让相应 GPU 资源进入释放流程。 它与 C# GC 是不同的回收机制：即使具体版本的执行过程中伴随托管 GC，也不能据此认为所有托管包装、数组和缓存容器都已回收。仍然可达的托管对象依然会保留。[8]
-“未使用”由谁判断这个接口不接收包名或资源列表。Unity 会检查 GameObject 层级、脚本组件及静态变量中的引用，判断哪些资源仍然可达。[7]
-从行为上，可以把这次清理理解成三个步骤：
-
-查找仍在使用的资源。 从上述引用入口出发，沿对象之间的引用关系，确定需要保留的资源。
-识别未使用资源。 将没有被这些引用关系保留的资源列入清理范围；它不是只检查刚关闭的界面或刚卸载的包。
-卸载资源。 销毁符合条件的 Native 资源对象、释放相关数据，并让对应 GPU 资源进入释放流程。
-
-这是便于理解的概括，并非对引擎内部具体算法和线程分工的保证。开销不仅来自最终释放了多少资源，也来自查找、遍历引用关系以及销毁对象的过程。 即使最后只回收少量内存，也可能已经付出了明显的检查成本。
-因此，界面关闭了，不代表界面用过的纹理就能回收。隐藏的 UI、对象池中的角色、静态字典里的资源缓存，都可能继续持有引用。调用这个接口不会替你清空这些缓存。
-还有一个细节：它不会像 C# GC 那样检查脚本执行栈。 仅被普通方法局部变量引用的资源，不能据此保证保留。需要跨越清理过程继续使用的资源，应由明确的持有者保存，例如存活组件的字段；协程局部变量可能被编译成状态机字段，也不宜一概当作普通栈变量理解。[7]
-各接口到底清理哪一层内存
-
-
-操作
-Native 内存
-GPU 内存
-Managed 托管内存
-
-
-
-bundle.Unload(false)
-释放包自身的管理数据和读取资源；保留已加载资源的 Native 数据
-保留已加载资源的 GPU 数据
-不直接回收包装或输入数组；不再可达后由 GC 回收
-
-
-bundle.Unload(true)
-释放包自身及属于它的已加载资源的 Native 数据
-对应资源进入释放流程
-不直接回收仍被持有的 C# 包装；不再可达后由 GC 回收
-
-
-Resources.UnloadAsset(asset)
-卸载指定资源的 Native 对象和数据，受资源类型限制
-对应资源进入释放流程
-不直接回收仍被持有的包装；不再可达后由 GC 回收
-
-
-Resources.UnloadUnusedAssets()
-清理 Unity 判断为未使用的资源的 Native 对象和数据
-被清理资源对应的 GPU 数据进入释放流程
-不能保证包装和业务对象立即回收；其托管内存仍取决于 GC 可达性及回收时机
-
-
-Object.Destroy(instance)
-按销毁规则释放指定实例及相关引擎对象；通常延迟执行，不会自动卸载共享纹理、材质等资源
-不会仅因销毁一个场景实例就释放其引用的共享资源
-C# 包装及脚本的托管部分在不再可达后由 GC 回收
-
-
-GC.Collect()
-不直接卸载 Unity 资源的 Native 对象
-不直接释放
-触发托管 GC，回收符合条件的不可达对象
-
-
-reference = null &#x2F; cache.Clear()
-不直接释放
-不直接释放
-解除引用；不立即回收对象，清空集合通常也保留其容量
-
-
-表中的 GPU 释放指生命周期上的释放请求，不保证调用返回时驱动已归还物理显存；没有 GPU 数据的资源自然不涉及这一列。上述卸载操作也不会删除磁盘上的 AB 文件或下载缓存。
-例如，LoadFromMemory(data) 使用的 data 是托管数组。卸载包负责释放 Unity 侧的包数据；调用方不再持有 data 后，数组才具备被 GC 回收的条件。这是两笔独立的内存，不能只调用一次 Unload 就认为全部清完。
-因此，清理通常分成两个责任：先按资源生命周期释放 Native 对象及相关 GPU 资源，再解除不需要的托管持有关系，让 GC 回收包装和业务对象。解除引用可以先做，但解除引用本身不等于已经释放 Native 或 GPU 数据。
-将清理安排在场景切换的 Loading 阶段UnloadUnusedAssets() 属于开销可能较大的集中清理操作，建议安排在场景切换的 Loading 界面中执行。 它虽然返回 AsyncOperation，但不意味着所有工作都在后台执行，也不保证每帧的耗时足够小。在正常游玩、镜头运动或 UI 动画期间调用，可能让主线程超过单帧预算，造成掉帧或明显卡顿。
-推荐顺序是：先显示 Loading 界面并让它至少完成一帧显示，再卸载旧场景或销毁旧实例、清除不需要的缓存引用，等待销毁完成后执行清理，最后继续新场景的加载流程。若新旧场景共享资源，应先确定需要保留的资源由常驻持有者引用，避免刚清理完又重新加载。
-Loading 界面用于承接这段等待，并不能消除清理成本；其中的转圈动画或进度条也可能短暂停顿。不要在每次 Release、关闭小弹窗或每隔几秒时调用，实际耗时应在目标设备上通过 Profiler 确认。
-下面保留界面退出的简化示例：假设包已通过 Unload(false) 卸载，调用前 Loading 界面已经显示，且负责执行协程的组件在清理期间保持存活。
-using System.Collections;using UnityEngine;public sealed class PanelResourceOwner : MonoBehaviour&#123;    private GameObject panelInstance;    private Texture2D cachedTexture;    public IEnumerator CloseAndCleanup()    &#123;        if (panelInstance != null)            Destroy(panelInstance);        panelInstance = null;        cachedTexture = null;        // 其他缓存、材质或组件若仍引用资源，也需要先解除持有。        // Destroy 延迟执行，留出时间让实例完成销毁。        yield return null;        // 在 Loading 阶段等待集中清理完成；异步接口仍可能产生耗时峰值。        yield return Resources.UnloadUnusedAssets();    &#125;&#125;
-
-示例中的 Destroy 负责结束界面实例的 Native 生命周期，字段设为 null 负责解除托管引用，UnloadUnusedAssets() 则清理已无使用者的资源 Native 数据及相关 GPU 资源。三步处理的是不同的对象或存储部分。
-这里没有紧接着调用 GC.Collect()。是否主动触发托管 GC，需要根据项目的托管分配和卡顿情况单独判断，并不是资源清理的固定步骤。
-清理完成后，再结束 Loading 阶段、恢复正常交互。是否在每次场景切换都执行，应结合内存峰值与目标设备耗时决定，避免没有回收收益的频繁扫描。
-7. 将持有关系落实到管理器工程上常见的做法，是统一管理包及其依赖，复用已打开的包，在确认没有使用者后调用 Unload(true)。
-下面只展示包层计数的基本逻辑：
-using System;using System.Collections.Generic;using UnityEngine;public sealed class BundleRefCounter&#123;    private sealed class Entry    &#123;        public AssetBundle Bundle;        public int RefCount;    &#125;    private readonly Dictionary&lt;string, Entry&gt; entries =        new Dictionary&lt;string, Entry&gt;();    // 在 Unity 主线程调用。bundleId 由调用方统一，避免路径别名。    public AssetBundle Acquire(string bundleId, string path)    &#123;        if (entries.TryGetValue(bundleId, out Entry entry))        &#123;            entry.RefCount++;            return entry.Bundle;        &#125;        AssetBundle bundle = AssetBundle.LoadFromFile(path);        if (bundle == null)            throw new InvalidOperationException($&quot;加载 AB 包失败：&#123;path&#125;&quot;);        entries.Add(bundleId, new Entry        &#123;            Bundle = bundle,            RefCount = 1        &#125;);        return bundle;    &#125;    public void Release(string bundleId)    &#123;        if (!entries.TryGetValue(bundleId, out Entry entry))            throw new InvalidOperationException($&quot;未持有 AB 包：&#123;bundleId&#125;&quot;);        entry.RefCount--;        if (entry.RefCount &gt; 0)            return;        entry.Bundle.Unload(true);        entries.Remove(bundleId);    &#125;&#125;
-
-这段代码本身并不知道场景里还有谁在使用纹理。计数是否可靠，取决于调用方是否遵守约定：一次 Acquire 所代表的持有期，必须覆盖相关资源的整个使用期。
-例如，加载 Prefab 并生成角色后，不能因为“加载结束了”就立即 Release。角色实例、对象池或缓存仍可能引用包里的共享资源，必须等这些使用者都退出后再归还持有权。调用 Destroy 的对象也可能要到帧末才真正销毁，释放顺序需要考虑这一点。
-实际管理器还需要处理几个问题：
-
-依赖包的持有关系。 依赖链沿用前文的加载流程；这里还需要让每个使用者持有相应依赖，直到使用结束，防止共享材质、Shader 或纹理被提前卸载。
-异步请求合并。 多个请求同时加载同一个包时，应共享进行中的任务；加载失败或取消时，要正确回滚计数。
-资源缓存与包状态一致。 缓存中的资源不能在所属包已经 Unload(true) 后继续被当作有效对象返回。
-
-引用计数不是唯一方案。生命周期边界清晰的项目，也可以在关卡退出后统一卸载该关卡独占的包。无论采用哪种方式，最终都需要能回答同一个问题：这个包里的资源，现在还有谁在用？
-四、结果验证：确认副本不再累积，使用中的资源仍有效管理策略调整后，需要验证的是资源生命周期是否符合预期，而不只是某一帧的进程内存数值。
-对于角色预览界面，可以在目标设备的 Player 中，记录打开前、打开后、关闭清理后的 Memory Profiler 快照，再重复若干次相同操作。
-
-
-
-验证场景
-应观察到的结果
-
-
-
-同时存在多个使用者
-释放其中一个后，其余对象仍能正常显示，共享资源保持有效
-
-
-最后一个使用者退出
-确认销毁完成、缓存清除后，相关资源能够按策略卸载
-
-
-反复打开和关闭界面
-同名纹理、Mesh、材质的实例数不持续逐轮增加；允许策略明确的缓存保留
-
-
-执行 UnloadUnusedAssets()
-未使用资源得到清理，仍被有效使用者持有的资源保留
-
-
-主包释放、其他对象仍使用依赖包
-共享依赖保持有效，直到最后一个持有者退出
-
-
-这里列出的是验证标准，并非项目实测数据。具体节省多少内存、清理耗时多长，需要结合资源规模、Unity 版本与目标设备测量。
-验证时也应分开看 Native 资源数量与占用、Managed 包装及业务容器的占用，以及图形内存。Native 资源已释放但包装仍被静态集合引用，和包装已经回收但共享资源仍在使用，是两种不同情况。
-如果资源实例数仍然上涨，优先检查重复加载与旧缓存；如果资源无法回收，检查对象池、静态字段和存活组件的引用。如果对象数量已经恢复，而进程内存没有立即下降，再分析 Unity 分配器保留内存、尚未回收的托管包装，以及 GPU 侧延迟释放等因素。
-回到最初的预览界面：打开包、加载 Prefab、创建角色、销毁角色、卸载资源，是需要衔接的几个步骤。明确每一步的持有者和结束条件，才能同时避免提前卸载与重复副本。Unload(true)、Unload(false) 和 UnloadUnusedAssets() 也就各自有了明确的使用位置。
-参考资料
-前文：Unity-AssetBundle结构解析
-
-以下链接以 Unity 2022.3 文档为主。不同版本和平台的底层实现可能有所变化，具体占用与耗时应以目标设备实测为准。
-
-Using AssetBundles Natively
-
-Loading texture and mesh data
-
-Texture.isReadable
-
-AssetBundle.Unload
-
-UnityEngine.Object.operator &#x3D;&#x3D;
-
-Resources.UnloadAsset
-
-Resources.UnloadUnusedAssets
-
-Managed memory：GC 与 Native 资源回收的区别
-
-AssetBundle.LoadFromFile
-
-AssetBundle.LoadFromMemory
-
-AssetBundle.LoadFromStream
-
-UnityWebRequestAssetBundle.GetAssetBundle
-
-
-]]></content>
-      <tags>
-        <tag>Unity-AssetsBundle</tag>
-      </tags>
-  </entry>
-  <entry>
     <title>Unity-YooAssets打包流程：Builtin管线</title>
     <url>/posts/3dcf38a1.html</url>
     <content><![CDATA[YooAssets 打包流程：从 Collector 到 AssetBundle 与发布产物上一篇《YooAssets 的 AB 资源分类与管理》介绍了 Package、Group、Collector 和 MainAssets，也说明 Collector 会为每个资源计算 BundleName：同名资源归入同一个 AssetBundle。
@@ -2914,6 +3163,349 @@ Runtime/FileSystem/DefaultBuildinFileSystem/CatalogTools.cs
       </tags>
   </entry>
   <entry>
+    <title>Unity-YooAssets运行时加载与卸载</title>
+    <url>/posts/b5aa1459.html</url>
+    <content><![CDATA[YooAssets 运行时加载与卸载：从构建产物到资源生命周期上一篇《YooAssets 打包流程：Builtin 管线》介绍了 Collector 的资源如何经过依赖分析，最终生成 AssetBundle、资源清单和版本文件。
+现在，把这些文件放进安装包或上传到资源服务器。业务代码只传入一个 &quot;Knight&quot;，YooAssets 就能返回骑士预制体。但这中间还有几个问题：
+
+运行时怎样使用打包生成的文件，找到资源及其依赖？
+AssetHandle、Provider、Loader 三层分别做什么，为什么需要拆成三层？
+调用 Release 后发生了什么，什么时候才会真正卸载资源？
+
+继续沿用上一篇的例子：骑士和法师分别放在两个 Bundle 中，共用一个包含材质和贴图的依赖包。两个界面同时需要骑士，另一个系统需要法师。加载时要复用资源，关闭一个界面时，又不能破坏其他使用者。
+本文先建立 Package 的运行环境，再沿着这次资源请求，从清单查询一直追踪到最后一次卸载。
+
+本文依据项目使用的 YooAsset 2.3.19 源码，讨论常规 AssetBundle 的异步加载与默认卸载机制。公开句柄类型名为 AssetHandle；本文所说的 Loader 层，在该版本中主要由 LoadBundleFileOperation 实现。示例用于说明调用关系和引用计数，未执行对应运行时实验。
+
+一、加载之前，先初始化 PackagePackage 对应 Collector 配置与构建时选择的资源包，名称需要保持一致。下面以 DefaultPackage、版本 1.0.0 为例，按顺序说明每一步使用的文件；文件名采用默认的空清单前缀，若配置了 PackageManifestPrefix，版本、校验和清单文件名还会带上该前缀。
+
+初始化全局环境：调用 YooAssets.Initialize()，建立异步操作调度与更新驱动。这一步不读取 Package 的构建产物。
+创建 Package：调用 YooAssets.CreatePackage(&quot;DefaultPackage&quot;)，在内存中创建并注册资源包；此时不读取版本、清单或 AB，后续业务复用该对象。
+配置运行模式：离线使用 OfflinePlayModeParameters 和内置文件系统；联机使用 HostPlayModeParameters，通常组合内置与缓存文件系统，并提供远端地址服务。这一步只是准备参数，还没有读取资源文件。编辑器模拟模式则使用 EditorSimulateModeParameters，本文后续以真实 AB 加载为主。
+初始化 Package：调用 package.InitializeAsync(parameters)，建立资源管理器与文件系统。默认内置文件系统读取安装包中的 BuildinCatalog.bytes，得到内置 Bundle 的文件目录；缓存文件系统扫描、校验已有的本地缓存文件。若额外开启复制内置清单配置，还会读取内置 .version，并按该版本复制 .hash 和 .bytes 到指定目录。
+确定资源版本：调用 RequestPackageVersionAsync()，读取 DefaultPackage.version 中的版本字符串，例如 1.0.0。离线模式读取内置版本文件，常见联机配置从远端请求该文件；若业务直接指定版本，可跳过本次版本文件读取。
+启用资源清单：调用 UpdatePackageManifestAsync(&quot;1.0.0&quot;)，取得 DefaultPackage_1.0.0.hash 与 DefaultPackage_1.0.0.bytes，用前者校验后者，再反序列化并激活清单。离线模式读取内置文件；常见联机配置使用缓存，缺失时从远端下载。
+下载与加载资源：按清单需要预下载或按需获取实际的 AssetBundle 文件，再由 LoadAssetAsync 打开主包和依赖包、加载其中的 Unity 对象。AB 的实际文件名由清单记录，取决于构建时的命名方式。
+
+Package 初始化成功表示运行环境已经建立，启用清单后才具备资源查询能力。 每个异步步骤都应检查状态，成功后再继续。使用 package.LoadAssetAsync 可直接指定 Package；使用 YooAssets.LoadAssetAsync 等静态快捷接口时，还需通过 YooAssets.SetDefaultPackage(package) 指定默认 Package。
+二、从资源地址找到 Bundle1. 清单连接地址、资源路径和 Bundle清单启用后，LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;) 会通过 PackageManifest 将业务地址解析为资源路径，再查出主 Bundle 和依赖 Bundle。
+在这个例子中，可以把清单的查询结果简化为：
+业务地址：Knight    → 资源路径：Assets/Game/Characters/Knight.prefab    → 主 Bundle：characters_knight.bundle    → 依赖 Bundle：shared_materials.bundle
+
+PackageManifest 中的 AssetList 描述可寻址资源，BundleList 描述 Bundle 文件。普通单资源加载通过资源记录中的 BundleID 找到主包，通过 DependBundleIDs 找到依赖包；Bundle 记录再提供文件标识、大小、CRC 等信息。
+运行时不再重新遍历 Collector，也不再调用编辑器 API 分析预制体依赖。构建阶段已经把收集与依赖分析的结果固化进清单，运行时按清单执行。
+这也解释了前面两篇之间的连接：Collector 决定收集什么，构建流程确定包归属，运行时消费这些结果。
+2. 文件系统决定去哪里拿 Bundle确定 Bundle 后，还需要回答“这个文件在哪里”。这部分由运行模式配置的文件系统处理。
+
+
+
+常见模式
+文件来源
+
+
+
+编辑器模拟模式
+通过编辑器文件系统访问资源，不能替代真实 AB 加载验证
+
+
+离线模式
+使用随安装包携带的内置资源
+
+
+联机模式
+组合内置文件系统与缓存文件系统，必要时从服务器下载
+
+
+在常见联机配置中，PlayModeImpl 按文件系统顺序判断 Bundle 的归属。内置文件系统通常通过 Catalog 判断是否包含该 Bundle；其余交由缓存文件系统处理。
+缓存文件系统发现文件已经存在时，直接使用缓存。文件缺失时，默认可以按需下载；若配置禁止按需下载，则加载会失败，需要提前完成下载。
+对于常规未加密磁盘 AB，文件准备好后，底层会调用 AssetBundle.LoadFromFileAsync 打开它。加密文件则经过配置的解密服务处理。
+到这一步拿到的是可读取的 AssetBundle，里面的骑士预制体还没有完成加载。
+三、为什么要分成 Handle、Provider、Loader 三层假设两个界面同时请求骑士：
+AssetHandle firstHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);AssetHandle secondHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);
+
+这两次调用应该分别记录使用者的持有关系，同时复用底层的资源加载。如果把“谁在使用”“加载哪个对象”“打开哪个文件”混在一起，复用和释放就很难协调。
+YooAssets 用三层分别管理它们：
+
+
+
+层次
+管理的对象
+核心职责
+
+
+
+AssetHandle
+一次加载调用的持有关系
+向业务提供状态、结果与释放入口
+
+
+Provider
+一项资源加载操作
+等待主包和依赖包，加载具体 Unity 对象，复用加载结果
+
+
+Loader
+一个 Bundle 的加载与持有状态
+通过文件系统打开 Bundle，为多个 Provider 复用
+
+
+1. Handle：每次调用都有自己的持有关系每次 LoadAssetAsync 都会创建一个新的 AssetHandle。业务通过它等待完成、获取 AssetObject，并在不再使用时调用 Release()。
+即使两个 Handle 指向同一个 Provider，它们仍然是两份独立的持有关系。释放第一个，不会直接释放第二个仍在使用的结果。
+但普通 C# 变量赋值不产生新的持有关系：
+AssetHandle anotherHandle = firstHandle;
+
+这里两个变量指向同一个 Handle，引用计数不会增加。若两个模块需要独立释放，应分别发起加载请求，并各自保存自己的 Handle。
+2. Provider：复用一次资源加载ResourceManager 维护 ProviderDic。对于普通 LoadAssetAsync，会根据加载方式和 AssetInfo 的内部标识查找 Provider；找到可复用的 Provider 后，给它创建新的 Handle。
+该内部标识由资源路径和请求类型等信息组成，不能直接理解为资源 .meta 中的 GUID。因此，本文讨论的复用前提是：同一个 Package 中，以相同加载方式和类型请求同一个资源。 场景、子资源、整包资源加载有各自的处理方式。
+普通资源由 AssetProvider 负责。它需要完成两件事：先等主 Bundle 和依赖 Bundle 都准备好，再从主 Bundle 中加载目标对象。
+重复请求可以共享正在进行的加载，也可以共享已经完成的结果。
+3. Loader：复用 Bundle 文件ResourceManager 还维护 LoaderDic，以 BundleName 查找 Loader。
+骑士与法师是两个不同资源，需要不同 Provider，但它们依赖同一个材质包。这个共享包只需要一个 Loader，由两个 Provider 共同持有。
+同样，同一个 Bundle 内的两个不同预制体可以拥有不同 Provider，同时共享主包 Loader。资源复用和 Bundle 复用发生在不同层，不能只用“同一个资源有没有加载过”来判断。
+四、一次 LoadAssetAsync 怎样到达 Unity把前面的索引查询与三层结构连起来，一次普通资源加载可以分成五步。
+1. 用地址查到 AssetInfoResourcePackage.LoadAssetAsync&lt;T&gt; 先将 location 转换为 AssetInfo，得到真实资源路径、请求类型以及清单中的资源记录。
+2. 获取或创建 Provider，并返回 HandleResourceManager 查找对应 Provider。若需要新建，Provider 会取得主包和依赖包的 Loader，并分别增加它们的引用计数。
+无论复用还是新建 Provider，本次调用都会拿到自己的 Handle，并使 Provider 的引用计数加一。
+3. Loader 准备主包和依赖包Provider 启动相关 Loader，等待加载结果。Loader 通过文件系统获取文件并打开 Bundle，产出 BundleResult。
+共享 Loader 让多个 Provider 等待同一个包的加载结果，不需要各自重复下载或打开。
+4. Provider 从主包加载 Unity 对象主包和依赖包全部成功后，AssetProvider 调用主包结果的 LoadAssetAsync。对于 AssetBundle，最终落到 Unity API：
+assetBundle.LoadAssetAsync(assetInfo.AssetPath, assetInfo.AssetType);
+
+这里传给 Unity 的是解析后的资源路径和类型。业务传入的 &quot;Knight&quot; 已经在前面完成了映射。
+依赖包提前准备好，是为了让 Unity 加载预制体时能够解析材质、贴图等跨包引用。
+5. 通过 Handle 交付结果Provider 保存加载结果并结束操作，Handle 随之表现为完成。业务仍需检查 Status：完成也可能意味着加载失败。
+
+    graph TD
+    A[业务调用 LoadAssetAsync] --&gt; B[清单解析地址与资源路径]
+    B --&gt; C[获取或创建 Provider]
+    C --&gt; D[创建并返回本次 Handle]
+    C --&gt; E[主包 Loader]
+    C --&gt; F[依赖包 Loader]
+    E --&gt; G[文件系统准备文件并打开 Bundle]
+    F --&gt; G
+    G --&gt; H[Provider 等待全部 Bundle 成功]
+    H --&gt; I[主包调用 Unity LoadAssetAsync]
+    I --&gt; J[Provider 保存 Unity 对象]
+    J --&gt; K[Handle 提供状态和结果]
+  
+
+至此，拿到的是骑士预制体资源。若要在场景里显示骑士，还需要实例化；资源加载完成与实例创建是两个阶段。
+五、共享资源时，引用计数究竟记在哪里现在让两个界面分别加载骑士，再让另一个系统加载法师。全部加载完成后，关系如下：
+
+    graph TD
+    H1[界面 A 的 Knight Handle] --&gt; P1[Knight Provider]
+    H2[界面 B 的 Knight Handle] --&gt; P1
+    H3[Mage Handle] --&gt; P2[Mage Provider]
+    P1 --&gt; L1[Knight Loader]
+    P1 --&gt; LS[Shared Loader]
+    P2 --&gt; L2[Mage Loader]
+    P2 --&gt; LS
+  
+
+这里存在两种引用计数：
+
+
+
+对象
+引用计数
+计数来源
+
+
+
+Knight Provider
+2
+两个 Knight Handle
+
+
+Mage Provider
+1
+一个 Mage Handle
+
+
+Knight Loader
+1
+Knight Provider
+
+
+Mage Loader
+1
+Mage Provider
+
+
+Shared Loader
+2
+Knight Provider 与 Mage Provider
+
+
+Handle 增加 Provider 的引用；新建的 Provider 增加相关 Loader 的引用。 第二个骑士 Handle 复用了已有 Provider，因此不会再给骑士包和共享包各增加一次 Loader 引用。
+这就是三层结构的价值：业务持有者可以有很多个，实际资源加载和文件加载仍然按各自粒度复用。
+六、Release 为什么不等于立即卸载1. Release 先结束当前调用者的持有关系AssetHandle.Release() 沿用 HandleBase 的实现，主要做三件事：
+
+从 Provider 移除当前 Handle，并减少 Provider 引用计数。
+当 Provider 引用计数归零时，尝试触发配置允许的自动卸载。
+断开 Handle 与 Provider 的关系，使当前 Handle 失效。
+
+它首先表达的是“这个调用者不再需要资源”。它不直接等价于销毁实例，也不直接等价于卸载 Bundle。
+当前版本初始化参数中的 AutoUnloadBundleWhenUnused 默认是 false。默认配置下，即使最后一个 Handle 已经释放，Provider 和 Loader 仍可能保留，等待后续清理。
+因此，常见做法是在界面、关卡或资源批次的生命周期结束时释放各自 Handle，再在适当时机调用：
+yield return package.UnloadUnusedAssetsAsync();
+
+如果开启自动卸载，最后一个 Handle 释放时会尝试清理相关 Bundle；能否卸载仍然取决于加载状态和其他引用。
+2. 清理先销毁 Provider，再处理 LoaderUnloadUnusedAssetsOperation 每轮清理按以下顺序进行：
+扫描 Loader，尝试销毁其管理的无用 Provider    → Provider 销毁时，减少主包和依赖包的 Loader 引用    → 收集满足销毁条件的 Loader    → 卸载 Bundle，并移除 Loader
+
+Provider 必须已经不处于加载阶段，并且没有 Handle 引用，才能正常销毁。销毁时，它才会归还自己对主包、依赖包 Loader 的持有。
+这意味着：Provider 引用归零，与 Loader 引用减少之间，还隔着 Provider 的清理。 不能在每次 Handle 释放后，直接把同一次操作理解为“Bundle 引用也减一”。
+3. Loader 归零后，还要检查依赖顺序Loader 的正常销毁也有条件：没有正在进行的文件加载、引用计数归零，并满足包之间的依赖卸载约束。
+清单初始化时会根据 Bundle 依赖建立反向引用关系。默认实现检查依赖当前包的其他 Bundle 是否已经销毁，以避免先卸掉仍被其他包依赖的包。
+例如骑士包依赖共享材质包，需要先处理骑士包，再处理共享包。深层依赖可能需要多轮扫描，UnloadUnusedAssetsAsync 默认执行 10 轮。
+这个参数是扫描次数，不是“无论资源何时加载完，都等待到全部释放”的保证。循环依赖也可能阻碍正常卸载，需要从分包关系上排查。
+4. 用骑士与法师验证释放结果假设上述资源均已加载完成，每个阶段释放后都执行一次无用资源清理：
+
+
+
+操作
+Provider 的变化
+Bundle 的变化
+
+
+
+界面 A 释放骑士 Handle
+Knight Provider 从 2 变为 1
+骑士包和共享包继续保留
+
+
+界面 B 释放骑士 Handle
+Knight Provider 归零，清理时销毁
+骑士包可卸载；共享包仍由 Mage Provider 持有
+
+
+法师系统释放 Handle
+Mage Provider 归零，清理时销毁
+法师包可卸载，共享包在依赖条件满足后也可卸载
+
+
+如果只执行 Release，没有执行清理，也没有开启自动卸载，就不能预期表格中的 Bundle 立即卸载。
+另外，加载中释放 Handle 不等于取消加载。特别是共享 Provider 时，其他调用者仍可能需要结果。加载尚未结束的 Provider 会暂时保留，之后需要有清理机会；一次过早的清理完成，不代表这些资源以后会自动消失。
+七、实例还活着时，为什么不能提前释放 Handle在《AssetBundle 加载与卸载》中，我们区分过 AssetBundle.Unload(false) 与 AssetBundle.Unload(true)。
+本版本普通 AssetBundle 的卸载最终由 AssetBundleResult.UnloadBundleFile 调用 AssetBundle.Unload(true)。这会卸载从包中加载的资源对象。
+因此，不能只根据“预制体已经实例化”就释放它的 Handle。实例仍可能引用包里的材质和贴图；这些资源卸载后，场景里的实例会出现引用失效。
+1. 实例化不会自动增加 Handle 引用无论使用 Object.Instantiate，还是 AssetHandle.InstantiateSync()，都不能理解为“新实例自动持有了一份 Handle”。实例创建本身没有建立这样的引用关系。
+反方向也一样：Destroy(instance) 不会自动替业务释放加载 Handle。
+需要让 Handle 的持有时间覆盖实例实际使用资源的时间。最简单的关系是：一个拥有者负责加载、保存 Handle、创建实例，并在实例结束使用后释放 Handle。
+2. 一个最小的生命周期示例下面是协程中的加载片段。假设 Package 已初始化、清单已启用，&quot;Knight&quot; 是有效加载地址：
+// 为本次使用保留独立的加载句柄。AssetHandle knightHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);yield return knightHandle;// 等待结束不代表加载成功，失败也需要归还句柄。if (knightHandle.Status != EOperationStatus.Succeed)&#123;    Debug.LogError(knightHandle.LastError);    knightHandle.Release();    yield break;&#125;// 使用期间由同一拥有者保存实例与句柄。GameObject knightInstance = knightHandle.InstantiateSync();
+
+到界面关闭或角色真正离场时，同一拥有者再执行以下结束使用片段。这里的变量代表之前保存的实例与 Handle：
+// Destroy 延迟生效，先让实例完成销毁。UnityEngine.Object.Destroy(knightInstance);yield return null;// 归还本次使用权，再在合适的清理节点卸载无用资源。knightHandle.Release();yield return package.UnloadUnusedAssetsAsync();
+
+这两个片段展示的是生命周期边界，不是要求每销毁一个实例就扫描整个 Package。实际项目可以在界面批次关闭、关卡退出等节点统一清理，也要为加载失败、业务取消和拥有者提前销毁保留释放路径。
+如果使用对象池，SetActive(false) 只是停用实例，实例仍可能持有材质与贴图。池中仍保留对象时，应继续保留相应资源持有关系，直到池被真正清空。
+同样，把 AssetObject 保存到普通字段，不会替代 Handle 的引用计数；把 Handle 变量设为 null，也不能代替显式 Release()。
+八、区分四种容易混淆的“清理”
+
+
+操作
+实际作用
+
+
+
+Destroy(instance)
+销毁业务创建的 Unity 实例
+
+
+handle.Release()
+结束本次加载调用的持有关系
+
+
+package.UnloadUnusedAssetsAsync()
+清理满足条件的 Provider、Loader，并卸载对应 Bundle
+
+
+清理下载缓存
+删除磁盘上的缓存文件，需要使用相应缓存管理流程
+
+
+Bundle 从内存卸载后，下载缓存通常仍在磁盘上，下一次加载可以继续使用。Unity 的 Resources.UnloadUnusedAssets 和 C# GC 也属于不同层次，不能替代 YooAssets 的 Handle 释放。
+另外还有两个使用边界：
+
+场景使用场景自己的卸载入口。 SceneHandle.UnloadAsync() 负责场景卸载流程，不能仅以普通 Release() 替代场景卸载。
+UnloadAllAssetsAsync 用于整体清理。 它会强制销毁资源管理对象，使仍被业务保存的 Handle 失效。应在停止相关加载与使用后，用于整个 Package 的退出或重置，不能当成关闭普通界面的常规手段。
+
+九、回到开头的三个问题运行时如何使用构建产物？
+版本文件决定使用哪一版清单，清单将加载地址映射到资源路径、主包与依赖包，文件系统再根据内置目录、缓存和远端配置取得 Bundle。Collector 的工作已经在构建阶段完成。
+为什么分成三层？
+Handle 记录调用者的持有关系，Provider 复用具体资源的加载，Loader 复用 Bundle 文件的加载。同一资源的多个使用者可以共享 Provider，不同资源也可以共享 Loader。
+什么时候真正卸载？
+Release 先归还调用者的使用权；Provider 无人使用且加载结束后，清理流程释放其 Loader 引用；Loader 再满足引用与依赖约束，才真正卸载 Bundle。业务应让 Handle 的生命周期覆盖所有实际使用该资源的实例。
+从第四篇的资源分类、第五篇的构建，到这里的运行时加载，整条链路就连接起来了：配置决定资源范围，构建固化包与依赖关系，运行时按清单加载，再按持有关系释放。
+源码阅读入口以下路径均相对于 YooAsset 包根目录，适合按本文顺序阅读：
+
+
+
+关注点
+源码路径
+
+
+
+初始化参数与运行模式
+Runtime/InitializeParameters.cs
+
+
+文件系统创建参数
+Runtime/FileSystem/FileSystemParameters.cs
+
+
+文件系统初始化过程
+Runtime/ResourcePackage/Operation/InitializationOperation.cs
+
+
+对外加载与初始化入口
+Runtime/ResourcePackage/ResourcePackage.cs
+
+
+资源索引与反向依赖
+Runtime/ResourcePackage/PackageManifest.cs
+
+
+文件系统选择
+Runtime/ResourcePackage/PlayMode/PlayModeImpl.cs
+
+
+Provider 与 Loader 的复用
+Runtime/ResourceManager/ResourceManager.cs
+
+
+Provider 的加载阶段与引用
+Runtime/ResourceManager/Provider/ProviderOperation.cs
+
+
+普通资源加载
+Runtime/ResourceManager/Provider/AssetProvider.cs
+
+
+Bundle 加载与销毁判断
+Runtime/ResourceManager/Operation/Internal/LoadBundleFileOperation.cs
+
+
+Handle 释放
+Runtime/ResourceManager/Handle/HandleBase.cs
+
+
+无用资源清理顺序
+Runtime/ResourceManager/Operation/UnloadUnusedAssetsOperation.cs
+
+
+Unity AssetBundle 的加载结果与卸载
+Runtime/FileSystem/BundleResult/AssetBundleResult/AssetBundleResult.cs
+
+
+]]></content>
+      <tags>
+        <tag>Unity-AssetsBundle</tag>
+      </tags>
+  </entry>
+  <entry>
     <title>Unity-YooAssets的AB资源分类与管理</title>
     <url>/posts/b0d5b4a0.html</url>
     <content><![CDATA[YooAssets 的 AB 资源分类：如何抽象不同项目的分包需求前三篇分别讨论了 AssetBundle 的结构、加载与卸载，以及分包策略。到了具体项目里，我们已经可以根据资源的使用范围、生命周期和更新节奏，决定哪些内容适合放进同一个包。
@@ -3313,349 +3905,6 @@ Editor/AssetBundleBuilder/BuildBundleInfo.cs
       </tags>
   </entry>
   <entry>
-    <title>Unity-YooAssets运行时加载与卸载</title>
-    <url>/posts/b5aa1459.html</url>
-    <content><![CDATA[YooAssets 运行时加载与卸载：从构建产物到资源生命周期上一篇《YooAssets 打包流程：Builtin 管线》介绍了 Collector 的资源如何经过依赖分析，最终生成 AssetBundle、资源清单和版本文件。
-现在，把这些文件放进安装包或上传到资源服务器。业务代码只传入一个 &quot;Knight&quot;，YooAssets 就能返回骑士预制体。但这中间还有几个问题：
-
-运行时怎样使用打包生成的文件，找到资源及其依赖？
-AssetHandle、Provider、Loader 三层分别做什么，为什么需要拆成三层？
-调用 Release 后发生了什么，什么时候才会真正卸载资源？
-
-继续沿用上一篇的例子：骑士和法师分别放在两个 Bundle 中，共用一个包含材质和贴图的依赖包。两个界面同时需要骑士，另一个系统需要法师。加载时要复用资源，关闭一个界面时，又不能破坏其他使用者。
-本文先建立 Package 的运行环境，再沿着这次资源请求，从清单查询一直追踪到最后一次卸载。
-
-本文依据项目使用的 YooAsset 2.3.19 源码，讨论常规 AssetBundle 的异步加载与默认卸载机制。公开句柄类型名为 AssetHandle；本文所说的 Loader 层，在该版本中主要由 LoadBundleFileOperation 实现。示例用于说明调用关系和引用计数，未执行对应运行时实验。
-
-一、加载之前，先初始化 PackagePackage 对应 Collector 配置与构建时选择的资源包，名称需要保持一致。下面以 DefaultPackage、版本 1.0.0 为例，按顺序说明每一步使用的文件；文件名采用默认的空清单前缀，若配置了 PackageManifestPrefix，版本、校验和清单文件名还会带上该前缀。
-
-初始化全局环境：调用 YooAssets.Initialize()，建立异步操作调度与更新驱动。这一步不读取 Package 的构建产物。
-创建 Package：调用 YooAssets.CreatePackage(&quot;DefaultPackage&quot;)，在内存中创建并注册资源包；此时不读取版本、清单或 AB，后续业务复用该对象。
-配置运行模式：离线使用 OfflinePlayModeParameters 和内置文件系统；联机使用 HostPlayModeParameters，通常组合内置与缓存文件系统，并提供远端地址服务。这一步只是准备参数，还没有读取资源文件。编辑器模拟模式则使用 EditorSimulateModeParameters，本文后续以真实 AB 加载为主。
-初始化 Package：调用 package.InitializeAsync(parameters)，建立资源管理器与文件系统。默认内置文件系统读取安装包中的 BuildinCatalog.bytes，得到内置 Bundle 的文件目录；缓存文件系统扫描、校验已有的本地缓存文件。若额外开启复制内置清单配置，还会读取内置 .version，并按该版本复制 .hash 和 .bytes 到指定目录。
-确定资源版本：调用 RequestPackageVersionAsync()，读取 DefaultPackage.version 中的版本字符串，例如 1.0.0。离线模式读取内置版本文件，常见联机配置从远端请求该文件；若业务直接指定版本，可跳过本次版本文件读取。
-启用资源清单：调用 UpdatePackageManifestAsync(&quot;1.0.0&quot;)，取得 DefaultPackage_1.0.0.hash 与 DefaultPackage_1.0.0.bytes，用前者校验后者，再反序列化并激活清单。离线模式读取内置文件；常见联机配置使用缓存，缺失时从远端下载。
-下载与加载资源：按清单需要预下载或按需获取实际的 AssetBundle 文件，再由 LoadAssetAsync 打开主包和依赖包、加载其中的 Unity 对象。AB 的实际文件名由清单记录，取决于构建时的命名方式。
-
-Package 初始化成功表示运行环境已经建立，启用清单后才具备资源查询能力。 每个异步步骤都应检查状态，成功后再继续。使用 package.LoadAssetAsync 可直接指定 Package；使用 YooAssets.LoadAssetAsync 等静态快捷接口时，还需通过 YooAssets.SetDefaultPackage(package) 指定默认 Package。
-二、从资源地址找到 Bundle1. 清单连接地址、资源路径和 Bundle清单启用后，LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;) 会通过 PackageManifest 将业务地址解析为资源路径，再查出主 Bundle 和依赖 Bundle。
-在这个例子中，可以把清单的查询结果简化为：
-业务地址：Knight    → 资源路径：Assets/Game/Characters/Knight.prefab    → 主 Bundle：characters_knight.bundle    → 依赖 Bundle：shared_materials.bundle
-
-PackageManifest 中的 AssetList 描述可寻址资源，BundleList 描述 Bundle 文件。普通单资源加载通过资源记录中的 BundleID 找到主包，通过 DependBundleIDs 找到依赖包；Bundle 记录再提供文件标识、大小、CRC 等信息。
-运行时不再重新遍历 Collector，也不再调用编辑器 API 分析预制体依赖。构建阶段已经把收集与依赖分析的结果固化进清单，运行时按清单执行。
-这也解释了前面两篇之间的连接：Collector 决定收集什么，构建流程确定包归属，运行时消费这些结果。
-2. 文件系统决定去哪里拿 Bundle确定 Bundle 后，还需要回答“这个文件在哪里”。这部分由运行模式配置的文件系统处理。
-
-
-
-常见模式
-文件来源
-
-
-
-编辑器模拟模式
-通过编辑器文件系统访问资源，不能替代真实 AB 加载验证
-
-
-离线模式
-使用随安装包携带的内置资源
-
-
-联机模式
-组合内置文件系统与缓存文件系统，必要时从服务器下载
-
-
-在常见联机配置中，PlayModeImpl 按文件系统顺序判断 Bundle 的归属。内置文件系统通常通过 Catalog 判断是否包含该 Bundle；其余交由缓存文件系统处理。
-缓存文件系统发现文件已经存在时，直接使用缓存。文件缺失时，默认可以按需下载；若配置禁止按需下载，则加载会失败，需要提前完成下载。
-对于常规未加密磁盘 AB，文件准备好后，底层会调用 AssetBundle.LoadFromFileAsync 打开它。加密文件则经过配置的解密服务处理。
-到这一步拿到的是可读取的 AssetBundle，里面的骑士预制体还没有完成加载。
-三、为什么要分成 Handle、Provider、Loader 三层假设两个界面同时请求骑士：
-AssetHandle firstHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);AssetHandle secondHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);
-
-这两次调用应该分别记录使用者的持有关系，同时复用底层的资源加载。如果把“谁在使用”“加载哪个对象”“打开哪个文件”混在一起，复用和释放就很难协调。
-YooAssets 用三层分别管理它们：
-
-
-
-层次
-管理的对象
-核心职责
-
-
-
-AssetHandle
-一次加载调用的持有关系
-向业务提供状态、结果与释放入口
-
-
-Provider
-一项资源加载操作
-等待主包和依赖包，加载具体 Unity 对象，复用加载结果
-
-
-Loader
-一个 Bundle 的加载与持有状态
-通过文件系统打开 Bundle，为多个 Provider 复用
-
-
-1. Handle：每次调用都有自己的持有关系每次 LoadAssetAsync 都会创建一个新的 AssetHandle。业务通过它等待完成、获取 AssetObject，并在不再使用时调用 Release()。
-即使两个 Handle 指向同一个 Provider，它们仍然是两份独立的持有关系。释放第一个，不会直接释放第二个仍在使用的结果。
-但普通 C# 变量赋值不产生新的持有关系：
-AssetHandle anotherHandle = firstHandle;
-
-这里两个变量指向同一个 Handle，引用计数不会增加。若两个模块需要独立释放，应分别发起加载请求，并各自保存自己的 Handle。
-2. Provider：复用一次资源加载ResourceManager 维护 ProviderDic。对于普通 LoadAssetAsync，会根据加载方式和 AssetInfo 的内部标识查找 Provider；找到可复用的 Provider 后，给它创建新的 Handle。
-该内部标识由资源路径和请求类型等信息组成，不能直接理解为资源 .meta 中的 GUID。因此，本文讨论的复用前提是：同一个 Package 中，以相同加载方式和类型请求同一个资源。 场景、子资源、整包资源加载有各自的处理方式。
-普通资源由 AssetProvider 负责。它需要完成两件事：先等主 Bundle 和依赖 Bundle 都准备好，再从主 Bundle 中加载目标对象。
-重复请求可以共享正在进行的加载，也可以共享已经完成的结果。
-3. Loader：复用 Bundle 文件ResourceManager 还维护 LoaderDic，以 BundleName 查找 Loader。
-骑士与法师是两个不同资源，需要不同 Provider，但它们依赖同一个材质包。这个共享包只需要一个 Loader，由两个 Provider 共同持有。
-同样，同一个 Bundle 内的两个不同预制体可以拥有不同 Provider，同时共享主包 Loader。资源复用和 Bundle 复用发生在不同层，不能只用“同一个资源有没有加载过”来判断。
-四、一次 LoadAssetAsync 怎样到达 Unity把前面的索引查询与三层结构连起来，一次普通资源加载可以分成五步。
-1. 用地址查到 AssetInfoResourcePackage.LoadAssetAsync&lt;T&gt; 先将 location 转换为 AssetInfo，得到真实资源路径、请求类型以及清单中的资源记录。
-2. 获取或创建 Provider，并返回 HandleResourceManager 查找对应 Provider。若需要新建，Provider 会取得主包和依赖包的 Loader，并分别增加它们的引用计数。
-无论复用还是新建 Provider，本次调用都会拿到自己的 Handle，并使 Provider 的引用计数加一。
-3. Loader 准备主包和依赖包Provider 启动相关 Loader，等待加载结果。Loader 通过文件系统获取文件并打开 Bundle，产出 BundleResult。
-共享 Loader 让多个 Provider 等待同一个包的加载结果，不需要各自重复下载或打开。
-4. Provider 从主包加载 Unity 对象主包和依赖包全部成功后，AssetProvider 调用主包结果的 LoadAssetAsync。对于 AssetBundle，最终落到 Unity API：
-assetBundle.LoadAssetAsync(assetInfo.AssetPath, assetInfo.AssetType);
-
-这里传给 Unity 的是解析后的资源路径和类型。业务传入的 &quot;Knight&quot; 已经在前面完成了映射。
-依赖包提前准备好，是为了让 Unity 加载预制体时能够解析材质、贴图等跨包引用。
-5. 通过 Handle 交付结果Provider 保存加载结果并结束操作，Handle 随之表现为完成。业务仍需检查 Status：完成也可能意味着加载失败。
-
-    graph TD
-    A[业务调用 LoadAssetAsync] --&gt; B[清单解析地址与资源路径]
-    B --&gt; C[获取或创建 Provider]
-    C --&gt; D[创建并返回本次 Handle]
-    C --&gt; E[主包 Loader]
-    C --&gt; F[依赖包 Loader]
-    E --&gt; G[文件系统准备文件并打开 Bundle]
-    F --&gt; G
-    G --&gt; H[Provider 等待全部 Bundle 成功]
-    H --&gt; I[主包调用 Unity LoadAssetAsync]
-    I --&gt; J[Provider 保存 Unity 对象]
-    J --&gt; K[Handle 提供状态和结果]
-  
-
-至此，拿到的是骑士预制体资源。若要在场景里显示骑士，还需要实例化；资源加载完成与实例创建是两个阶段。
-五、共享资源时，引用计数究竟记在哪里现在让两个界面分别加载骑士，再让另一个系统加载法师。全部加载完成后，关系如下：
-
-    graph TD
-    H1[界面 A 的 Knight Handle] --&gt; P1[Knight Provider]
-    H2[界面 B 的 Knight Handle] --&gt; P1
-    H3[Mage Handle] --&gt; P2[Mage Provider]
-    P1 --&gt; L1[Knight Loader]
-    P1 --&gt; LS[Shared Loader]
-    P2 --&gt; L2[Mage Loader]
-    P2 --&gt; LS
-  
-
-这里存在两种引用计数：
-
-
-
-对象
-引用计数
-计数来源
-
-
-
-Knight Provider
-2
-两个 Knight Handle
-
-
-Mage Provider
-1
-一个 Mage Handle
-
-
-Knight Loader
-1
-Knight Provider
-
-
-Mage Loader
-1
-Mage Provider
-
-
-Shared Loader
-2
-Knight Provider 与 Mage Provider
-
-
-Handle 增加 Provider 的引用；新建的 Provider 增加相关 Loader 的引用。 第二个骑士 Handle 复用了已有 Provider，因此不会再给骑士包和共享包各增加一次 Loader 引用。
-这就是三层结构的价值：业务持有者可以有很多个，实际资源加载和文件加载仍然按各自粒度复用。
-六、Release 为什么不等于立即卸载1. Release 先结束当前调用者的持有关系AssetHandle.Release() 沿用 HandleBase 的实现，主要做三件事：
-
-从 Provider 移除当前 Handle，并减少 Provider 引用计数。
-当 Provider 引用计数归零时，尝试触发配置允许的自动卸载。
-断开 Handle 与 Provider 的关系，使当前 Handle 失效。
-
-它首先表达的是“这个调用者不再需要资源”。它不直接等价于销毁实例，也不直接等价于卸载 Bundle。
-当前版本初始化参数中的 AutoUnloadBundleWhenUnused 默认是 false。默认配置下，即使最后一个 Handle 已经释放，Provider 和 Loader 仍可能保留，等待后续清理。
-因此，常见做法是在界面、关卡或资源批次的生命周期结束时释放各自 Handle，再在适当时机调用：
-yield return package.UnloadUnusedAssetsAsync();
-
-如果开启自动卸载，最后一个 Handle 释放时会尝试清理相关 Bundle；能否卸载仍然取决于加载状态和其他引用。
-2. 清理先销毁 Provider，再处理 LoaderUnloadUnusedAssetsOperation 每轮清理按以下顺序进行：
-扫描 Loader，尝试销毁其管理的无用 Provider    → Provider 销毁时，减少主包和依赖包的 Loader 引用    → 收集满足销毁条件的 Loader    → 卸载 Bundle，并移除 Loader
-
-Provider 必须已经不处于加载阶段，并且没有 Handle 引用，才能正常销毁。销毁时，它才会归还自己对主包、依赖包 Loader 的持有。
-这意味着：Provider 引用归零，与 Loader 引用减少之间，还隔着 Provider 的清理。 不能在每次 Handle 释放后，直接把同一次操作理解为“Bundle 引用也减一”。
-3. Loader 归零后，还要检查依赖顺序Loader 的正常销毁也有条件：没有正在进行的文件加载、引用计数归零，并满足包之间的依赖卸载约束。
-清单初始化时会根据 Bundle 依赖建立反向引用关系。默认实现检查依赖当前包的其他 Bundle 是否已经销毁，以避免先卸掉仍被其他包依赖的包。
-例如骑士包依赖共享材质包，需要先处理骑士包，再处理共享包。深层依赖可能需要多轮扫描，UnloadUnusedAssetsAsync 默认执行 10 轮。
-这个参数是扫描次数，不是“无论资源何时加载完，都等待到全部释放”的保证。循环依赖也可能阻碍正常卸载，需要从分包关系上排查。
-4. 用骑士与法师验证释放结果假设上述资源均已加载完成，每个阶段释放后都执行一次无用资源清理：
-
-
-
-操作
-Provider 的变化
-Bundle 的变化
-
-
-
-界面 A 释放骑士 Handle
-Knight Provider 从 2 变为 1
-骑士包和共享包继续保留
-
-
-界面 B 释放骑士 Handle
-Knight Provider 归零，清理时销毁
-骑士包可卸载；共享包仍由 Mage Provider 持有
-
-
-法师系统释放 Handle
-Mage Provider 归零，清理时销毁
-法师包可卸载，共享包在依赖条件满足后也可卸载
-
-
-如果只执行 Release，没有执行清理，也没有开启自动卸载，就不能预期表格中的 Bundle 立即卸载。
-另外，加载中释放 Handle 不等于取消加载。特别是共享 Provider 时，其他调用者仍可能需要结果。加载尚未结束的 Provider 会暂时保留，之后需要有清理机会；一次过早的清理完成，不代表这些资源以后会自动消失。
-七、实例还活着时，为什么不能提前释放 Handle在《AssetBundle 加载与卸载》中，我们区分过 AssetBundle.Unload(false) 与 AssetBundle.Unload(true)。
-本版本普通 AssetBundle 的卸载最终由 AssetBundleResult.UnloadBundleFile 调用 AssetBundle.Unload(true)。这会卸载从包中加载的资源对象。
-因此，不能只根据“预制体已经实例化”就释放它的 Handle。实例仍可能引用包里的材质和贴图；这些资源卸载后，场景里的实例会出现引用失效。
-1. 实例化不会自动增加 Handle 引用无论使用 Object.Instantiate，还是 AssetHandle.InstantiateSync()，都不能理解为“新实例自动持有了一份 Handle”。实例创建本身没有建立这样的引用关系。
-反方向也一样：Destroy(instance) 不会自动替业务释放加载 Handle。
-需要让 Handle 的持有时间覆盖实例实际使用资源的时间。最简单的关系是：一个拥有者负责加载、保存 Handle、创建实例，并在实例结束使用后释放 Handle。
-2. 一个最小的生命周期示例下面是协程中的加载片段。假设 Package 已初始化、清单已启用，&quot;Knight&quot; 是有效加载地址：
-// 为本次使用保留独立的加载句柄。AssetHandle knightHandle = package.LoadAssetAsync&lt;GameObject&gt;(&quot;Knight&quot;);yield return knightHandle;// 等待结束不代表加载成功，失败也需要归还句柄。if (knightHandle.Status != EOperationStatus.Succeed)&#123;    Debug.LogError(knightHandle.LastError);    knightHandle.Release();    yield break;&#125;// 使用期间由同一拥有者保存实例与句柄。GameObject knightInstance = knightHandle.InstantiateSync();
-
-到界面关闭或角色真正离场时，同一拥有者再执行以下结束使用片段。这里的变量代表之前保存的实例与 Handle：
-// Destroy 延迟生效，先让实例完成销毁。UnityEngine.Object.Destroy(knightInstance);yield return null;// 归还本次使用权，再在合适的清理节点卸载无用资源。knightHandle.Release();yield return package.UnloadUnusedAssetsAsync();
-
-这两个片段展示的是生命周期边界，不是要求每销毁一个实例就扫描整个 Package。实际项目可以在界面批次关闭、关卡退出等节点统一清理，也要为加载失败、业务取消和拥有者提前销毁保留释放路径。
-如果使用对象池，SetActive(false) 只是停用实例，实例仍可能持有材质与贴图。池中仍保留对象时，应继续保留相应资源持有关系，直到池被真正清空。
-同样，把 AssetObject 保存到普通字段，不会替代 Handle 的引用计数；把 Handle 变量设为 null，也不能代替显式 Release()。
-八、区分四种容易混淆的“清理”
-
-
-操作
-实际作用
-
-
-
-Destroy(instance)
-销毁业务创建的 Unity 实例
-
-
-handle.Release()
-结束本次加载调用的持有关系
-
-
-package.UnloadUnusedAssetsAsync()
-清理满足条件的 Provider、Loader，并卸载对应 Bundle
-
-
-清理下载缓存
-删除磁盘上的缓存文件，需要使用相应缓存管理流程
-
-
-Bundle 从内存卸载后，下载缓存通常仍在磁盘上，下一次加载可以继续使用。Unity 的 Resources.UnloadUnusedAssets 和 C# GC 也属于不同层次，不能替代 YooAssets 的 Handle 释放。
-另外还有两个使用边界：
-
-场景使用场景自己的卸载入口。 SceneHandle.UnloadAsync() 负责场景卸载流程，不能仅以普通 Release() 替代场景卸载。
-UnloadAllAssetsAsync 用于整体清理。 它会强制销毁资源管理对象，使仍被业务保存的 Handle 失效。应在停止相关加载与使用后，用于整个 Package 的退出或重置，不能当成关闭普通界面的常规手段。
-
-九、回到开头的三个问题运行时如何使用构建产物？
-版本文件决定使用哪一版清单，清单将加载地址映射到资源路径、主包与依赖包，文件系统再根据内置目录、缓存和远端配置取得 Bundle。Collector 的工作已经在构建阶段完成。
-为什么分成三层？
-Handle 记录调用者的持有关系，Provider 复用具体资源的加载，Loader 复用 Bundle 文件的加载。同一资源的多个使用者可以共享 Provider，不同资源也可以共享 Loader。
-什么时候真正卸载？
-Release 先归还调用者的使用权；Provider 无人使用且加载结束后，清理流程释放其 Loader 引用；Loader 再满足引用与依赖约束，才真正卸载 Bundle。业务应让 Handle 的生命周期覆盖所有实际使用该资源的实例。
-从第四篇的资源分类、第五篇的构建，到这里的运行时加载，整条链路就连接起来了：配置决定资源范围，构建固化包与依赖关系，运行时按清单加载，再按持有关系释放。
-源码阅读入口以下路径均相对于 YooAsset 包根目录，适合按本文顺序阅读：
-
-
-
-关注点
-源码路径
-
-
-
-初始化参数与运行模式
-Runtime/InitializeParameters.cs
-
-
-文件系统创建参数
-Runtime/FileSystem/FileSystemParameters.cs
-
-
-文件系统初始化过程
-Runtime/ResourcePackage/Operation/InitializationOperation.cs
-
-
-对外加载与初始化入口
-Runtime/ResourcePackage/ResourcePackage.cs
-
-
-资源索引与反向依赖
-Runtime/ResourcePackage/PackageManifest.cs
-
-
-文件系统选择
-Runtime/ResourcePackage/PlayMode/PlayModeImpl.cs
-
-
-Provider 与 Loader 的复用
-Runtime/ResourceManager/ResourceManager.cs
-
-
-Provider 的加载阶段与引用
-Runtime/ResourceManager/Provider/ProviderOperation.cs
-
-
-普通资源加载
-Runtime/ResourceManager/Provider/AssetProvider.cs
-
-
-Bundle 加载与销毁判断
-Runtime/ResourceManager/Operation/Internal/LoadBundleFileOperation.cs
-
-
-Handle 释放
-Runtime/ResourceManager/Handle/HandleBase.cs
-
-
-无用资源清理顺序
-Runtime/ResourceManager/Operation/UnloadUnusedAssetsOperation.cs
-
-
-Unity AssetBundle 的加载结果与卸载
-Runtime/FileSystem/BundleResult/AssetBundleResult/AssetBundleResult.cs
-
-
-]]></content>
-      <tags>
-        <tag>Unity-AssetsBundle</tag>
-      </tags>
-  </entry>
-  <entry>
     <title>Unity的动态图集实现</title>
     <url>/posts/71da87fc.html</url>
     <content><![CDATA[静态图集的缺陷之前项目一直是使用静态图集，为了尽可能地降低DrawCall和节约内存，遵循着两条规则：1.每个UI界面创建一个图集放独有的图片。2.通用的图统一放到一个公用图集中。但是随着项目业务的拓展，通用的图标越来越多，导致通用图集越来越大甚至2048*2048的尺寸都放不下，就算根据功能去再次划分公用图集也治标不治本，而且还会导致几个Icon跨图集渲染之间相互穿插，带来额外的DrawCall。再者有极端的场景只用到了图集里的一张小图，却要加载整张图集，从而造成了较大的内存浪费。但完全不打图集DrawCall又直接爆炸。动态图集就是为了解决此问题的较为完美的解决方案。
@@ -3928,17 +4177,6 @@ UniTask：现代 Unity 项目的事实标准，几乎在所有维度上都是协
       </tags>
   </entry>
   <entry>
-    <title>Unity的==与空并运算符(？.)</title>
-    <url>/posts/1bd27c8e.html</url>
-    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
-Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
-Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
-差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
-在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
-Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
-]]></content>
-  </entry>
-  <entry>
     <title>Unity的TMP和Text原理和使用优化</title>
     <url>/posts/b46c3d6a.html</url>
     <content><![CDATA[Unity在2018版本加入了TextMeshPro，并且现在已经将Text标记为Legacy。下面是我有关于TMP和Text的理解和思考。
@@ -3954,6 +4192,17 @@ TMP的性能表现TMP因为我是把纹理大小选择为了1024*1024，所以Un
       <tags>
         <tag>Unity文字渲染</tag>
       </tags>
+  </entry>
+  <entry>
+    <title>Unity的==与空并运算符(？.)</title>
+    <url>/posts/1bd27c8e.html</url>
+    <content><![CDATA[Unity.Object使用&#x3D;&#x3D;与?.的区别众所周知，C#的判空有两种:&#x3D;&#x3D;与?.(空并运算符)，之前因为没有深入了解两种判空的在Uniyt.Object中的差别，开发的时候更是想到谁就用谁，造成了一些Crash，下面详细讲解两者的区别。
+Unity.Object使用?.如上图代码和结果所示，在使用GameObject.DestroyImmediate函数当帧立即销毁之后，打印name还是执行了并且报空，说明?.无法正确的判断Unity.Object为空。
+Unity.Object使用&#x3D;&#x3D;如上图代码和结果所示，在使用&#x3D;&#x3D;判断时，成功判断了对象为空。
+差别的原因在解释之前，补充一段关于Unity.Object的知识。Unity运行时是C++的，所有的对象都在C++层管理，在C#层只是有一个引用对象指向C++对象。所以，就有一种情况，就是C++层的对象被销毁了，但是C#层的对象还存在，导致判空出错。了解了这个知识点，下面开始探究问题所在。以下是Unity重载&#x3D;&#x3D;运算符的源码：上面的方法用来比较两个 UnityEngine.Object 对象是否相等，lhs 和 rhs 分别代表操作符两边的参数:1.若两边参数在 CLR 层均为 null，判定相等；2.若右边参数在 CLR 层为 null，左边不为 null，根据左边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；3.若左边参数在 CLR 层为 null，右边不为 null，根据右边参数 CLR 层所在对象对应的底层原生对象是否 Alive 返回比较结果；4.否则左右两边对象在 CLR 层对象均不为 null，比较它们的 m_InstanceID 是否相等。
+在上面的测试代码中，?.是没有被Unity重载的，他仅仅只是判断对象在C#层是否为空；而&#x3D;&#x3D;不仅判断了C#层，同时也判断了C++层的引用，最终导致了两者结果的不同。
+Unity.Object与System.Object判空的性能差异因为Unity.Object重载了&#x3D;&#x3D;，并且需要判断C++层的引用，所以性能一定要差于System.Object。下面是我测试代码，生成1w个Object，遍历判断是否为空，最后得出的结果Unity.Object花了0.36ms，System.Object花了0.29ms,性能差异大概是1.2倍，所以要避免在Update和轮询中对Unity.Object判空！
+]]></content>
   </entry>
   <entry>
     <title>Unity的TMP的纹理优化</title>
@@ -4859,12 +5108,6 @@ TextMeshPro 文档
 ]]></content>
   </entry>
   <entry>
-    <title>第一篇博客</title>
-    <url>/posts/ff05b5bf.html</url>
-    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
-]]></content>
-  </entry>
-  <entry>
     <title>基于前缀树的红点系统设计与实现</title>
     <url>/posts/79323865.html</url>
     <content><![CDATA[前言红点系统作为游戏内的活动开启、提醒等有着重要的作用，并广泛用于几乎所有类型的游戏中。之前在项目中为了实现红点都是各个业务使用独立逻辑，当有红点之前有父子层级结构时，逻辑就变得非常复杂和难以维护。最近看了几篇前缀树实现红点系统的文章，自己也来尝试实现一个。
@@ -4892,6 +5135,12 @@ public void AddRedDotNode(string redDotPath,int redDotNum,Action&lt;RedDotDataNo
 减少红点减少数值的逻辑与添加类似，都是先遍历分割的字符串到对应的节点。唯一不同的就是因为减少操作对于0数值是不变的，所以维护了一个bool记录是否改变，只有改变是才执行刷新逻辑。
 public void SubRedDotNode(string redDotPath, int redDotNum)&#123;    if (redDotNum &lt;= 0)    &#123;        return;    &#125;        var redDotSplitName = SplitRedDotPath(redDotPath);    if (redDotSplitName == null || redDotSplitName.Length &lt;= 0)    &#123;        return;    &#125;    RedDotDataNode curRedDotNode = m_rootNode;    for (int i = 0; i &lt; redDotSplitName.Length; i++)    &#123;        if (curRedDotNode == null)        &#123;            return;        &#125;                string redDotName = redDotSplitName[i];        if (i ==  redDotSplitName.Length - 1)        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName, redDotNum);        &#125;        else        &#123;            curRedDotNode = curRedDotNode.SubRedDot(redDotPath,redDotName,0);        &#125;    &#125;    if (curRedDotNode.GetIsSubChange())    &#123;        curRedDotNode.RefreshSubRedDotNum(redDotNum);    &#125;&#125;
 性能分析对于一个m层的红点路径执行添加和删除操作时，做了三步：1、路径分割2、遍历路径，对路径查询3、更新数值时间复杂度：第一步分割函数为O(m);第二步遍历路径为O(m),查询因为使用字典为O(1);第三步m层向上更新也为O(m)。所以总体的时间复杂度为O(m)。空间复杂度：在内存分配上主要集中在第一步的路径分割，因为使用了C#的Split函数，此函数在分割时会为分割的每个字串分配内存，所以m层的红点路径创建了O(m)的数值进行存储。
+]]></content>
+  </entry>
+  <entry>
+    <title>第一篇博客</title>
+    <url>/posts/ff05b5bf.html</url>
+    <content><![CDATA[为什么弄博客自从工作以来，一些记忆性的东西越来越多，再加上自己平时积累的东西，之前一直都是用一些第三方的笔记软件记录，但这样进行分享的时候就特别不方便，越来越需要一个地方记录下来，但是国内写到某DN博客，总觉得文章就变成不是自己的，心里不舒服。刚好最近看到了一些个人博客搭建的教程，有非常方便的工具可以快速部署。所以趁着周末有空，搭建了这个博客，之后用来记录和分享技术文档。每天进步一点，做更好的自己！
 ]]></content>
   </entry>
   <entry>

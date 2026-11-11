@@ -1,0 +1,355 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover"><title>AlloyFramework(二)：框架启动流程 | 穿越时空的思念</title><meta name="author" content="穿越时空的思念"><meta name="copyright" content="穿越时空的思念"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#ffffff"><meta name="description" content="上一篇介绍了 AlloyFramework 需要提供哪些基础模块。这一篇介绍这些模块如何启动，以及框架完成准备后，如何把流程交给业务层。 整个启动结构主要分为三块：  框架入口：在启动场景挂载 FrameworkBootstrap，从它的 Awake 开始启动。 模块初始化流程：统一组织模块，按顺序初始化，完成热更代码准备，并通过反射获得业务入口。 业务入口：初始化业务、执行项目自身逻辑，完成从框">
+<meta property="og:type" content="article">
+<meta property="og:title" content="AlloyFramework(二)：框架启动流程">
+<meta property="og:url" content="https://cyskdsn.top/posts/df7521a5.html">
+<meta property="og:site_name" content="穿越时空的思念">
+<meta property="og:description" content="上一篇介绍了 AlloyFramework 需要提供哪些基础模块。这一篇介绍这些模块如何启动，以及框架完成准备后，如何把流程交给业务层。 整个启动结构主要分为三块：  框架入口：在启动场景挂载 FrameworkBootstrap，从它的 Awake 开始启动。 模块初始化流程：统一组织模块，按顺序初始化，完成热更代码准备，并通过反射获得业务入口。 业务入口：初始化业务、执行项目自身逻辑，完成从框">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://cyskdsn.top/img/Title/AlloyFramework.jpeg">
+<meta property="article:published_time" content="2026-11-11T14:14:05.046Z">
+<meta property="article:modified_time" content="2026-11-11T14:20:28.347Z">
+<meta property="article:author" content="穿越时空的思念">
+<meta property="article:tag" content="UnityFramework">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://cyskdsn.top/img/Title/AlloyFramework.jpeg"><script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "AlloyFramework(二)：框架启动流程",
+  "url": "https://cyskdsn.top/posts/df7521a5.html",
+  "image": "https://cyskdsn.top/img/Title/AlloyFramework.jpeg",
+  "datePublished": "2026-11-11T14:14:05.046Z",
+  "dateModified": "2026-11-11T14:20:28.347Z",
+  "author": [
+    {
+      "@type": "Person",
+      "name": "穿越时空的思念",
+      "url": "https://cyskdsn.top"
+    }
+  ]
+}</script><link rel="shortcut icon" href="/img/favicon.png"><link rel="canonical" href="https://cyskdsn.top/posts/df7521a5.html"><link rel="preconnect" href="//cdn.jsdelivr.net"/><link rel="manifest" href="/null"/><link rel="apple-touch-icon" sizes="180x180" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="32x32" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="16x16" href="/img/heaIcon16.ico"/><link rel="mask-icon" href="/img/heaIcon16.ico" color="#5bbad5"/><link rel="stylesheet" href="/css/index.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css"><script>
+    (() => {
+      
+    const saveToLocal = {
+      set: (key, value, ttl) => {
+        if (!ttl) return
+        const expiry = Date.now() + ttl * 86400000
+        localStorage.setItem(key, JSON.stringify({ value, expiry }))
+      },
+      get: key => {
+        const itemStr = localStorage.getItem(key)
+        if (!itemStr) return undefined
+        const { value, expiry } = JSON.parse(itemStr)
+        if (Date.now() > expiry) {
+          localStorage.removeItem(key)
+          return undefined
+        }
+        return value
+      }
+    }
+
+    window.btf = {
+      saveToLocal,
+      getScript: (url, attr = {}) => new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = url
+        script.async = true
+        Object.entries(attr).forEach(([key, val]) => script.setAttribute(key, val))
+        script.onload = script.onreadystatechange = () => {
+          if (!script.readyState || /loaded|complete/.test(script.readyState)) resolve()
+        }
+        script.onerror = reject
+        document.head.appendChild(script)
+      }),
+      getCSS: (url, id) => new Promise((resolve, reject) => {
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = url
+        if (id) link.id = id
+        link.onload = link.onreadystatechange = () => {
+          if (!link.readyState || /loaded|complete/.test(link.readyState)) resolve()
+        }
+        link.onerror = reject
+        document.head.appendChild(link)
+      }),
+      addGlobalFn: (key, fn, name = false, parent = window) => {
+        if (!false && key.startsWith('pjax')) return
+        const globalFn = parent.globalFn || {}
+        globalFn[key] = globalFn[key] || {}
+        globalFn[key][name || Object.keys(globalFn[key]).length] = fn
+        parent.globalFn = globalFn
+      }
+    }
+  
+      
+      const activateDarkMode = () => {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#0d0d0d')
+        }
+      }
+      const activateLightMode = () => {
+        document.documentElement.setAttribute('data-theme', 'light')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#ffffff')
+        }
+      }
+
+      btf.activateDarkMode = activateDarkMode
+      btf.activateLightMode = activateLightMode
+
+      const theme = saveToLocal.get('theme')
+    
+          theme === 'dark' ? activateDarkMode() : theme === 'light' ? activateLightMode() : null
+        
+      
+      const asideStatus = saveToLocal.get('aside-status')
+      if (asideStatus !== undefined) {
+        document.documentElement.classList.toggle('hide-aside', asideStatus === 'hide')
+      }
+    
+      
+    const detectApple = () => {
+      if (/iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('apple')
+      }
+    }
+    detectApple()
+  
+    })()
+  </script><script>const GLOBAL_CONFIG = {
+  root: '/',
+  algolia: undefined,
+  localSearch: {"path":"/search.xml","preload":false,"top_n_per_article":1,"unescape":false,"languages":{"hits_empty":"未找到符合您查询的内容：${query}","hits_stats":"共找到 ${hits} 篇文章"}},
+  translate: undefined,
+  highlight: {"plugin":"highlight.js","highlightCopy":true,"highlightLang":true,"highlightHeightLimit":false,"highlightFullpage":false,"highlightMacStyle":false},
+  copy: {
+    success: '复制成功',
+    error: '复制失败',
+    noSupport: '浏览器不支持'
+  },
+  relativeDate: {
+    homepage: false,
+    post: false
+  },
+  runtime: '',
+  dateSuffix: {
+    just: '刚刚',
+    min: '分钟前',
+    hour: '小时前',
+    day: '天前',
+    month: '个月前'
+  },
+  copyright: undefined,
+  lightbox: 'null',
+  Snackbar: undefined,
+  infinitegrid: {
+    js: 'https://cdn.jsdelivr.net/npm/@egjs/infinitegrid/dist/infinitegrid.min.js',
+    buttonText: '加载更多'
+  },
+  isPhotoFigcaption: false,
+  islazyloadPlugin: false,
+  isAnchor: false,
+  percent: {
+    toc: true,
+    rightside: false,
+  },
+  autoDarkmode: false
+}</script><script id="config-diff">var GLOBAL_CONFIG_SITE = {
+  title: 'AlloyFramework(二)：框架启动流程',
+  isHighlightShrink: false,
+  isToc: true,
+  pageType: 'post'
+}</script><link rel="stylesheet" href="/css/style.css"><meta name="generator" content="Hexo 7.3.0"></head><body><div id="sidebar"><div id="menu-mask"></div><div id="sidebar-menus"><div class="avatar-img text-center"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="site-data text-center"><a href="/archives/"><div class="headline">文章</div><div class="length-num">40</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">12</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">1</div></a></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div></div></div><div class="post" id="body-wrap"><header class="post-bg" id="page-header" style="background-image: url(/img/Title/AlloyFramework.jpeg);"><nav id="nav"><span id="blog-info"><a class="nav-site-title" href="/"><span class="site-name">穿越时空的思念</span></a><a class="nav-page-title" href="/"><span class="site-name">AlloyFramework(二)：框架启动流程</span><span class="site-name"><i class="fa-solid fa-circle-arrow-left"></i><span>  返回首页</span></span></a></span><div id="menus"><div id="search-button"><span class="site-page social-icon search"><i class="fas fa-search fa-fw"></i><span> 搜索</span></span></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div><div id="toggle-menu"><span class="site-page"><i class="fas fa-bars fa-fw"></i></span></div></div></nav><div id="post-info"><h1 class="post-title">AlloyFramework(二)：框架启动流程</h1><div id="post-meta"><div class="meta-firstline"><span class="post-meta-date"><i class="far fa-calendar-alt fa-fw post-meta-icon"></i><span class="post-meta-label">发表于</span><time class="post-meta-date-created" datetime="2026-11-11T14:14:05.046Z" title="发表于 2026-11-11 22:14:05">2026-11-11</time><span class="post-meta-separator">|</span><i class="fas fa-history fa-fw post-meta-icon"></i><span class="post-meta-label">更新于</span><time class="post-meta-date-updated" datetime="2026-11-11T14:20:28.347Z" title="更新于 2026-11-11 22:20:28">2026-11-11</time></span></div><div class="meta-secondline"><span class="post-meta-separator">|</span><span class="post-meta-wordcount"><i class="far fa-file-word fa-fw post-meta-icon"></i><span class="post-meta-label">总字数:</span><span class="word-count">4.9k</span><span class="post-meta-separator">|</span><i class="far fa-clock fa-fw post-meta-icon"></i><span class="post-meta-label">阅读时长:</span><span>17分钟</span></span></div></div></div></header><main class="layout" id="content-inner"><div id="post"><article class="container post-content" id="article-container"><p>上一篇介绍了 AlloyFramework 需要提供哪些基础模块。这一篇介绍这些模块如何启动，以及框架完成准备后，如何把流程交给业务层。</p>
+<p>整个启动结构主要分为三块：</p>
+<ol>
+<li><strong>框架入口</strong>：在启动场景挂载 <code>FrameworkBootstrap</code>，从它的 <code>Awake</code> 开始启动。</li>
+<li><strong>模块初始化流程</strong>：统一组织模块，按顺序初始化，完成热更代码准备，并通过反射获得业务入口。</li>
+<li><strong>业务入口</strong>：初始化业务、执行项目自身逻辑，完成从框架启动流程到业务流程的交接。</li>
+</ol>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br></pre></td><td class="code"><pre><span class="line">flowchart TD</span><br><span class="line">    subgraph Bootstrap[&quot;第一块：框架入口&quot;]</span><br><span class="line">        A[&quot;Boot 场景挂载 FrameworkBootstrap&quot;]</span><br><span class="line">        B[&quot;Awake：读取启动配置，准备日志和 Loading&quot;]</span><br><span class="line">        A --&gt; B</span><br><span class="line">    end</span><br><span class="line">    subgraph Initialization[&quot;第二块：模块初始化流程&quot;]</span><br><span class="line">        C[&quot;建立启动步骤 List，按顺序执行&quot;]</span><br><span class="line">        D[&quot;初始化游戏循环、时间和资源模块&quot;]</span><br><span class="line">        E[&quot;准备热更代码，反射调用业务安装方法&quot;]</span><br><span class="line">        F[&quot;初始化配置、模型、音频、网络和 UI 模块&quot;]</span><br><span class="line">        G[&quot;框架就绪，反射创建 IGameEntry&quot;]</span><br><span class="line">        C --&gt; D --&gt; E --&gt; F --&gt; G</span><br><span class="line">    end</span><br><span class="line">    subgraph Business[&quot;第三块：业务入口&quot;]</span><br><span class="line">        H[&quot;InitializeAsync：安装业务扩展，初始化业务模块&quot;]</span><br><span class="line">        I[&quot;MainAsync：进入业务场景，执行游戏逻辑&quot;]</span><br><span class="line">        J[&quot;结束启动 Loading，后续流程由业务组织&quot;]</span><br><span class="line">        H --&gt; I --&gt; J</span><br><span class="line">    end</span><br><span class="line">    B --&gt; C</span><br><span class="line">    G --&gt; H</span><br></pre></td></tr></table></figure>
+
+<h2 id="代码中使用的-UniTask"><a href="#代码中使用的-UniTask" class="headerlink" title="代码中使用的 UniTask"></a>代码中使用的 UniTask</h2><p>本文的异步代码使用 UniTask，需要引入 <code>Cysharp.Threading.Tasks</code> 命名空间；取消令牌 <code>CancellationToken</code> 来自 <code>System.Threading</code>。</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">using</span> Cysharp.Threading.Tasks;</span><br><span class="line"><span class="keyword">using</span> System.Threading;</span><br></pre></td></tr></table></figure>
+
+<p>资源加载、代码准备和场景加载都可能需要等待。启动方法返回 <code>UniTask</code>，管线通过 <code>await</code> 等待当前步骤完成，再执行下一步，从而把异步操作写成清晰的顺序流程。等待期间可以把执行机会交还给 Unity，<code>await</code> 本身不会自动把工作放到子线程中，同步执行的耗时操作仍然会占用当前线程。</p>
+<p>UniTask 为 Unity 提供了基于 PlayerLoop 的异步支持，并通过值类型和对象复用等方式减少分配。它不意味着所有异步代码都绝对零 GC，具体原理可以阅读之前的文章：<a href="https://cyskdsn.top/posts/6045236e.html">UniTask 0GC实现原理</a>。本篇重点关注它如何组织启动流程。</p>
+<h2 id="一、框架入口：从-FrameworkBootstrap-的-Awake-开始"><a href="#一、框架入口：从-FrameworkBootstrap-的-Awake-开始" class="headerlink" title="一、框架入口：从 FrameworkBootstrap 的 Awake 开始"></a>一、框架入口：从 FrameworkBootstrap 的 Awake 开始</h2><p>项目准备一个独立的 <code>Boot</code> 场景，作为游戏运行时加载的第一个场景，并在其中挂载 <code>FrameworkBootstrap</code>。</p>
+<p><code>FrameworkBootstrap</code> 继承自 <code>MonoBehaviour</code>，因此可以通过 Unity 的 <code>Awake</code> 发起启动。它持有启动配置引用，当前项目配置的是 <code>GameHotUpdateSettings</code>，用来提供资源模式、代码模式、日志和 Loading 预制体等信息。代码中的字段使用其父类 <code>FrameworkBootSettings</code> 声明，方便不同项目提供自己的配置实现。</p>
+<p>Awake 先检查是否已有框架入口，避免重复启动；然后将入口设置为跨场景保留，创建启动控制器，安装日志、校验配置并创建 Loading，最后发起模块初始化流程。<br>核心过程如下：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="keyword">sealed</span> <span class="keyword">class</span> <span class="title">FrameworkBootstrap</span> : <span class="title">MonoBehaviour</span></span><br><span class="line">&#123;</span><br><span class="line">    [<span class="meta">SerializeField</span>]</span><br><span class="line">    <span class="keyword">private</span> FrameworkBootSettings m_settings; <span class="comment">// 当前项目关联 GameHotUpdateSettings 配置资产。</span></span><br><span class="line">    [<span class="meta">SerializeField</span>]</span><br><span class="line">    <span class="keyword">private</span> GameObject m_startupScreen; <span class="comment">// Loading 就绪前显示的启动画面。</span></span><br><span class="line">    <span class="keyword">private</span> FrameworkStartupController m_startupController; <span class="comment">// 管理本轮启动流程。</span></span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">Awake</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        <span class="comment">// 保证已有入口继续管理框架，重复入口直接退出。</span></span><br><span class="line">        <span class="keyword">if</span> (HasExistingBootstrap())</span><br><span class="line">        &#123;</span><br><span class="line">            DestroyDuplicateBootstrap();</span><br><span class="line">            <span class="keyword">return</span>;</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 确认配置存在，并让入口跨场景持有框架生命周期。</span></span><br><span class="line">        EnsureSettingsAssigned();</span><br><span class="line">        transform.SetParent(<span class="literal">null</span>);</span><br><span class="line">        DontDestroyOnLoad(gameObject);</span><br><span class="line">        m_startupController = <span class="keyword">new</span> FrameworkStartupController();</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 在模块初始化前准备日志和启动展示。</span></span><br><span class="line">        InstallLogViewer();</span><br><span class="line">        m_settings.Validate();</span><br><span class="line">        InstallLoadingPresenter();</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 交给控制器异步执行后续启动管线。</span></span><br><span class="line">        m_startupController.Startup(m_settings, m_startupScreen);</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>这些配置和展示资源随主包提供，保证资源模块和业务代码尚未准备好时也能使用。控制器等待 Loading 显示后，再开始执行后续启动步骤。</p>
+<p>Awake 完成环境准备后，由启动控制器运行 FrameworkStartupPipeline，接下来进入模块初始化流程。</p>
+<h2 id="二、模块初始化流程：统一注册，按顺序执行"><a href="#二、模块初始化流程：统一注册，按顺序执行" class="headerlink" title="二、模块初始化流程：统一注册，按顺序执行"></a>二、模块初始化流程：统一注册，按顺序执行</h2><h3 id="1-用-FrameworkSystem-统一模块生命周期"><a href="#1-用-FrameworkSystem-统一模块生命周期" class="headerlink" title="1. 用 FrameworkSystem 统一模块生命周期"></a>1. 用 FrameworkSystem 统一模块生命周期</h3><p>各个框架模块继承 <code>FrameworkSystem</code>，通过统一的方法完成初始化和退出。父类的核心结构如下：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="keyword">abstract</span> <span class="keyword">class</span> <span class="title">FrameworkSystem</span> : <span class="title">IFrameworkSystem</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>初始化模块所需的对象、数据和服务。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;context&quot;&gt;</span>本轮框架服务容器。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;cancellationToken&quot;&gt;</span>用于取消初始化的令牌。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>模块初始化完成的任务。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">abstract</span> UniTask <span class="title">InitializeAsync</span>(<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="function">        FrameworkContext context,</span></span></span><br><span class="line"><span class="params"><span class="function">        CancellationToken cancellationToken</span>)</span>;</span><br><span class="line"></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>默认执行同步清理，需要异步退出的模块可以重写。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>模块清理完成的任务。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">virtual</span> UniTask <span class="title">ShutdownAsync</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">        Shutdown();</span><br><span class="line">        <span class="keyword">return</span> UniTask.CompletedTask;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>同步释放模块资源，也用于应用退出时兜底。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">virtual</span> <span class="keyword">void</span> <span class="title">Shutdown</span>()</span></span><br><span class="line">    &#123;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p><code>InitializeAsync</code> 是每个模块必须实现的方法。例如，资源模块在这里准备 YooAsset 资源服务，配置模块在这里加载配置。退出逻辑按模块需要实现：同步释放资源的模块重写 <code>Shutdown</code>，需要等待异步清理的模块则重写 <code>ShutdownAsync</code>。</p>
+<p>统一父类之后，启动流程就可以按相同的方式调用模块，而不用了解每个模块内部如何初始化。</p>
+<h3 id="2-用-List-组织模块和启动步骤"><a href="#2-用-List-组织模块和启动步骤" class="headerlink" title="2. 用 List 组织模块和启动步骤"></a>2. 用 List 组织模块和启动步骤</h3><p>启动过程除了初始化模块，还包含读取配置、准备代码和创建业务入口。因此，<code>FrameworkStartupPipeline</code> 保存的是启动步骤列表 <code>List&lt;IFrameworkStartupStep&gt;</code>。</p>
+<p>步骤接口提供执行和退出两个方法：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">internal</span> <span class="keyword">interface</span> <span class="title">IFrameworkStartupStep</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>执行当前启动步骤。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;context&quot;&gt;</span>本轮启动上下文。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;cancellationToken&quot;&gt;</span>用于取消启动的令牌。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>当前步骤执行完成的任务。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="function">UniTask <span class="title">ExecuteAsync</span>(<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="function">        FrameworkStartupContext context,</span></span></span><br><span class="line"><span class="params"><span class="function">        CancellationToken cancellationToken</span>)</span>;</span><br><span class="line"></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>清理当前步骤持有的资源。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;context&quot;&gt;</span>本轮启动上下文。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>当前步骤清理完成的任务。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="function">UniTask <span class="title">ShutdownAsync</span>(<span class="params">FrameworkStartupContext context</span>)</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>普通模块由 <code>InitializeFrameworkSystemStep</code> 包装成步骤，配置读取、代码准备和业务入口等操作直接实现这个接口。它们因此可以放进同一个 List，并按顺序执行。</p>
+<p>启动管线的步骤注册与执行核心如下：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">internal</span> <span class="keyword">sealed</span> <span class="keyword">class</span> <span class="title">FrameworkStartupPipeline</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">readonly</span> List&lt;IFrameworkStartupStep&gt; m_steps = <span class="keyword">new</span> List&lt;IFrameworkStartupStep&gt;(); <span class="comment">// 启动步骤列表。</span></span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">readonly</span> FrameworkStartupContext m_context; <span class="comment">// 本轮启动上下文。</span></span><br><span class="line">    <span class="keyword">private</span> <span class="built_in">int</span> m_startedStepCount; <span class="comment">// 已开始执行、需要退出清理的步骤数。</span></span><br><span class="line">    <span class="keyword">private</span> <span class="built_in">bool</span> m_hasRun; <span class="comment">// 防止同一管线重复执行。</span></span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">internal</span> <span class="title">FrameworkStartupPipeline</span>(<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="function">        FrameworkStartupContext context,</span></span></span><br><span class="line"><span class="params"><span class="function">        IGameStartupConfigurationProvider configurationProvider</span>)</span></span><br><span class="line">    &#123;</span><br><span class="line">        m_context = context ?? <span class="keyword">throw</span> <span class="keyword">new</span> ArgumentNullException(<span class="keyword">nameof</span>(context));</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 先确定运行模式，再准备基础模块和业务代码。</span></span><br><span class="line">        Add(<span class="keyword">new</span> ConfigureGameStartupStep(configurationProvider));</span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> GameLoopManager()));</span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> TimerManager()));</span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> ResourceServiceManager()));</span><br><span class="line">        Add(<span class="keyword">new</span> PrepareGameCodeStep());</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 业务代码先安装配置加载器，后续模块再使用业务配置。</span></span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> ConfigManager()));</span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> ModelManager()));</span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> AudioLifecycleManager()));</span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> NetworkManager()));</span><br><span class="line">        Add(<span class="keyword">new</span> InitializeFrameworkSystemStep(<span class="keyword">new</span> UIManager()));</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 框架就绪后创建业务入口，开始业务初始化与主流程。</span></span><br><span class="line">        Add(<span class="keyword">new</span> CompleteFrameworkInitializationStep());</span><br><span class="line">        Add(<span class="keyword">new</span> StartGameEntryStep());</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">internal</span> <span class="keyword">async</span> UniTask <span class="title">RunAsync</span>(<span class="params">CancellationToken cancellationToken</span>)</span></span><br><span class="line">    &#123;</span><br><span class="line">        <span class="comment">// 每条管线只负责一轮启动。</span></span><br><span class="line">        <span class="keyword">if</span> (m_hasRun)</span><br><span class="line">        &#123;</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> InvalidOperationException(<span class="string">&quot;框架启动管线不能重复执行。&quot;</span>);</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        m_hasRun = <span class="literal">true</span>;</span><br><span class="line">        <span class="keyword">for</span> (<span class="built_in">int</span> index = <span class="number">0</span>; index &lt; m_steps.Count; index++)</span><br><span class="line">        &#123;</span><br><span class="line">            cancellationToken.ThrowIfCancellationRequested();</span><br><span class="line"></span><br><span class="line">            <span class="comment">// 执行前记录清理责任，当前步骤中途失败时也参与退出。</span></span><br><span class="line">            m_startedStepCount = index + <span class="number">1</span>;</span><br><span class="line">            <span class="keyword">await</span> m_steps[index].ExecuteAsync(m_context, cancellationToken);</span><br><span class="line">            cancellationToken.ThrowIfCancellationRequested();</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">Add</span>(<span class="params">IFrameworkStartupStep step</span>)</span></span><br><span class="line">    &#123;</span><br><span class="line">        m_steps.Add(step);</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>构造函数中的注册顺序就是启动顺序。<code>RunAsync</code> 遍历列表，等待当前步骤完成后再执行下一步，从而保证前置依赖已经准备好。</p>
+<p>其中，<code>InitializeFrameworkSystemStep</code> 负责调用模块的 <code>InitializeAsync</code>，成功后将模块注册到服务容器，并在退出时调用模块的清理方法。List 保存执行顺序，服务容器保存已经就绪的模块。</p>
+<p>后续新增普通模块，只需要继承 <code>FrameworkSystem</code>，实现生命周期方法，再包装为初始化步骤，加入列表的合适位置。新增特殊启动操作，则实现 <code>IFrameworkStartupStep</code> 后注册到列表。</p>
+<h3 id="3-热更代码模块如何接入"><a href="#3-热更代码模块如何接入" class="headerlink" title="3. 热更代码模块如何接入"></a>3. 热更代码模块如何接入</h3><p>热更代码准备被安排在资源模块之后、配置模块之前。资源模块需要先准备好，才能获取代码文件；业务代码需要先可用，才能创建项目自己的配置加载器。</p>
+<p>这里先明确 AOT 和 HotUpdate 的边界。在当前 HybridCLR 方案中，两者按程序集划分，决定了哪些代码可以通过热更新发布，哪些改动需要重新构建和安装主包。</p>
+<table>
+<thead>
+<tr>
+<th>部分</th>
+<th>当前项目中的内容</th>
+<th>修改后如何发布</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>AOT 主包代码</td>
+<td>框架启动与基础模块、<code>Game.Bootstrap</code> 中的启动配置逻辑，以及主包内的 HybridCLR 接入代码</td>
+<td>修改这些代码需要重新构建并发布安装包</td>
+</tr>
+<tr>
+<td>HotUpdate 业务代码</td>
+<td>配置为热更新程序集的 <code>Game.Runtime</code>，包括 <code>GameEntry</code>、业务配置加载器和业务逻辑</td>
+<td>在与现有主包兼容的前提下，重新构建并发布热更新 DLL，无需更换主包</td>
+</tr>
+</tbody></table>
+<p>AOT 表示代码在构建主包时提前编译。<code>FrameworkBootstrap</code>、模块初始化管线以及代码加载能力需要先存在于主包中，才能启动游戏并加载后续业务代码。HotUpdate 则是通过 HybridCLR 加载执行的业务程序集，当前项目在热更新配置中指定的是 <code>Game.Runtime</code>。</p>
+<p>例如，修改 <code>Game.Runtime</code> 中的背包业务逻辑，且仍使用主包已有接口，可以发布业务 DLL 更新；修改主包里的 <code>FrameworkSystem</code>、启动管线顺序，或者新增业务要调用的框架接口，就需要重新出包。原生插件、Unity 引擎版本等主包能力发生变化时，也需要更新安装包。</p>
+<p>补充 AOT 元数据用于支持相关泛型执行需求，不会把已经编译进主包的 AOT 代码变成可替换代码。热更新业务仍然必须使用当前主包能够提供的类型和接口。</p>
+<p>代码更新与资源更新也需要区分：仅修改可更新资源包中的预制体或配置数据，可以走资源更新；修改主包内嵌且未纳入资源更新的启动场景、启动配置或展示资源，则需要随新主包发布。使用 Default 模式时，业务代码静态编译在主包内，修改业务代码同样需要重新出包。</p>
+<p>这一部分使用 <code>IGameCodePreparation</code> 作为统一接口，由启动配置决定采用哪一种实现。当前提供两种方式：</p>
+<ul>
+<li><code>DefaultGameCodePreparation</code>：使用静态编译到主包中的业务程序集。</li>
+<li><code>HybridCLRCodePreparation</code>：负责 HybridCLR 模式下的业务代码准备与加载。</li>
+</ul>
+<p>启动步骤只负责创建所选实现并调用 <code>PrepareAsync</code>，具体如何取得程序集、如何准备运行环境，由对应实现处理。准备完成后，将业务程序集保存到本轮启动上下文中，供后续创建业务入口使用。</p>
+<p>取得程序集后，还会根据配置中的业务安装类型，通过反射调用其 <code>Install</code> 方法。当前项目在这里安装 <code>GameConfigLoader</code>，把业务对配置加载的具体实现交给框架，随后配置模块才能继续初始化。</p>
+<p>后续如果需要接入其他代码准备方案，可以新增 <code>IGameCodePreparation</code> 实现，并在启动配置中选择它。实现沿用现有的创建约定，完成业务安装并提交准备结果，后面的模块初始化与业务入口流程就能继续复用。</p>
+<h3 id="4-初始化完成后，反射获得业务入口"><a href="#4-初始化完成后，反射获得业务入口" class="headerlink" title="4. 初始化完成后，反射获得业务入口"></a>4. 初始化完成后，反射获得业务入口</h3><p>剩余框架模块全部初始化完成后，框架从前面准备好的业务程序集中，查找实现 <code>IGameEntry</code> 的具体类型，并通过反射创建实例。</p>
+<p>这一步由 <code>StartGameEntryStep</code> 发起，实际查找与创建交给加载器和激活器完成。调用关系如下：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">StartGameEntryStep.ExecuteAsync</span><br><span class="line">    → PreparedGameEntryLoader.LoadAsync</span><br><span class="line">    → GameEntryActivator.Create</span><br><span class="line">    → Activator.CreateInstance</span><br></pre></td></tr></table></figure>
+
+<p><code>StartGameEntryStep.ExecuteAsync</code> 中创建入口的核心代码如下：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// 使用代码准备阶段保存的结果，创建当前业务入口。</span></span><br><span class="line"><span class="keyword">var</span> loader = <span class="keyword">new</span> PreparedGameEntryLoader(context.CodePreparationResult);</span><br><span class="line">m_gameEntry = <span class="keyword">await</span> loader.LoadAsync(context.Services, cancellationToken);</span><br><span class="line"><span class="keyword">if</span> (m_gameEntry == <span class="literal">null</span>)</span><br><span class="line">&#123;</span><br><span class="line">    <span class="keyword">throw</span> <span class="keyword">new</span> InvalidOperationException(<span class="string">&quot;业务入口加载器未返回有效的游戏入口。&quot;</span>);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>加载器先检查代码是否准备完成，再将已经取得的程序集交给反射逻辑：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// 业务程序集必须已经由前面的代码准备步骤提交。</span></span><br><span class="line">cancellationToken.ThrowIfCancellationRequested();</span><br><span class="line"><span class="keyword">if</span> (!m_result.IsCompleted || m_result.RuntimeAssembly == <span class="literal">null</span>)</span><br><span class="line">&#123;</span><br><span class="line">    <span class="keyword">throw</span> <span class="keyword">new</span> InvalidOperationException(<span class="string">&quot;业务代码尚未准备完成，不能创建入口。&quot;</span>);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">return</span> UniTask.FromResult(GameEntryActivator.Create(m_result.RuntimeAssembly));</span><br></pre></td></tr></table></figure>
+
+<p><code>GameEntryActivator</code> 负责遍历程序集中的类型，筛选入口并创建实例。核心过程如下：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">internal</span> <span class="keyword">static</span> <span class="keyword">class</span> <span class="title">GameEntryActivator</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>从指定业务程序集中创建唯一入口。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;assembly&quot;&gt;</span>代码准备阶段取得的业务程序集。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>实现 IGameEntry 的业务入口实例。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;exception cref=&quot;ArgumentNullException&quot;&gt;</span>业务程序集为空。<span class="doctag">&lt;/exception&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;exception cref=&quot;InvalidOperationException&quot;&gt;</span>入口数量不等于一。<span class="doctag">&lt;/exception&gt;</span></span></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> IGameEntry <span class="title">Create</span>(<span class="params">Assembly assembly</span>)</span></span><br><span class="line">    &#123;</span><br><span class="line">        <span class="keyword">if</span> (assembly == <span class="literal">null</span>)</span><br><span class="line">        &#123;</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> ArgumentNullException(<span class="keyword">nameof</span>(assembly));</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 只在指定程序集中筛选实现入口接口的具体类型。</span></span><br><span class="line">        <span class="keyword">var</span> candidates = <span class="keyword">new</span> List&lt;Type&gt;();</span><br><span class="line">        <span class="keyword">foreach</span> (<span class="keyword">var</span> type <span class="keyword">in</span> assembly.GetTypes())</span><br><span class="line">        &#123;</span><br><span class="line">            <span class="keyword">if</span> (!type.IsAbstract &amp;&amp;</span><br><span class="line">                !type.IsGenericTypeDefinition &amp;&amp;</span><br><span class="line">                <span class="keyword">typeof</span>(IGameEntry).IsAssignableFrom(type))</span><br><span class="line">            &#123;</span><br><span class="line">                candidates.Add(type);</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 入口必须唯一，避免无法确定业务启动目标。</span></span><br><span class="line">        <span class="keyword">if</span> (candidates.Count != <span class="number">1</span>)</span><br><span class="line">        &#123;</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> InvalidOperationException(<span class="string">&quot;业务程序集中必须有且只有一个 IGameEntry 实现。&quot;</span>);</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="comment">// 使用无参构造函数创建入口，允许非 public 的构造函数。</span></span><br><span class="line">        <span class="keyword">return</span> (IGameEntry)Activator.CreateInstance(candidates[<span class="number">0</span>], <span class="literal">true</span>);</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>当前项目对程序集和入口有以下约定：</p>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>当前约定</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>业务程序集名称</td>
+<td><code>Game.Runtime</code>，与 <code>Game.Runtime.asmdef</code> 中的 <code>name</code> 一致</td>
+</tr>
+<tr>
+<td>启动配置</td>
+<td><code>GameHotUpdateSettings.RuntimeAssemblyName</code> 返回 <code>Game.Runtime</code>，不带 <code>.dll</code> 扩展名</td>
+</tr>
+<tr>
+<td>对应程序集文件</td>
+<td><code>Game.Runtime.dll</code>，热更新时由代码准备流程加载</td>
+</tr>
+<tr>
+<td>前置安装类型</td>
+<td><code>Game.GameRuntimeInstaller</code>，由 <code>InstallerTypeName</code> 指定，提供 <code>public static void Install()</code></td>
+</tr>
+<tr>
+<td>业务入口类型</td>
+<td>当前是 <code>Game.GameEntry</code>，位于 <code>Game.Runtime</code> 程序集中，实现 <code>IGameEntry</code></td>
+</tr>
+</tbody></table>
+<p><code>Game.Runtime</code> 是当前项目在启动配置中明确指定的名称，反射激活器本身接收的是 <code>Assembly</code> 对象。因此，更换项目程序集名称时，需要同步调整 asmdef、启动配置以及相关构建与热更新配置。</p>
+<p>当前启动路径只扫描代码准备阶段提交的这个程序集。如果项目拆分为多个业务程序集，需要把唯一的 <code>IGameEntry</code> 实现放在指定的入口程序集中。</p>
+<p>入口类本身不要求一定叫 <code>GameEntry</code>，框架通过接口识别它。它需要是能够实例化的非抽象、非开放泛型类型，并提供无参构造函数；当前反射调用也允许非 public 的无参构造函数。当前业务入口使用 <code>[Preserve]</code> 标记，保留反射所需的类型信息。</p>
+<p>入口创建完成后，框架通过 <code>IGameEntry</code> 接口依次调用业务初始化和业务主流程，具体执行逻辑由业务层提供。</p>
+<h2 id="三、业务入口：初始化业务并执行游戏逻辑"><a href="#三、业务入口：初始化业务并执行游戏逻辑" class="headerlink" title="三、业务入口：初始化业务并执行游戏逻辑"></a>三、业务入口：初始化业务并执行游戏逻辑</h2><p><code>GameEntry</code> 是业务层自身的统一入口，实现 <code>IGameEntry</code> 接口，由框架创建，无需再挂载到场景。</p>
+<p><code>IGameEntry</code> 的定义如下：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>框架统一调用的业务初始化、游戏入口和退出清理契约。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line"><span class="keyword">public</span> <span class="keyword">interface</span> <span class="title">IGameEntry</span></span><br><span class="line">&#123;</span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>安装业务模块；成功返回后框架才会调用 MainAsync。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;loadingSession&quot;&gt;</span>共享展示会话，业务模块可报告当前初始化操作，不关闭展示。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;cancellationToken&quot;&gt;</span>用于取消初始化的令牌。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>全部业务模块就绪的任务。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="function">UniTask <span class="title">InitializeAsync</span>(<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="function">        IStartupLoadingSession loadingSession,</span></span></span><br><span class="line"><span class="params"><span class="function">        CancellationToken cancellationToken</span>)</span>;</span><br><span class="line"></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>进入游戏并等待首个业务界面就绪；返回后由框架关闭 Loading。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;loadingSession&quot;&gt;</span>框架已开始入口步骤的会话，仅报告内部进度，不开始、完成或关闭步骤。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;param name=&quot;cancellationToken&quot;&gt;</span>用于取消进入游戏的令牌。<span class="doctag">&lt;/param&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>游戏入口执行完成的任务。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="function">UniTask <span class="title">MainAsync</span>(<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="function">        IStartupLoadingSession loadingSession,</span></span></span><br><span class="line"><span class="params"><span class="function">        CancellationToken cancellationToken</span>)</span>;</span><br><span class="line"></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;summary&gt;</span>先释放界面和场景，再逆序退出业务模块；初始化中途失败时也会调用。<span class="doctag">&lt;/summary&gt;</span></span></span><br><span class="line">    <span class="comment"><span class="doctag">///</span> <span class="doctag">&lt;returns&gt;</span>游戏入口退出清理完成的任务。<span class="doctag">&lt;/returns&gt;</span></span></span><br><span class="line">    <span class="function">UniTask <span class="title">ShutdownAsync</span>()</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>业务入口分为初始化和正式进入游戏两个阶段。</p>
+<h3 id="1-InitializeAsync：准备业务模块与框架扩展"><a href="#1-InitializeAsync：准备业务模块与框架扩展" class="headerlink" title="1. InitializeAsync：准备业务模块与框架扩展"></a>1. InitializeAsync：准备业务模块与框架扩展</h3><p>框架先调用 <code>InitializeAsync</code>。业务在这里注册自己的模型、安装框架所需的业务扩展，并初始化网络等项目相关能力。</p>
+<p>当前项目通过业务启动管线组织这些操作。以打开背包为例：框架知道如何加载、显示和关闭一个界面，但需要业务告诉它“背包使用哪个界面预制体”，以及“配置表中的背包跳转 ID 对应哪个界面”。业务在初始化时把这些界面信息和配置读取方法交给 UI 模块，后面就可以通过统一接口打开目标界面。</p>
+<p>前面的配置加载器和这里的 UI 扩展，都属于业务对框架的接入，只是安装时机不同：配置加载器需要在配置模块初始化前安装，UI 扩展则等框架与配置就绪后再安装。</p>
+<p>后续增加业务模块时，也可以加入业务启动管线，保持项目自身的初始化顺序清晰。</p>
+<h3 id="2-MainAsync：执行业务自身的入口逻辑"><a href="#2-MainAsync：执行业务自身的入口逻辑" class="headerlink" title="2. MainAsync：执行业务自身的入口逻辑"></a>2. MainAsync：执行业务自身的入口逻辑</h3><p>业务初始化完成后，框架调用 <code>MainAsync</code>，正式进入项目自己的流程。</p>
+<p>当前项目在这里加载 <code>Scenes/SampleScene</code>，然后打开首页。其他项目可以根据自己的需求进入登录、角色选择、新手引导或战斗场景，这些流程由业务层决定。</p>
+<p>业务入口等待初始场景和界面就绪后返回，框架结束启动 Loading。至此，框架的启动流程结束，后续游戏流程由业务层组织，框架继续提供资源、时间、配置、网络和 UI 等基础服务。</p>
+<h3 id="3-保留对应的退出入口"><a href="#3-保留对应的退出入口" class="headerlink" title="3. 保留对应的退出入口"></a>3. 保留对应的退出入口</h3><p>业务入口还提供 <code>ShutdownAsync</code>，用于关闭业务界面、卸载场景和清理业务模块。框架退出时先调用业务退出，再逆序释放已经开始的框架步骤；启动中途失败时，也沿用对应的清理机制。</p>
+<p>这三块结构分别负责启动环境、模块准备和业务执行。通过统一的模块父类、启动步骤列表和业务入口接口，后续扩展可以在对应位置接入，继续沿用已有的执行顺序与生命周期管理。</p>
+</article><div class="post-copyright"><div class="post-copyright__author"><span class="post-copyright-meta"><i class="fas fa-circle-user fa-fw"></i>文章作者: </span><span class="post-copyright-info"><a href="https://cyskdsn.top">穿越时空的思念</a></span></div><div class="post-copyright__type"><span class="post-copyright-meta"><i class="fas fa-square-arrow-up-right fa-fw"></i>文章链接: </span><span class="post-copyright-info"><a href="https://cyskdsn.top/posts/df7521a5.html">https://cyskdsn.top/posts/df7521a5.html</a></span></div><div class="post-copyright__notice"><span class="post-copyright-meta"><i class="fas fa-circle-exclamation fa-fw"></i>版权声明: </span><span class="post-copyright-info">本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a> 许可协议。转载请注明来源 <a href="https://cyskdsn.top" target="_blank">穿越时空的思念</a>！</span></div></div><div class="tag_share"><div class="post-meta__tag-list"><a class="post-meta__tags" href="/tags/UnityFramework/">UnityFramework</a></div><div class="post-share"><div class="social-share" data-image="/img/Title/AlloyFramework.jpeg" data-sites="facebook,twitter,wechat,weibo,qq"></div><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/css/share.min.css" media="print" onload="this.media='all'"><script src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/js/social-share.min.js" defer></script></div></div><nav class="pagination-post" id="pagination"><a class="pagination-related" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块"><img class="cover" src="/img/Title/AlloyFramework.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of previous post"><div class="info"><div class="info-1"><div class="info-item-1">上一篇</div><div class="info-item-2">AlloyFramework(三)：框架循环与时间模块</div></div><div class="info-2"><div class="info-item-1">游戏业务中，经常需要“等一会儿，再执行一段逻辑”：提示显示两秒后关闭，角色死亡后延迟复活，或者等下一帧再刷新界面布局。 因此，框架需要提供一种方便的延迟写法，让业务能够直接表达“多久之后做什么”。例如，让提示两秒后关闭： 12345// 两秒后关闭提示，使用不受游戏时间缩放影响的计时。long closeTimerID = AlloyTimer.DelaySeconds(    2.0,    CloseTip,    useTimeScale: false);  这里的 CloseTip 是业务自己的关闭方法，计时器负责等待并在到期后调用。返回的任务 ID 则用于提前取消：如果提示已经被玩家手动关闭，就可以取消原来的延迟任务。 12// 提示提前关闭时，取消尚未执行的延迟回调。AlloyTimer.Remove(closeTimerID);  从一次延迟继续往下看，还会遇到每秒刷新一次倒计时、每隔几帧检查一次状态、重复执行指定次数等需求。游戏暂停时，有的任务需要一起暂停，有的界面刷新则需要继续。这些都是同一类计时需求的不同用法。 Unity 的协程和 UniTask 都可以表达...</div></div></div></a><a class="pagination-related" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块"><img class="cover" src="/img/Title/AlloyFramework.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of next post"><div class="info text-right"><div class="info-1"><div class="info-item-1">下一篇</div><div class="info-item-2">AlloyFramework(一)：最小的游戏框架需要包含几个模块</div></div><div class="info-2"><div class="info-item-1">写一个 Unity Demo 时，我们通常希望尽快把核心玩法跑起来。但真正开始动手后就会发现：在玩法之外，总有一批基础逻辑需要先写。 程序从哪里启动？资源怎么加载？倒计时怎么管理？配置表怎么读取？怎样与服务器通信？资源和代码怎么更新？界面如何打开、关闭和切换？ 换一个 Demo，这些问题依然存在。项目规模扩大之后，它们还会带来初始化顺序、资源释放、异步取消、异常恢复等更具体的问题。 这就是我想搭建 AlloyFramework 的原因：把项目中反复出现的通用需求整理出来，形成可以复用的基础能力，让开发新项目时能够把更多精力放在玩法和业务上。 这一篇先不讨论具体代码，也不把需求描述当作已经完成的功能清单。我们先回答一个问题：一个最小的游戏框架，需要替项目承担哪些职责？ 一、统一的启动入口：让游戏按确定的顺序进入运行状态Unity 提供了 Awake、OnEnable、Start 等生命周期方法，但这些方法并不会自动形成一条清晰的业务启动流程。 项目很小时，把初始化代码写在几个组件里似乎就够了。随着模块增加，依赖关系会逐渐显现：读取配置之前可能需要准备资源包，打开登录界面之前需要初始...</div></div></div></a></nav><div class="relatedPosts"><div class="headline"><i class="fas fa-thumbs-up fa-fw"></i><span>相关推荐</span></div><div class="relatedPosts-list"><a class="pagination-related" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-11</div><div class="info-item-2">AlloyFramework(三)：框架循环与时间模块</div></div><div class="info-2"><div class="info-item-1">游戏业务中，经常需要“等一会儿，再执行一段逻辑”：提示显示两秒后关闭，角色死亡后延迟复活，或者等下一帧再刷新界面布局。 因此，框架需要提供一种方便的延迟写法，让业务能够直接表达“多久之后做什么”。例如，让提示两秒后关闭： 12345// 两秒后关闭提示，使用不受游戏时间缩放影响的计时。long closeTimerID = AlloyTimer.DelaySeconds(    2.0,    CloseTip,    useTimeScale: false);  这里的 CloseTip 是业务自己的关闭方法，计时器负责等待并在到期后调用。返回的任务 ID 则用于提前取消：如果提示已经被玩家手动关闭，就可以取消原来的延迟任务。 12// 提示提前关闭时，取消尚未执行的延迟回调。AlloyTimer.Remove(closeTimerID);  从一次延迟继续往下看，还会遇到每秒刷新一次倒计时、每隔几帧检查一次状态、重复执行指定次数等需求。游戏暂停时，有的任务需要一起暂停，有的界面刷新则需要继续。这些都是同一类计时需求的不同用法。 Unity 的协程和 UniTask 都可以表达...</div></div></div></a><a class="pagination-related" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-10</div><div class="info-item-2">AlloyFramework(一)：最小的游戏框架需要包含几个模块</div></div><div class="info-2"><div class="info-item-1">写一个 Unity Demo 时，我们通常希望尽快把核心玩法跑起来。但真正开始动手后就会发现：在玩法之外，总有一批基础逻辑需要先写。 程序从哪里启动？资源怎么加载？倒计时怎么管理？配置表怎么读取？怎样与服务器通信？资源和代码怎么更新？界面如何打开、关闭和切换？ 换一个 Demo，这些问题依然存在。项目规模扩大之后，它们还会带来初始化顺序、资源释放、异步取消、异常恢复等更具体的问题。 这就是我想搭建 AlloyFramework 的原因：把项目中反复出现的通用需求整理出来，形成可以复用的基础能力，让开发新项目时能够把更多精力放在玩法和业务上。 这一篇先不讨论具体代码，也不把需求描述当作已经完成的功能清单。我们先回答一个问题：一个最小的游戏框架，需要替项目承担哪些职责？ 一、统一的启动入口：让游戏按确定的顺序进入运行状态Unity 提供了 Awake、OnEnable、Start 等生命周期方法，但这些方法并不会自动形成一条清晰的业务启动流程。 项目很小时，把初始化代码写在几个组件里似乎就够了。随着模块增加，依赖关系会逐渐显现：读取配置之前可能需要准备资源包，打开登录界面之前需要初始...</div></div></div></a></div></div></div><div class="aside-content" id="aside-content"><div class="card-widget card-info text-center"><div class="avatar-img"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="author-info-name">穿越时空的思念</div><div class="author-info-description">每天进步一点，做更好的自己!</div><div class="site-data"><a href="/archives/"><div class="headline">文章</div><div class="length-num">40</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">12</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">1</div></a></div><a id="card-info-btn" target="_blank" rel="noopener" href="https://github.com/Jin8868"><i class="fab fa-github"></i><span>Follow Me</span></a></div><div class="card-widget card-announcement"><div class="item-headline"><i class="fas fa-bullhorn fa-shake"></i><span>公告</span></div><div class="announcement_content"></div></div><div class="sticky_layout"><div class="card-widget" id="card-toc"><div class="item-headline"><i class="fas fa-stream"></i><span>目录</span><span class="toc-percentage"></span></div><div class="toc-content"><ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BB%A3%E7%A0%81%E4%B8%AD%E4%BD%BF%E7%94%A8%E7%9A%84-UniTask"><span class="toc-number">1.</span> <span class="toc-text">代码中使用的 UniTask</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%80%E3%80%81%E6%A1%86%E6%9E%B6%E5%85%A5%E5%8F%A3%EF%BC%9A%E4%BB%8E-FrameworkBootstrap-%E7%9A%84-Awake-%E5%BC%80%E5%A7%8B"><span class="toc-number">2.</span> <span class="toc-text">一、框架入口：从 FrameworkBootstrap 的 Awake 开始</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BA%8C%E3%80%81%E6%A8%A1%E5%9D%97%E5%88%9D%E5%A7%8B%E5%8C%96%E6%B5%81%E7%A8%8B%EF%BC%9A%E7%BB%9F%E4%B8%80%E6%B3%A8%E5%86%8C%EF%BC%8C%E6%8C%89%E9%A1%BA%E5%BA%8F%E6%89%A7%E8%A1%8C"><span class="toc-number">3.</span> <span class="toc-text">二、模块初始化流程：统一注册，按顺序执行</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E7%94%A8-FrameworkSystem-%E7%BB%9F%E4%B8%80%E6%A8%A1%E5%9D%97%E7%94%9F%E5%91%BD%E5%91%A8%E6%9C%9F"><span class="toc-number">3.1.</span> <span class="toc-text">1. 用 FrameworkSystem 统一模块生命周期</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E7%94%A8-List-%E7%BB%84%E7%BB%87%E6%A8%A1%E5%9D%97%E5%92%8C%E5%90%AF%E5%8A%A8%E6%AD%A5%E9%AA%A4"><span class="toc-number">3.2.</span> <span class="toc-text">2. 用 List 组织模块和启动步骤</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-%E7%83%AD%E6%9B%B4%E4%BB%A3%E7%A0%81%E6%A8%A1%E5%9D%97%E5%A6%82%E4%BD%95%E6%8E%A5%E5%85%A5"><span class="toc-number">3.3.</span> <span class="toc-text">3. 热更代码模块如何接入</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#4-%E5%88%9D%E5%A7%8B%E5%8C%96%E5%AE%8C%E6%88%90%E5%90%8E%EF%BC%8C%E5%8F%8D%E5%B0%84%E8%8E%B7%E5%BE%97%E4%B8%9A%E5%8A%A1%E5%85%A5%E5%8F%A3"><span class="toc-number">3.4.</span> <span class="toc-text">4. 初始化完成后，反射获得业务入口</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%89%E3%80%81%E4%B8%9A%E5%8A%A1%E5%85%A5%E5%8F%A3%EF%BC%9A%E5%88%9D%E5%A7%8B%E5%8C%96%E4%B8%9A%E5%8A%A1%E5%B9%B6%E6%89%A7%E8%A1%8C%E6%B8%B8%E6%88%8F%E9%80%BB%E8%BE%91"><span class="toc-number">4.</span> <span class="toc-text">三、业务入口：初始化业务并执行游戏逻辑</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-InitializeAsync%EF%BC%9A%E5%87%86%E5%A4%87%E4%B8%9A%E5%8A%A1%E6%A8%A1%E5%9D%97%E4%B8%8E%E6%A1%86%E6%9E%B6%E6%89%A9%E5%B1%95"><span class="toc-number">4.1.</span> <span class="toc-text">1. InitializeAsync：准备业务模块与框架扩展</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-MainAsync%EF%BC%9A%E6%89%A7%E8%A1%8C%E4%B8%9A%E5%8A%A1%E8%87%AA%E8%BA%AB%E7%9A%84%E5%85%A5%E5%8F%A3%E9%80%BB%E8%BE%91"><span class="toc-number">4.2.</span> <span class="toc-text">2. MainAsync：执行业务自身的入口逻辑</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-%E4%BF%9D%E7%95%99%E5%AF%B9%E5%BA%94%E7%9A%84%E9%80%80%E5%87%BA%E5%85%A5%E5%8F%A3"><span class="toc-number">4.3.</span> <span class="toc-text">3. 保留对应的退出入口</span></a></li></ol></li></ol></div></div><div class="card-widget card-post-series"><div class="item-headline"><i class="fa-solid fa-layer-group"></i><span>系列文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(三)：框架循环与时间模块"></a><div class="content"><a class="title" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块">AlloyFramework(三)：框架循环与时间模块</a><time datetime="2026-11-11T14:14:05.125Z" title="发表于 2026-11-11 22:14:05">2026-11-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/df7521a5.html" title="AlloyFramework(二)：框架启动流程"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(二)：框架启动流程"></a><div class="content"><a class="title" href="/posts/df7521a5.html" title="AlloyFramework(二)：框架启动流程">AlloyFramework(二)：框架启动流程</a><time datetime="2026-11-11T14:14:05.046Z" title="发表于 2026-11-11 22:14:05">2026-11-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(一)：最小的游戏框架需要包含几个模块"></a><div class="content"><a class="title" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块">AlloyFramework(一)：最小的游戏框架需要包含几个模块</a><time datetime="2026-11-10T11:47:13.765Z" title="发表于 2026-11-10 19:47:13">2026-11-10</time></div></div></div></div><div class="card-widget card-recent-post"><div class="item-headline"><i class="fas fa-history"></i><span>最新文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(三)：框架循环与时间模块"/></a><div class="content"><a class="title" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块">AlloyFramework(三)：框架循环与时间模块</a><time datetime="2026-11-11T14:14:05.125Z" title="发表于 2026-11-11 22:14:05">2026-11-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/df7521a5.html" title="AlloyFramework(二)：框架启动流程"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(二)：框架启动流程"/></a><div class="content"><a class="title" href="/posts/df7521a5.html" title="AlloyFramework(二)：框架启动流程">AlloyFramework(二)：框架启动流程</a><time datetime="2026-11-11T14:14:05.046Z" title="发表于 2026-11-11 22:14:05">2026-11-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(一)：最小的游戏框架需要包含几个模块"/></a><div class="content"><a class="title" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块">AlloyFramework(一)：最小的游戏框架需要包含几个模块</a><time datetime="2026-11-10T11:47:13.765Z" title="发表于 2026-11-10 19:47:13">2026-11-10</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/835c2d57.html" title="Unity UI的粒子特效的层级处理"><img src="/img/Title/UIParticle.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity UI的粒子特效的层级处理"/></a><div class="content"><a class="title" href="/posts/835c2d57.html" title="Unity UI的粒子特效的层级处理">Unity UI的粒子特效的层级处理</a><time datetime="2026-10-31T08:00:00.000Z" title="发表于 2026-10-31 16:00:00">2026-10-31</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/c14079c3.html" title="视频从 MP4 到 Unity 屏幕显示的流程与原理"><img src="/img/Title/MP4PlayPipline.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="视频从 MP4 到 Unity 屏幕显示的流程与原理"/></a><div class="content"><a class="title" href="/posts/c14079c3.html" title="视频从 MP4 到 Unity 屏幕显示的流程与原理">视频从 MP4 到 Unity 屏幕显示的流程与原理</a><time datetime="2026-10-27T16:00:00.000Z" title="发表于 2026-10-28 00:00:00">2026-10-28</time></div></div></div></div></div></div></main><footer id="footer"><div class="footer-other"><div class="footer-copyright"><span class="copyright">&copy;2025 - 2026 By 穿越时空的思念</span></div><div class="footer_custom_text">每天进步一点，做更好的自己!</div></div></footer></div><div id="rightside"><div id="rightside-config-hide"><button id="readmode" type="button" title="阅读模式"><i class="fas fa-book-open"></i></button><button id="darkmode" type="button" title="日间和夜间模式切换"><i class="fas fa-adjust"></i></button><button id="hide-aside-btn" type="button" title="单栏和双栏切换"><i class="fas fa-arrows-alt-h"></i></button></div><div id="rightside-config-show"><button id="rightside-config" type="button" title="设置"><i class="fas fa-cog fa-spin"></i></button><button class="close" id="mobile-toc-button" type="button" title="目录"><i class="fas fa-list-ul"></i></button><button id="go-up" type="button" title="回到顶部"><span class="scroll-percent"></span><i class="fas fa-arrow-up"></i></button></div></div><div><script src="/js/utils.js"></script><script src="/js/main.js"></script><div class="js-pjax"><script>(async () => {
+  const showKatex = () => {
+    document.querySelectorAll('#article-container .katex').forEach(el => el.classList.add('katex-show'))
+  }
+
+  if (!window.katex_js_css) {
+    window.katex_js_css = true
+    await btf.getCSS('https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css')
+    if (true) {
+      await btf.getScript('https://cdn.jsdelivr.net/npm/katex/dist/contrib/copy-tex.min.js')
+    }
+  }
+
+  showKatex()
+})()</script><script>(() => {
+  const runMermaid = ele => {
+    window.loadMermaid = true
+    const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default'
+
+    ele.forEach((item, index) => {
+      const mermaidSrc = item.firstElementChild
+      const mermaidThemeConfig = `%%{init:{ 'theme':'${theme}'}}%%\n`
+      const mermaidID = `mermaid-${index}`
+      const mermaidDefinition = mermaidThemeConfig + mermaidSrc.textContent
+
+      const renderFn = mermaid.render(mermaidID, mermaidDefinition)
+      const renderMermaid = svg => {
+        mermaidSrc.insertAdjacentHTML('afterend', svg)
+      }
+
+      // mermaid v9 and v10 compatibility
+      typeof renderFn === 'string' ? renderMermaid(renderFn) : renderFn.then(({ svg }) => renderMermaid(svg))
+    })
+  }
+
+  const codeToMermaid = () => {
+    const codeMermaidEle = document.querySelectorAll('pre > code.mermaid')
+    if (codeMermaidEle.length === 0) return
+
+    codeMermaidEle.forEach(ele => {
+      const preEle = document.createElement('pre')
+      preEle.className = 'mermaid-src'
+      preEle.hidden = true
+      preEle.textContent = ele.textContent
+      const newEle = document.createElement('div')
+      newEle.className = 'mermaid-wrap'
+      newEle.appendChild(preEle)
+      ele.parentNode.replaceWith(newEle)
+    })
+  }
+
+  const loadMermaid = () => {
+    if (true) codeToMermaid()
+    const $mermaid = document.querySelectorAll('#article-container .mermaid-wrap')
+    if ($mermaid.length === 0) return
+
+    const runMermaidFn = () => runMermaid($mermaid)
+    btf.addGlobalFn('themeChange', runMermaidFn, 'mermaid')
+    window.loadMermaid ? runMermaidFn() : btf.getScript('https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js').then(runMermaidFn)
+  }
+
+  btf.addGlobalFn('encrypt', loadMermaid, 'mermaid')
+  window.pjax ? loadMermaid() : document.addEventListener('DOMContentLoaded', loadMermaid)
+})()</script></div><script defer="defer" id="ribbon" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-ribbon.min.js" size="150" alpha="0.6" zIndex="-1" mobile="true" data-click="true"></script><script defer="defer" id="fluttering_ribbon" mobile="true" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-fluttering-ribbon.min.js"></script><div id="local-search"><div class="search-dialog"><nav class="search-nav"><span class="search-dialog-title">搜索</span><span id="loading-status"></span><button class="search-close-button"><i class="fas fa-times"></i></button></nav><div class="text-center" id="loading-database"><i class="fas fa-spinner fa-pulse"></i><span>  数据加载中</span></div><div class="search-wrap"><div id="local-search-input"><div class="local-search-box"><input class="local-search-box--input" placeholder="搜索文章" type="text"/></div></div><hr/><div id="local-search-results"></div><div id="local-search-stats-wrap"></div></div></div><div id="search-mask"></div><script src="/js/search/local-search.js"></script></div></div></body></html>
