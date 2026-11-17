@@ -5990,6 +5990,603 @@ TaskPanel ViewTaskPanel 位于 Examples/Task/View，负责：
 ]]></content>
   </entry>
   <entry>
+    <title>AlloyFramework的实现(五) - 业务代码准备、配置与数据模型</title>
+    <url>/posts/f7757111.html</url>
+    <content><![CDATA[上一篇介绍了 AlloyFramework 的资源管理系统。这一篇继续沿启动流程，介绍业务代码准备、配置预加载和 Model 管理，分别说明它们解决的问题与具体实现。
+内容以当前框架与 game-template 源码为准；HybridCLR 重点介绍启动时的校验、加载和反射安装流程，完整构建发布另行讨论。
+一、先看整体启动流程这三个处理过程也有先后依赖：资源服务先就绪，随后准备业务代码，由业务安装配置加载器，再执行配置加载和 Model 管理器初始化。当前 FrameworkStartupPipeline 中的顺序如下：
+Add(new InitializeFrameworkSystemStep(new ResourceServiceManager()));Add(new PrepareGameCodeStep());// 业务代码必须先安装配置加载器，Config 随后才能加载业务配置。Add(new InitializeFrameworkSystemStep(new ConfigManager()));Add(new InitializeFrameworkSystemStep(new ModelManager()));
+
+配置文件需要通过资源系统取得，具体配置加载器又定义在业务程序集中，所以这个顺序体现的是依赖关系。PrepareGameCodeStep 是代码准备步骤，Config 和 Model 则作为框架系统参与初始化与退出。
+
+    graph TD
+    Resource[&quot;资源服务就绪&quot;] --&gt; Code[&quot;准备业务程序集&quot;]
+    Code --&gt; Install[&quot;调用业务安装入口&quot;]
+    Install --&gt; Loader[&quot;登记业务配置加载器&quot;]
+    Loader --&gt; Config[&quot;ConfigManager：加载并注册配置&quot;]
+    Config --&gt; Model[&quot;ModelManager：建立管理入口&quot;]
+    Model --&gt; Other[&quot;完成音频、网络、UI 等框架初始化&quot;]
+    Other --&gt; Business[&quot;进入业务启动管线，注册 Model 类型&quot;]
+    Business --&gt; Get[&quot;首次 Get 时创建并初始化 Model&quot;]
+  
+
+这张图有两个容易混淆的地方。第一，业务安装入口不等于正式业务入口：前者只安装配置加载器等早期约定，后者要等框架系统全部就绪后才执行。第二，ModelManager 就绪不等于所有 Model 已创建：类型注册与实例初始化发生在后续阶段。下面说明各个系统的详细逻辑。
+二、业务代码接入：通过反射调用约定的安装入口有些项目需要热更新，但是有些项目又不需要热更新。所以框架不应该直接写死对应的逻辑，而是给项目选择的空间。而实现选择的方式可以是：1、配置。2、反射。我这里选用的反射的方式，因为热更新可能有多种的实现方式(ILRuntime、InjectFix、HybirdCLR)，为了后续的拓展这里采用约定安装入口、通过反射调用的方式。两种代码准备服务分别负责取得程序集，随后执行相同的安装约定，为后续配置加载提供接入点。
+1. 通过反射连接框架与业务代码PrepareGameCodeStep 根据主包配置，通过反射创建代码准备服务，再调用它的 PrepareAsync。核心代码如下，省略了 Loading 展示：
+// 实现类型与业务入口名称由主包启动配置决定。var configuration = context.Configuration;var codePreparation = (IGameCodePreparation)Activator.CreateInstance(    configuration.CodePreparationType,    context.CodePreparationResult,    configuration.RuntimeAssemblyName,    configuration.InstallerTypeName);await codePreparation.PrepareAsync(context.Services, cancellationToken);cancellationToken.ThrowIfCancellationRequested();
+
+这里的 Activator.CreateInstance 创建的是代码准备服务。服务取得业务程序集后，还会通过反射找到业务安装类，并执行它的 Install 方法。下面是 HybridCLRCodePreparation.InstallRuntime 中的核心过程，省略了程序集非空检查：
+// 在已经取得的业务程序集中，找到配置指定的安装类。Type installerType = assembly.GetType(m_installerTypeName, true);MethodInfo method = installerType.GetMethod(    &quot;Install&quot;, BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null);if (method == null || method.ReturnType != typeof(void) || method.ContainsGenericParameters)&#123;    throw new InvalidOperationException(&quot;业务安装入口必须是 public static void Install()。&quot;);&#125;// 静态、无参方法不需要业务对象实例，也不需要传入参数。method.Invoke(null, null);
+
+因此，框架只需要知道业务程序集名称、安装类型名称和方法约定，就能调用业务代码，无需直接引用 GameRuntimeInstaller。反射相关类型来自 System 与 System.Reflection；在 Unity Player 中，还需要保留被反射调用的成员，当前安装类和方法使用了 Preserve。
+代码准备服务有两个实现：DefaultGameCodePreparation 使用主包内的业务代码，HybridCLRCodePreparation 负责热更新代码的准备。它们都实现 IGameCodePreparation，区别主要在于如何取得业务程序集。
+2. DefaultGameCodePreparation：使用主包内的业务代码项目侧的 DefaultGameCodePreparation 遍历当前已加载程序集，按配置名称找到业务程序集，再查找公开静态的无参 Install 方法。
+它不读取热更新 DLL，也不执行 Assembly.Load。Default 模式的前提是业务程序集已经静态编译进主包并可被找到。
+准备成功后，结果记录业务程序集和完成标记，后续启动步骤可以继续使用这份结果。
+3. HybridCLRCodePreparation：校验、加载并安装热更新代码HybridCLRCodePreparation 负责准备热更新业务代码。Editor 中直接复用 Unity 已加载的程序集；Player 中则通过资源系统取得代码文件，完成以下流程：
+
+读取代码清单：准备 CodePackage，取得元数据与业务 DLL 的文件信息。
+校验内容：检查平台、主包基线和业务入口是否匹配，并校验文件哈希。
+补充 AOT 元数据：调用 HybridCLR 接口，为相应 AOT 程序集补充运行所需的元数据。
+加载业务程序集：按清单顺序调用 Assembly.Load，保存目标业务程序集。
+执行安装入口：反射调用业务 Install 方法，注册配置加载器，并标记准备完成。
+
+完成后，启动管线继续执行 Config 初始化。Editor 复用已有代码，真实热更新仍需在目标平台的 IL2CPP Player 中验证；进入元数据或程序集加载阶段后，当前实现无法回滚，后续失败需要重启 Player。
+4. 两条路径最终进入同一个业务安装入口当前 GameRuntimeInstaller 的职责很集中：调用配置加载器安装方法。安装方法执行：
+// 执行位置是业务代码准备阶段，此时只登记加载器。AlloyConfig.Instance.SetLoader(new GameConfigLoader());
+
+Default 与 HybridCLR 的代码来源不同，但都汇合到这个显式入口。
+三、配置预加载：把选择权交给业务，把调用时机交给框架进入首个界面之前可能就需要 UI 跳转表，而战斗配置可以等到进入战斗前再准备。不同项目的表结构、文件格式和使用时机也不一样，框架怎样让业务自己决定哪些表需要提前加载，同时保证后续模块使用时已经准备好？
+为此，框架提供加载器注册入口，由业务决定要提前准备的配置集合；ConfigManager 在启动流程中调用它，并等待这批配置可用。具体文件读取和构表仍由业务实现。
+1. 配置系统同样分为业务层、框架层和实现层业务需要的是“取得某个 ID 对应的配置”，如果各个功能直接操作 Luban 的 Tables 和生成表，配置加载、查询和释放就会与具体配置工具绑定。因此，配置系统也沿用前面资源系统的三层结构：业务层 → 框架层 → 实现层，当前实现层使用 Luban，由框架接口封装它的加载与查询能力。
+
+    graph TD
+    Business[&quot;业务层：界面、角色等功能读取配置&quot;]
+    Framework[&quot;框架层：AlloyConfig 与 ConfigManager&quot;]
+    Contract[&quot;框架契约：IAlloyConfigLoader 与 IAlloyConfigTable&quot;]
+    Implementation[&quot;实现层：配置加载器与表适配器&quot;]
+    Luban[&quot;Luban：ByteBuf、Tables 与生成表&quot;]
+    Business --&gt;|按类型和 ID 查询| Framework
+    Framework --&gt;|通过接口调用| Contract
+    Contract --&gt;|当前实现| Implementation
+    Implementation --&gt; Luban
+  
+
+
+
+
+层级
+当前对应代码
+职责
+
+
+
+业务层
+使用配置的界面、角色等业务功能
+表达查询需求，使用配置驱动业务行为
+
+
+框架层
+AlloyConfig、ConfigManager 及配置接口
+统一加载时机、表注册、按类型与 ID 查询，以及退出清理
+
+
+实现层
+GameConfigLoader、GameConfig、UIJumpConfigTableProvider 对 Luban 的适配
+读取配置资源，使用 Luban 解析并构造表，将生成表的查询方式适配为框架接口
+
+
+运行时由框架通过接口调用具体实现；接口定义在框架侧，Luban 适配代码实现这些接口。框架的通用管理逻辑不需要直接引用项目生成的 Tables 类。
+当前 Luban 适配代码放在游戏工程中，因为它需要知道这个项目生成了哪些表。这里按职责划分层次：GameConfigLoader 虽然位于项目侧，但在这条调用链中承担的是实现层的加载适配职责；普通业务功能通过 AlloyConfig 查询，不必自己构造 ByteBuf 或管理 Tables 的加载过程。
+例如，查询 UI 跳转配置时，业务调用 AlloyConfig.Get&lt;UIJumpConfig&gt;(id)，框架找到已注册的 IAlloyConfigTable&lt;UIJumpConfig&gt;，再由 UIJumpConfigTableProvider 调用 Luban 生成表的 GetOrDefault。如果以后改用其他配置方案，需要替换加载器和表适配器，框架的通用加载与查询流程可以继续使用。
+当前封装覆盖加载、表查询与生命周期，返回的配置记录仍是项目生成的 UIJumpConfig 类型，并没有额外转换为独立的数据类型。因此，更换生成方案时还需要保持记录结构兼容，不能仅凭三层接口就认为所有业务代码都无需调整。
+2. IAlloyConfigLoader：给业务提供配置表预加载入口IAlloyConfigLoader 是框架留给业务层的预加载入口：哪些配置表需要在启动时提前准备，由业务自己决定。 框架负责在资源和业务代码就绪后调用加载器，并等待它完成，再继续初始化后面的模块。
+例如，进入首个界面之前就需要 UI 跳转配置，业务可以在这个入口提前加载；只有进入战斗才需要的配置，则可以留给后续业务流程准备。框架不需要知道项目有多少张表，也不替业务决定每张表的加载时机。
+前面的业务安装入口先登记加载器：
+AlloyConfig.Instance.SetLoader(new GameConfigLoader());
+
+到了 Config 初始化阶段，框架再调用它的 LoadAsync。当前 GameConfigLoader 选择预加载启动所需的 UI 跳转表，核心代码如下：
+// 节选自 GameConfigLoader.LoadAsync。await GameConfig.LoadStartupAsync(cancellationToken);config.Register(    new UIJumpConfigTableProvider(GameConfig.StartupTables.UIJumpConfigTable));
+
+GameConfig 使用资源系统加载 TextAsset，将其中的二进制数据交给 Luban 的 ByteBuf 和生成的 Tables。加载过程中保存资源句柄，卸载时清空表集合与字节引用，再归还句柄。
+因此，新增一张需要启动预加载的表时，应在业务侧补充资源读取、构表和注册逻辑，框架的启动步骤不需要跟着修改。加载器的 Unload 则负责归还这批预加载配置持有的资源。
+当前方法名 LoadAllAsync 中的“全部”，指业务加载器此次负责的配置集合，不表示一次性加载整个项目的所有表；IsLoaded 也只表示这次加载已经完成。后续按需加载其他表，需要业务另行组织异步流程与释放时机，当前 Get、TryGet 只查询已注册的表，不会自动触发加载。
+3. 配置表适配器：统一按 ID 查询框架使用以下接口访问一张表：
+public interface IAlloyConfigTable&lt;TConfig&gt; where TConfig : class&#123;    /// &lt;summary&gt;按配置 ID 查询记录。&lt;/summary&gt;    /// &lt;param name=&quot;configID&quot;&gt;配置记录标识。&lt;/param&gt;    /// &lt;param name=&quot;config&quot;&gt;查询成功时返回的记录。&lt;/param&gt;    /// &lt;returns&gt;是否找到记录。&lt;/returns&gt;    bool TryGet(int configID, out TConfig config);&#125;
+
+当前 UIJumpConfigTableProvider 在内部调用 Luban 表的 GetOrDefault，将结果转换成上述接口的返回形式。框架不需要知道生成表的查询方法叫 Get 还是 GetOrDefault。
+业务在配置加载完成后，可以通过统一入口查询：
+// UIJumpConfig 来自当前项目的 Game.Config；jumpConfigID 由业务提供。if (AlloyConfig.Instance.TryGet&lt;UIJumpConfig&gt;(jumpConfigID, out var jumpConfig))&#123;    // 在这里使用查询到的配置记录。&#125;
+
+Get&lt;TConfig&gt; 在配置未就绪、表未注册或记录不存在时抛出异常，适合必须存在的配置；TryGet&lt;TConfig&gt; 用于允许缺失的查询。
+注册索引是记录类型 typeof(TConfig)，因此同一个记录类型不能重复注册两张表。若项目需要区分多套同类型配置，当前接口还需要扩展索引或增加专门的配置服务。
+这种适配隔离了加载方式和表查询接口，但没有把记录本身转换成独立的框架 DTO。业务使用 UIJumpConfig 时仍依赖该记录类型；如果后续更换配置生成方案，也要考虑记录结构的兼容。
+4. 加载失败不能留下可被误用的半成品AlloyConfig.LoadAllAsync 先检查加载器是否安装，只有 LoadAsync 成功后才设置 IsLoaded。加载失败时清空已注册表，并调用加载器的 Unload。
+这要求业务加载器能够处理部分完成的状态。例如，文件已经取得但构表失败，或者第一张表已注册而第二张表加载失败，都应释放自己持有的资源。
+配置加载完成后不能直接替换加载器。当前代码提供启动期加载与卸载，不应把 SetLoader 理解为运行中的配置热切换接口。
+四、Model 管理：用统一生命周期代替各自维护单例玩家、背包、任务和商店都有自己的数据。如果每个 Model 都写一个静态 Instance，对象创建、初始化、重置与销毁就会分散在各个类中。切换账号或退出游戏时，也容易遗漏某个对象的清理。怎样保留统一访问的便利，又不用让每个 Model 都变成单例？
+1. 把 Model 的生命周期交给框架ModelManager 提供一个集中的对象管理入口：框架持有 Model，并在约定时机调用初始化、重置和销毁方法，业务通过管理器取得对象。 各个 Model 因此不用再重复维护自己的静态实例与创建逻辑。
+原先设想的使用方式是：业务创建具体 Model 实例并注册进来，框架接管它的生命周期；业务需要使用时，再向管理器取得对应对象。Model 自身只负责业务数据和行为，不再负责维护全局实例。
+当前源码采用了略有不同的创建方式：注册 Model 类型，首次获取时由框架创建实例。 现有接口是 Register&lt;T&gt;()，尚未提供直接接收已有 Model 对象的注册接口。下文按当前接口说明用法，二者共同的设计目的都是把实例管理集中到框架，而不是让每个业务 Model 各自成为单例。
+ModelManager.Instance 是统一访问入口，各个业务 Model 类型无需再定义自己的静态 Instance。同一类型在管理器内只有一份实例，是管理器的持有规则，并不要求 Model 类本身采用单例写法。
+2. 配置与 Model 分别存什么配置通常描述规则，例如道具价格、角色基础属性和界面跳转关系；Model 保存运行时状态，例如当前金币、角色当前生命值和背包内容。
+
+
+
+数据
+更适合的位置
+
+
+
+某类道具的基础价格
+配置表
+
+
+玩家当前持有的道具数量
+背包 Model
+
+
+角色的初始生命值规则
+配置表
+
+
+本次战斗中的剩余生命值
+战斗或角色 Model
+
+
+Model 可以读取配置建立初始状态，但不应把玩家当前状态直接写回共享配置记录。当前配置接口并不强制记录不可变，这个边界仍需要业务代码遵守。
+3. 当前实现：注册类型，由框架创建和持有实例ModelManager.InitializeAsync 主要检查是否重复初始化，设置可用状态，并发布 ModelManager.Instance。它不会扫描业务程序集，也不会创建全部 Model。
+框架完成其余系统初始化后，业务启动管线执行 RegisterGameModelsStep，由它调用 GameModelRegistration.RegisterModels()。当前模板中的集中注册方法还是空的，新增业务类型后需要显式添加注册。
+业务通过 ModelManager.Instance.Register&lt;T&gt;() 登记类型和创建方式，不触发初始化；首次调用 ModelManager.Instance.Get&lt;T&gt;() 时才创建并初始化对应实例。
+同一管理器内，同一个注册类型对应一个实例。后续再次 Get 返回同一实例；未注册类型会报错，TryGet 则只读取已经创建的实例，不触发创建。
+这样的 Model 不适合直接表达“场景中每个敌人各有一个同类型实例”。可以由一个战斗 Model 管理多份敌人数据，或使用其他对象生命周期方案，不应把按类型唯一的管理器当成通用对象池。
+4. ModelBase：统一初始化、重置与销毁基类提供三个生命周期方法：
+public abstract class ModelBase&#123;    /// &lt;summary&gt;创建后初始化数据和订阅，不执行异步加载。&lt;/summary&gt;    protected virtual void OnInitialize() &#123; &#125;    /// &lt;summary&gt;恢复初始业务状态，保留实例和长期订阅。&lt;/summary&gt;    protected virtual void OnReset() &#123; &#125;    /// &lt;summary&gt;取消订阅、停止任务并释放资源。&lt;/summary&gt;    protected virtual void OnDispose() &#123; &#125;&#125;
+
+这里节选了业务重写的方法，框架内部另有对应的调用入口。Model 只实现自己的初始化、重置和清理行为，由管理器在约定时机触发。当前实现通过 Register&lt;T&gt;() 与 Get&lt;T&gt;() 创建并纳管对象；业务自行创建却未交给管理器的对象，不会参与框架的统一生命周期。
+如果 Model 订阅事件或持有资源，应在 OnDispose 中解除订阅与释放。初始化失败时管理器也可能调用 OnDispose，所以清理逻辑必须允许初始化只完成了一部分。
+这些生命周期都是同步方法。需要异步加载存档、请求网络或准备资源时，应在明确的业务异步步骤中完成，再将结果交给 Model；不能在 OnInitialize 中启动无人等待的任务，却让调用方误以为数据已经就绪。
+五、Model 的生命周期为何不能只靠一个字典1. 首次获取成功后才公开实例首次 Get&lt;T&gt;() 的过程是：创建对象，调用初始化，成功后写入注册记录，并加入已创建列表。
+框架不会在初始化前先把对象交出去，避免其他业务读到半初始化状态。如果初始化失败，会尝试销毁本次对象，同时保留类型注册，让后续访问仍可尝试创建。
+Model 初始化期间可以读取其他 Model。例如 A 初始化时获取 B，管理器会先完成 B，再完成 A。但如果 A 获取 B、B 又获取 A，正在初始化的标记会阻止这条循环依赖，并抛出异常。
+需要注意，这不是跨 Model 的事务回滚：A 初始化失败时，此前已经成功创建的 B 不会因此自动销毁。它仍由管理器持有，直到后续生命周期操作或框架退出。
+2. Reset、Remove 和 Clear 的含义不同
+
+
+方法
+实例处理
+类型注册
+
+
+
+Reset&lt;T&gt;()
+重置已创建实例；未创建时不创建
+保留
+
+
+ResetAll()
+按初始化完成顺序重置所有已创建实例
+保留
+
+
+Remove&lt;T&gt;()
+销毁该类型实例，下次 Get 可重建
+保留
+
+
+Clear()
+按初始化完成顺序逆序销毁所有实例
+清空
+
+
+Reset 是否适合登出取决于业务实现，管理器不会自动清理账号凭证或网络状态。Clear 清空注册之后，再次获取前需要重新注册。
+业务缓存的 Model 引用也需要注意：Remove 或 Clear 会执行生命周期清理，但普通 C# 引用不会自动变成空值。调用方不能继续把旧实例当作管理器当前持有的对象使用。
+3. 生命周期重入与批量清理管理器使用生命周期深度和类型忙碌标记限制重入：初始化期间允许建立其他 Model，但重置和销毁期间不能创建新实例；生命周期回调中也不能随意注册、移除或清空集合。
+批量操作会继续处理其他实例，最后将收集到的错误汇总为 AggregateException，避免某个 Model 清理失败就直接跳过其余对象。
+逆序销毁有助于处理初始化阶段建立的依赖关系。例如 A 初始化时先创建 B，完成顺序为 B、A，退出时就先销毁 A，再销毁 B。不过运行中后来建立的任意依赖并不会被自动推导，业务仍应控制跨 Model 的持有关系。
+这些集合按 Unity 主线程使用设计，不是线程安全容器。后台任务完成后，应回到合适的主线程业务流程再访问管理器。
+六、更换实现时的职责边界前三个模块虽然沿启动顺序相邻，但它们没有合并成一个“万能业务初始化器”。代码准备只解决代码与早期安装，配置模块解决表数据，Model 管理器解决运行时对象生命周期。把它们分开，才能在更换代码交付方式或配置格式时保留其他部分。
+更换配置方案时改哪里如果把 Luban 改成 JSON，不需要修改 ConfigManager 的启动位置。业务可以替换加载器和表适配器，继续遵守 IAlloyConfigLoader 与 IAlloyConfigTable&lt;TConfig&gt;。
+但配置资源地址、反序列化方式、记录类型及业务访问需要相互匹配。统一接口减少了框架对生成工具的依赖，并不意味着所有业务数据结构都能自动兼容。
+更换代码准备方式时改哪里提供新的 IGameCodePreparation 实现，并在启动配置中选择它。实现必须满足当前创建方式的构造约定，准备正确的业务程序集，调用安装入口，并写入供后续步骤使用的结果。
+只要这份约定保持一致，Config 和 Model 的启动流程就不需要知道业务代码来自静态主包还是动态加载。
+七、退出顺序与使用边界框架按启动步骤的反向顺序清理已经开始的步骤，也会让失败的当前步骤参与退出。因此，在关闭后续业务与框架模块之后，本文相关部分按以下顺序退出：
+
+    graph TD
+    Model[&quot;ModelManager：销毁实例并清除注册&quot;]
+    Config[&quot;ConfigManager：卸载配置和配置资源&quot;]
+    Code[&quot;PrepareGameCodeStep：清空准备结果引用&quot;]
+    Resource[&quot;ResourceServiceManager：关闭资源服务&quot;]
+    Model --&gt; Config --&gt; Code --&gt; Resource
+  
+
+Model 先清理，配置和资源服务后关闭，可以让 Model 释放自己持有的订阅和资源时，相关基础设施仍然存在。配置卸载也需要在资源服务关闭前归还资源句柄。
+但不能把“逆序清理”理解为所有操作都可回滚：动态程序集加载不会因为清空 RuntimeAssembly 引用而撤销。发生不可逆阶段失败时，仍应按实现要求重启 Player。
+日常使用还要遵守几个边界：
+
+反射安装入口只做早期安装，不提前访问尚未初始化的 Model、UI 等系统。
+配置查询应发生在配置加载完成之后，新增表需要显式加载和注册。
+Model 类型需要公开无参构造函数，业务通过管理器获取实例。
+Model 生命周期不承接异步初始化；异步准备由业务流程组织。
+清理方法应能处理部分初始化，且业务不再使用被移除的旧实例。
+
+八、总结资源系统解决了文件和资产如何取得，本篇的三个模块继续解决业务代码、配置数据和运行时状态如何进入框架。
+PrepareGameCodeStep 让不同代码来源汇合到明确的业务安装入口；ConfigManager 与 AlloyConfig 统一配置加载时机和访问方式；ModelManager 集中持有业务对象并管理生命周期，让每个 Model 不必再维护自己的单例。当前采用显式注册类型、首次获取时创建实例的方式实现这份管理责任。
+源码位置以下路径以各自仓库或 Unity 工程为根目录，便于对照阅读：
+
+
+
+来源
+文件
+
+
+
+AlloyFramework
+Runtime/Framework/Entry/PrepareGameCodeStep.cs
+
+
+AlloyFramework
+Runtime/Framework/Entry/IGameCodePreparation.cs、GameCodePreparationResult.cs
+
+
+AlloyFramework
+Runtime/HybridCLR/HybridCLRCodePreparation.cs
+
+
+AlloyFramework
+Runtime/Framework/Config/ConfigManager.cs、AlloyConfig.cs
+
+
+AlloyFramework
+Runtime/Framework/Config/IAlloyConfigLoader.cs、IAlloyConfigTable.cs
+
+
+AlloyFramework
+Runtime/Framework/Model/ModelManager.cs、ModelBase.cs
+
+
+game-template&#x2F;UnityProj
+Assets/Scripts/Bootstrap/DefaultGameCodePreparation.cs
+
+
+game-template&#x2F;UnityProj
+Assets/Scripts/Runtime/Bootstrap/GameRuntimeInstaller.cs
+
+
+game-template&#x2F;UnityProj
+Assets/Scripts/Runtime/Config/GameConfigLoader.cs、GameConfig.cs
+
+
+game-template&#x2F;UnityProj
+Assets/Scripts/Runtime/Config/UIJumpConfigTableProvider.cs
+
+
+game-template&#x2F;UnityProj
+Assets/Scripts/Runtime/Bootstrap/GameModelRegistration.cs
+
+
+game-template&#x2F;UnityProj
+Assets/Scripts/Runtime/Bootstrap/Startup/RegisterGameModelsStep.cs
+
+
+]]></content>
+      <tags>
+        <tag>UnityFramework</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>AlloyFramework的实现(六) - 音频系统</title>
+    <url>/posts/621cbae4.html</url>
+    <content><![CDATA[前两篇分别介绍了 资源管理系统，以及业务代码准备、配置与数据模型。资源和配置就绪、Model 管理入口建立后，启动流程继续进入音频模块。音频系统除了加载资源，还要管理播放实例、空间位置、音量、结束通知，以及应用切后台时的行为。
+例如，角色释放技能时，业务希望表达的是“在角色身上播放这个音效”；离开关卡时，希望本关卡的声音和预加载资源能够一起退出。业务不应该为此调用 AkUnitySoundEngine，也不应该持有 FMOD 的事件实例或直接管理 Wwise 的 Bank。
+AlloyFramework 因此继续使用三层结构：业务层 → 框架层 → 实现层。当前音频实现层使用 Wwise，业务通过 AudioManager、AudioPlayOptions、AudioScope 等框架类型表达需求。
+Wwise 是音频中间件，负责根据事件和制作规则组织声音，完成媒体读取、混音和输出。关于它生成的 .bnk、.wem，以及从制作到运行时播放的过程，可以先阅读 《Unity音频中间件Wwise的生成物与流程浅析》。本文重点介绍这些能力如何接入框架。
+本文以当前源码为准。设计目标包含统一音频组、事件与参数建模，以及前后台和系统音频中断处理；当前已完成 Wwise 后端与主要生命周期管理，Loop 参数、调用级完成回调和 Android 音频焦点接入仍有待补齐，不将这些目标写成已有能力。
+一、三层结构各自负责什么业务只表达播放需求，框架管理请求与生命周期，实现层负责将框架契约转换为音频引擎调用。
+这与资源模块的依赖倒置思路一致：运行时调用逐层向下，接口却由框架层定义，具体实现依赖并实现这些接口。框架通用播放流程通过 IAudioBackend 工作，不需要引用 AK 或 FMOD 的类型。
+
+    graph TD
+    Business[&quot;业务层：界面、角色、关卡&quot;]
+    Manager[&quot;框架层：AudioManager&quot;]
+    Contract[&quot;框架契约：IAudioBackend&quot;]
+    Backend[&quot;实现层：WwiseAudioBackend&quot;]
+    Engine[&quot;Wwise SDK：事件、Bank、原生播放实例&quot;]
+    Business --&gt;|事件名称与框架参数| Manager
+    Manager --&gt;|通过接口调用| Contract
+    Contract --&gt;|当前实现| Backend
+    Backend --&gt; Engine
+  
+
+当前代码主要分布在两个目录：
+
+
+
+位置
+主要职责
+
+
+
+Runtime/Framework/Audio
+公共契约、播放请求、音频组、作用域、缓存与模块生命周期
+
+
+Runtime/AudioWwise
+Wwise 初始化、Bank 加载、事件提交、回调、空间对象和平台适配
+
+
+Alloy.Runtime 程序集没有引用 Wwise。Alloy.Audio.Wwise 则引用框架与 AK.Wwise.Unity.API，并关闭自动引用，让使用者显式选择是否依赖这个后端。
+这里还需要区分业务逻辑与启动装配。当前项目的 GameAudioInstaller 位于 Bootstrap，它知道并调用 WwiseAudioInstaller，负责选择具体实现。日常业务播放不需要知道这个选择。如果要求整个 Game 工程都不能出现实现层类型，就还需要把这段装配代码移到独立的集成程序集。
+隔离也不止是方法名称：返回值、回调参数和停止方式都应该使用框架类型。当前业务持有的是框架生成的 long 播放标识，Wwise 的 Playing ID 保存在后端内部，不会作为业务播放句柄交付。
+二、先定义音频资源组与播放契约1. AudioGroup：用逻辑组表达一份音频资源的使用权不同方案的资源载体不同：Wwise 常见的是 .bnk 及其关联媒体，FMOD 使用 .bank，Unity 原生音频可以通过 AssetBundle 交付 AudioClip。
+框架需要提供统一的 audioGroup 概念，让业务只关心“准备哪个组、何时归还”，由具体后端解释组内资源。一个逻辑组可以包含多个文件和共享依赖，不必与一个物理文件一一对应。
+当前对应的类型是 AudioContentGroup，事件通过 AudioEventDependency 关联到一个或多个组：
+
+    graph TD
+    Event[&quot;事件 Key&quot;] --&gt; Mapping[&quot;AudioEventDependency&quot;]
+    Mapping --&gt; Group[&quot;一个或多个 AudioContentGroup&quot;]
+    Group --&gt; Dependency[&quot;共享依赖组&quot;]
+    Group --&gt; Files[&quot;资源文件与后端加载描述&quot;]
+    Files --&gt; Lease[&quot;AudioContentLease：保持文件可用&quot;]
+    Lease --&gt; Native[&quot;后端加载原生音频资源&quot;]
+  
+
+业务可以提前持有一个组：
+// 组名以项目导出的音频清单为准。AudioGroupLease groupLease = await AudioManager.Instance.AcquireGroupAsync(    &quot;Battle&quot;,    cancellationToken: cancellationToken);// 不再需要预加载保障时，归还当前持有者的引用。groupLease.Dispose();
+
+AudioGroupLease 表示调用者的一份使用权。其他预加载者或播放实例仍然持有引用时，不会因为这一次 Dispose 就把组卸载掉。
+当前组描述中仍包含 Banks、PreparedEvents，以及 User / Event / Bus 等 Bank 类型。这些设计适合现有 Wwise 接入，但还带有具体后端的资源结构。未来接入 FMOD 和 Unity 原生后端时，需要将这部分描述进一步下沉，让公共层主要保留组标识、依赖关系和生命周期约定。
+2. IAudioBackend：约定实现层提供的能力接口覆盖初始化、组加载与卸载、播放、停止、暂停、参数、状态、切换和监听器设置。下面节选其中与播放最直接相关的部分：
+public interface IAudioBackend&#123;    /// &lt;summary&gt;提交一份独立的播放实例。&lt;/summary&gt;    /// &lt;param name=&quot;playID&quot;&gt;框架播放标识。&lt;/param&gt;    /// &lt;param name=&quot;key&quot;&gt;事件名称。&lt;/param&gt;    /// &lt;param name=&quot;emitter&quot;&gt;空间发声对象，空值表示默认二维对象。&lt;/param&gt;    /// &lt;returns&gt;后端是否接受此次提交。&lt;/returns&gt;    AudioOperationResult Play(long playID, string key, AudioEmitter emitter);    /// &lt;summary&gt;停止指定播放实例。&lt;/summary&gt;    /// &lt;param name=&quot;playID&quot;&gt;框架播放标识。&lt;/param&gt;    /// &lt;param name=&quot;fadeOutSeconds&quot;&gt;淡出秒数。&lt;/param&gt;    /// &lt;returns&gt;操作是否被接受。&lt;/returns&gt;    bool Stop(long playID, float fadeOutSeconds);    /// &lt;summary&gt;设置指定播放实例的暂停状态。&lt;/summary&gt;    /// &lt;param name=&quot;playID&quot;&gt;框架播放标识。&lt;/param&gt;    /// &lt;param name=&quot;paused&quot;&gt;是否暂停。&lt;/param&gt;    /// &lt;returns&gt;操作是否被接受。&lt;/returns&gt;    bool SetPaused(long playID, bool paused);&#125;
+
+框架还通过 EAudioCapabilities 描述空间音频、暂停、实例参数等能力，通过 IAudioVolumeBackend、IAudioTimelineBackend 等扩展接口提供音量与时间轴操作。
+所谓“三家能力的超集”，应当是业务可以用统一模型表达需求，同时能够知道当前后端是否支持。不能因为统一了方法名称，就假定所有后端都能执行相同语义；无法支持的请求应明确失败，避免悄悄忽略参数。
+3. Event + 参数：描述一次播放当前业务入口使用事件名称和 AudioPlayOptions：
+// 示例事件需先在制作侧建立，并收录到项目音频清单。long playID = await AudioManager.Instance.PlayAudioAsync(    &quot;Play_Explosion&quot;,    new AudioPlayOptions    &#123;        Position = hitPosition,        Volume = 0.8f    &#125;,    cancellationToken);
+
+示例使用 AlloyFramework.Audio 命名空间；异步接口使用 UniTask，取消令牌来自 System.Threading。代码假定音频模块已初始化，hitPosition 是业务提供的世界坐标。
+当前参数与最初需求的对应关系如下：
+
+
+
+需求
+当前表达方式
+行为
+
+
+
+Event
+key
+当前直接使用制作侧事件名称
+
+
+GO
+Emitter = new AudioEmitter(targetTransform)
+后端维护并更新跟随目标的发声对象
+
+
+Position
+Position
+在固定世界位置发声，与 Emitter 互斥
+
+
+Volume
+Volume
+0～1 的线性音量，未指定时为 1
+
+
+Loop
+暂无
+当前循环行为由制作侧事件决定
+
+
+完成回调
+Audio.Ended 消息
+已有结束通知，但不是每次调用传入的完成回调
+
+
+此外还有 Scope、资源就绪策略和 StartTimeMs。非零起点需要后端支持首次提交时定位；它适合独立音轨等场景，不能据此认为任意复杂 Wwise 事件都能可靠定位。
+PlayAudio 立即返回框架请求标识，通过 onStarted 通知提交结果；PlayAudioAsync 等待资源准备与播放提交。这两个接口都不以“声音播放完毕”为返回条件，提交成功也不等于已经确认扬声器有声音。
+三、音频系统如何初始化与资源模块相同，音频模块通过统一启动管线进入框架：
+Add(new InitializeFrameworkSystemStep(new AudioLifecycleManager()));
+
+当前音频步骤位于资源服务、配置和数据模块之后。音频初始化需要通过资源系统取得清单、SDK 设置和初始化内容，因此资源服务必须先可用。
+项目在启动配置阶段登记安装方法：
+// 这是启动装配代码，不放进界面或角色的日常播放逻辑。AudioManager.Instance.SetInstaller(GameAudioInstaller.InstallAsync);
+
+安装器与生命周期管理器分工如下：
+
+
+
+对象
+职责
+
+
+
+GameAudioInstaller
+提供项目资源包名、内容根地址和初始化设置地址
+
+
+WwiseAudioInstaller
+判断平台、加载清单与设置，安装后端和内容提供者
+
+
+AudioLifecycleManager
+注册框架更新与低内存回调，等待音频初始化，负责退出
+
+
+WwiseAudioBackend
+初始化 Wwise 原生引擎、加载初始化内容、建立监听和发声对象
+
+
+WwiseAudioInstaller 最终将三类对象交给管理器：
+// 节选自安装器：变量由前面的资源加载步骤提供。AudioManager.Instance.Install(    new WwiseAudioBackend(settingsLease),    new ResourceAudioContentProvider(manifest, sourceRoot, audioPackageName),    new AlloyFramework.Audio.AudioSettings    &#123;        Platform = platform,        Language = manifest.Language    &#125;);
+
+这里的安装是选择实现与内容来源，随后才由框架执行音频引擎初始化。后端会检查 SDK 设置和内容版本，建立持久化宿主、默认监听器与默认二维发声对象，并接管回调更新。
+当前实现要求 Wwise 引擎由框架独占初始化。如果 SDK 已通过其他入口启动，后端会报错，避免两套入口同时负责初始化、更新和销毁。因此接入时要按项目约定移除冲突的 WwiseGlobal，并关闭冲突的编辑器自动初始化入口。
+空间音频还需要显式选择监听目标，例如相机或角色。默认监听器不代表框架会自动跟随项目中的主相机：
+// 在监听目标建立后绑定；对象切换时同步更新。AudioManager.Instance.SetListener(listenerTransform);
+
+四、一次播放如何经过三层业务调用之后，框架不会立刻假定事件已经能够播放，而是先解决内容依赖：
+
+    graph TD
+    Request[&quot;业务提交事件与参数&quot;] --&gt; Validate[&quot;校验参数、作用域与后端能力&quot;]
+    Validate --&gt; Lookup[&quot;查找事件依赖的音频组&quot;]
+    Lookup --&gt; Ready{&quot;所需内容是否已就绪&quot;}
+    Ready --&gt;|是| Hold[&quot;播放实例持有组引用&quot;]
+    Ready --&gt;|否且允许加载| Load[&quot;准备文件并加载原生组&quot;]
+    Ready --&gt;|否且要求就绪| Fail[&quot;返回未就绪结果&quot;]
+    Load --&gt; Hold
+    Hold --&gt; Recheck[&quot;再次检查取消与会话有效性&quot;]
+    Recheck --&gt; Submit[&quot;通过后端提交事件并应用音量&quot;]
+    Submit --&gt; Started[&quot;发送开始通知&quot;]
+    Started --&gt; Ended[&quot;等待真实结束通知&quot;]
+    Ended --&gt; Release[&quot;结束播放记录并归还组引用&quot;]
+  
+
+1. 框架先准备依赖，再提交播放AudioManager 为请求创建独立的播放记录，关联调用者取消令牌、音频会话令牌和可选作用域令牌。随后根据清单找到事件对应的组，为本次播放取得组租约。
+默认的 LoadIfNeeded 会按需加载；RequireReady 则要求资源已经准备好，否则报告未就绪。对时机敏感的技能音效，可以在进入战斗时预加载，再使用后者避免把第一次加载延迟带入播放时刻。
+等待资源完成后还要再次检查取消、会话与作用域。如果界面已经关闭，或者上一轮音频会话已经退出，不能因为加载现在才完成就补播旧声音。
+2. 内容提供者与 Wwise 后端分别负责什么ResourceAudioContentProvider 通过框架资源系统取得原始文件并保持租约；Wwise 后端再加载 Bank、准备需要的事件媒体。前者保证文件可用，后者保证引擎能够使用这些内容，两者的生命周期不能混为一谈。
+Wwise 还可能在播放过程中继续读取流式媒体，因此不能在 PostEvent 返回后立刻释放原始文件。当前实现会保留内容引用，并通过 WwiseReadFile 处理资源缓存文件名与 Wwise 查找文件名之间的关系；特定流式内容还支持原生文件包交付。
+文件链接方式与平台文件系统有关，不是业务层应承担的细节。真机接入时仍需要验证文件路径、可写权限和实际流式读取行为。
+3. 后端将事件转换为 Wwise 调用当前后端提交事件的核心代码如下，省略了参数检查与失败回滚：
+// playID 是框架标识，PlayingID 仅由 Wwise 后端保存。playback.PlayingID = AkUnitySoundEngine.PostEvent(    key,    target,    (uint)AkCallbackType.AK_EndOfEvent,    m_callback,    playback);
+
+AK 类型只出现在实现层。后端保存框架标识与原生 Playing ID 的对应关系，因此相同事件即使同时播放多次，也能分别停止或设置实例参数。
+WwiseAudioHost.LateUpdate 驱动后端更新：同步空间位置、调用 SDK 回调泵与 RenderAudio，再处理结束队列。原生事件回调只将最小上下文放入队列，后端在更新阶段统一交回框架，避免在回调内部直接执行组卸载和业务逻辑。
+五、播放实例与资源释放必须成对设计1. 预加载引用和播放引用分别持有预加载表示“接下来可能用到”，播放表示“现在正在使用”。两者分别持有组引用。
+例如，关卡预加载了 Battle 组，之后两个角色分别播放其中的事件。即使关卡提前归还预加载引用，两个播放实例仍然保留各自引用；待声音退出，框架才归还播放引用。
+因此，释放 AudioGroupLease 不等于停止声音；停止声音也不等于立即卸载全部 Bank。引用归零后，组还可以按配置进入闲置缓存，以减少短时间内重复加载的开销。
+当前缓存使用文件大小估算和保留时长进行管理，不能将它理解为 Wwise 实际内存占用的硬上限。
+2. AudioScope：把一组声音绑定到业务生命周期界面、角色和关卡可以创建自己的作用域。下面展示关卡音频的核心接入方式，示例事件与组名称需要按实际清单配置：
+private AudioScope m_audioScope; // 当前关卡拥有的声音与预加载引用。private async UniTask PrepareAudioAsync(CancellationToken cancellationToken)&#123;    // 调用方保证串行进入，并在退出时取消仍在等待的任务。    ReleaseAudio();    m_audioScope = AudioManager.Instance.CreateScope(&quot;Battle&quot;);    try    &#123;        await AudioManager.Instance.PreloadAudioAsync(            &quot;Play_Explosion&quot;,            m_audioScope,            cancellationToken);    &#125;    catch    &#123;        ReleaseAudio();        throw;    &#125;&#125;private long PlayExplosion(Vector3 position)&#123;    // 仅在准备成功且关卡仍有效时调用。    return AudioManager.Instance.PlayAudio(        &quot;Play_Explosion&quot;,        new AudioPlayOptions        &#123;            Scope = m_audioScope,            Position = position,            ReadinessMode = EAudioReadinessMode.RequireReady        &#125;);&#125;private void ReleaseAudio()&#123;    // 取消准备中的声音、请求停止作用域内播放，并归还预加载引用。    m_audioScope?.Dispose();    m_audioScope = null;&#125;
+
+关卡退出或组件销毁时调用 ReleaseAudio，并取消外层未完成的准备任务。作用域释放会请求停止已经开始的声音，但原生播放退出与资源回收仍需要后续处理，不能把 Dispose 理解成所有音频资源同步卸载完成。
+使用 AudioEmitter 跟随 Transform 时，同样要明确所有者；目标销毁或 Emitter 释放后，后端更新会处理对应声音与原生对象。业务无需为角色添加 AK 发声组件。
+3. 开始、结束和失败是三种通知当前框架通过事件系统发送：
+
+
+
+消息
+含义
+
+
+
+Audio.Started
+后端已接受播放并完成当前开始流程
+
+
+Audio.Ended
+播放进入结束状态，包括自然结束和主动停止等路径
+
+
+Audio.Failed
+请求失败
+
+
+业务处理结束消息时，应根据 AudioPlaybackNotification.Playback.PlayID 匹配具体实例，并在业务退出时解除订阅。不能只按事件名称匹配，因为相同事件可以并发播放。
+当前 PlayAudio 的 onStarted 不是完成回调。要达到“Event + 参数 + 完成回调”的目标，还需要为单次请求增加结束回调，并明确它是否覆盖主动停止、取消、作用域释放和失败。
+源码还有一处需要修正的语义：虽然定义了 EAudioEndReason.Completed，自然结束路径当前没有将初始的 Unknown 更新为 Completed。因此现阶段不能依赖这个枚举值准确识别自然播完；这属于当前实现的待完善项。
+六、统一音量与循环行为1. 业务使用线性音量，后端负责转换框架公开总音量、BGM、SFX 和单次播放音量：
+AudioOperationResult masterResult = AudioManager.Instance.SetMasterVolume(0.8f);AudioOperationResult bgmResult = AudioManager.Instance.SetBGMVolume(0.5f);AudioOperationResult playbackResult = AudioManager.Instance.SetVolume(playID, 0.6f);
+
+调用方应检查操作结果；playID 必须对应仍然有效的播放。当前分类由制作侧总线路由决定，并不是调用播放时自动根据事件名字判断它属于 BGM 还是 SFX。
+输入要求是 0～1 的有限值。Wwise 后端将线性增益转换为分贝，再写入项目约定的 RTPC：
+private const float MINIMUMDECIBELS = -200; // 零音量使用的衰减下限。private static float ToDecibels(float volume)&#123;    // 正数按幅度增益转换，零值避免进入对数运算。    return volume &lt;= 0        ? MINIMUMDECIBELS        : Mathf.Max(MINIMUMDECIBELS, 20 * Mathf.Log10(volume));&#125;
+
+例如，线性增益 0.5 约为 -6.02 dB；它不代表人的主观听感一定减少一半。业务使用统一数值，后端处理具体引擎的单位差异。
+当前 Wwise 工程需要配置 AlloyMasterVolume、AlloyBGMVolume、AlloySFXVolume 和 AlloyInstanceVolume，并让参数曲线正确作用到对应音量。仅在 C# 中调用 RTPC，不足以保证制作侧产生预期效果。
+2. Loop 需要明确跨后端语义当前 AudioPlayOptions 没有 Loop 字段，后端也没有统一循环接口，循环由 Wwise 事件制作规则决定。因此不能在业务示例里写一个当前不存在的 Loop = true。
+后续增加循环能力时，首先要约定“循环什么”：是单个音频片段，还是整个可能包含多个声音、延迟与随机容器的事件？还要区分沿用制作设置、强制单次和强制循环。
+Unity 的 AudioSource.loop、FMOD 事件时间轴与 Wwise 事件并不天然具有完全相同的循环语义。可以通过制作规范、参数或配套事件实现统一行为；不支持的情况应由后端明确拒绝。简单在每次结束回调里重新播放，不保证无缝衔接，也会影响实例标识和完成通知。
+七、前后台与系统音频中断如何处理音频生命周期至少涉及三类来源：App 进入后台、iOS 音频会话中断、Android 音频焦点变化。它们可能同时发生，不能只用“窗口有没有焦点”解释全部情况。
+1. App 切后台：接入 Unity 生命周期当前 WwiseAudioHost 接收 Unity 回调：
+private void OnApplicationFocus(bool focused)&#123;    Backend?.SetFocused(focused);&#125;private void OnApplicationPause(bool paused)&#123;    Backend?.SetPausedBySystem(paused);&#125;
+
+后端分别保存暂停状态与窗口焦点。非 iOS 真机分支在任一条件要求暂停时调用 Suspend()，两个条件都恢复后调用 WakeupFromSuspend()。
+这比只在收到 Focus 恢复时直接唤醒更稳妥，因为应用可能仍处于 Pause 状态。不过，挂起整个引擎与业务暂停某个播放实例属于不同层次，业务不应通过结束通知推断应用是否进入后台。
+2. iOS 来电和闹钟：由原生音频会话处理当前后端在 iOS 真机上跳过上述手动挂起逻辑，交由 Wwise 原生音频会话处理。已安装 SDK 的 AkSoundEngineController 也注明，iOS 应用中断由声音引擎处理，因此这里有对应的集成依据。
+但“交给 SDK”不等于已经验证所有场景。音频会话类别、与其他应用的混音策略、输出路由和中断后的恢复行为仍需要结合项目设置确认。来电接听与拒接、闹钟结束、锁屏及返回前台，都应该在目标设备上验证。
+当前框架还没有把这些原生中断原因统一通知给业务。如果视频、字幕或节奏逻辑也需要同步暂停，还需要单独定义跨系统的协调方式。
+3. Android 音频焦点：当前仍需补齐Unity 的 OnApplicationFocus 表示窗口焦点，不是 Android 系统的 Audio Focus。其他应用请求音频播放时，本应用不一定失去窗口焦点。
+当前检查到的框架源码没有完整的音频焦点请求与变化监听，不能仅凭 OnApplicationFocus 就认定已经覆盖这个需求。后续应在平台适配中接入音频焦点，并区分暂时丢失、永久丢失、允许降低音量继续播放以及重新获得焦点等情况。具体申请方式还需要匹配项目目标 Android 版本。
+框架层可以维护多个独立的暂停原因：后台、系统中断、音频焦点丢失。只有所有需要暂停的原因都解除后，才允许恢复系统音频；业务主动暂停的实例也不应被系统恢复流程误恢复。这是后续统一生命周期策略的方向，当前实现尚未覆盖完整状态集合。
+八、退出与更换实现层1. 先关闭音频，再关闭它依赖的资源服务正常关闭时，AudioLifecycleManager 等待 AudioManager.ShutdownAsync，让未完成请求和内容持有得到清理，再解除更新与低内存订阅。Wwise 后端负责终止自己拥有的引擎、原生对象和文件访问关系。
+应用强制退出不能依赖异步流程完整执行，因此还提供 ShutdownImmediately 作为兜底。正常业务退出仍应优先释放自己的作用域、Emitter 和预加载租约。
+资源服务必须保持到音频清理完成，因为音频还持有初始化设置与原始文件租约。这与第四篇资源系统中“先结束资源使用，再关闭资源服务”的原则一致。
+2. 新后端需要同时适配播放与内容如果将 Wwise 更换为 FMOD 或 Unity 原生音频，接入工作包括：
+
+实现 IAudioBackend，将初始化、组加载、播放、停止和真实结束通知映射到新后端。
+按实际能力实现音量、时间轴等扩展接口，明确无法支持的请求。
+调整内容描述与提供者，让逻辑组映射到新后端的 Bank、AB 或 AudioClip 集合。
+在启动装配处切换实现，配套修改制作、构建与资源发布流程。
+验证并发播放、取消、作用域释放、自然结束、资源卸载和移动平台中断恢复。
+
+业务事件名称也需要稳定的映射约定。当前 Key 直接交给 Wwise 作为事件名称；未来 FMOD 使用事件路径、Unity 使用配置索引时，可以在后端或内容映射中转换，避免让业务改写所有播放字符串。
+当前仓库的运行时音频后端只有 Wwise，还没有通过另外两套实现验证全部契约。更换后端的目标是保持业务表达稳定，但仍需要适配资源模型、制作规则和能力差异。
+九、总结AlloyFramework 的音频系统延续了资源模块的三层设计：业务通过事件与框架参数表达播放需求，框架管理音频组、播放实例和作用域，Wwise 后端负责原生引擎与资源操作。
+这套实现的关键是把资源可用、播放已提交和声音已结束分开管理。预加载与播放分别持有引用，真正结束后才归还播放资源，业务退出通过作用域统一收口。
+目前主要播放链路、线性音量、组管理和 Wwise 生命周期接入已经具备；统一循环、调用级结束回调、自然结束原因标记，以及 Android 音频焦点仍需要完善。后续扩展 FMOD 和 Unity 原生音频时，也应继续检验公共契约是否真正独立于具体后端。
+参考文章与源码位置
+AlloyFramework(四)：资源管理系统
+Unity音频中间件Wwise的生成物与流程浅析
+
+本文接口与流程依据以下源码整理，路径以 AlloyFramework 仓库为根目录：
+
+
+
+源码
+阅读重点
+
+
+
+Runtime/Framework/Audio/AudioContracts.cs
+播放参数、结果、发声对象与后端接口
+
+
+Runtime/Framework/Audio/AudioManager.cs
+组引用、播放准备、通知与退出
+
+
+Runtime/Framework/Audio/AudioContent.cs
+清单、组描述与内容租约
+
+
+Runtime/Framework/Audio/AudioScope.cs
+业务作用域与组租约
+
+
+Runtime/Framework/Audio/AudioVolume.cs
+分类与实例音量契约
+
+
+Runtime/Framework/Audio/AudioLifecycleManager.cs
+启动、更新接入与关闭
+
+
+Runtime/AudioWwise/WwiseAudioInstaller.cs
+资源交付与后端装配
+
+
+Runtime/AudioWwise/WwiseAudioBackend.cs
+原生加载、播放、回调与挂起
+
+
+Runtime/AudioWwise/WwiseAudioHost.cs
+Unity 生命周期回调
+
+
+Runtime/AudioWwise/WwiseAudioVolume.cs
+线性增益与 RTPC 映射
+
+
+本文是源码层面的实现说明，不作为移动设备中断恢复、音频性能或听感效果已经通过实测的证明。
+]]></content>
+      <tags>
+        <tag>UnityFramework</tag>
+      </tags>
+  </entry>
+  <entry>
     <title></title>
     <url>/css/style.css</url>
     <content><![CDATA[#footer
