@@ -1,0 +1,331 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover"><title>AlloyFramework的实现(七) - UI框架的需求与整体设计 | 穿越时空的思念</title><meta name="author" content="穿越时空的思念"><meta name="copyright" content="穿越时空的思念"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#ffffff"><meta name="description" content="上一篇介绍了 音频系统，这一篇开始介绍 AlloyFramework 框架中基于 UGUI 实现的 UI 系统。 UI 系统为什么需要分层、生命周期、动效和导航等模块？可以先从最简单的需求出发：打开一个界面。随着界面被加载、显示、操作和关闭，业务会遇到一系列重复的问题，框架的各项能力也由此产生。 本文先沿着这个过程梳理 UI 系统的需求与整体设计，后续再按功能分篇介绍具体实现。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="AlloyFramework的实现(七) - UI框架的需求与整体设计">
+<meta property="og:url" content="https://cyskdsn.top/posts/33cdadce.html">
+<meta property="og:site_name" content="穿越时空的思念">
+<meta property="og:description" content="上一篇介绍了 音频系统，这一篇开始介绍 AlloyFramework 框架中基于 UGUI 实现的 UI 系统。 UI 系统为什么需要分层、生命周期、动效和导航等模块？可以先从最简单的需求出发：打开一个界面。随着界面被加载、显示、操作和关闭，业务会遇到一系列重复的问题，框架的各项能力也由此产生。 本文先沿着这个过程梳理 UI 系统的需求与整体设计，后续再按功能分篇介绍具体实现。">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://cyskdsn.top/img/Title/AlloyFramework.jpeg">
+<meta property="article:published_time" content="2026-11-18T11:46:48.361Z">
+<meta property="article:modified_time" content="2026-11-18T13:11:19.228Z">
+<meta property="article:author" content="穿越时空的思念">
+<meta property="article:tag" content="UnityFramework">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://cyskdsn.top/img/Title/AlloyFramework.jpeg"><script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "AlloyFramework的实现(七) - UI框架的需求与整体设计",
+  "url": "https://cyskdsn.top/posts/33cdadce.html",
+  "image": "https://cyskdsn.top/img/Title/AlloyFramework.jpeg",
+  "datePublished": "2026-11-18T11:46:48.361Z",
+  "dateModified": "2026-11-18T13:11:19.228Z",
+  "author": [
+    {
+      "@type": "Person",
+      "name": "穿越时空的思念",
+      "url": "https://cyskdsn.top"
+    }
+  ]
+}</script><link rel="shortcut icon" href="/img/favicon.png"><link rel="canonical" href="https://cyskdsn.top/posts/33cdadce.html"><link rel="preconnect" href="//cdn.jsdelivr.net"/><link rel="manifest" href="/null"/><link rel="apple-touch-icon" sizes="180x180" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="32x32" href="/img/heaIcon32.ico"/><link rel="icon" type="image/png" sizes="16x16" href="/img/heaIcon16.ico"/><link rel="mask-icon" href="/img/heaIcon16.ico" color="#5bbad5"/><link rel="stylesheet" href="/css/index.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css"><script>
+    (() => {
+      
+    const saveToLocal = {
+      set: (key, value, ttl) => {
+        if (!ttl) return
+        const expiry = Date.now() + ttl * 86400000
+        localStorage.setItem(key, JSON.stringify({ value, expiry }))
+      },
+      get: key => {
+        const itemStr = localStorage.getItem(key)
+        if (!itemStr) return undefined
+        const { value, expiry } = JSON.parse(itemStr)
+        if (Date.now() > expiry) {
+          localStorage.removeItem(key)
+          return undefined
+        }
+        return value
+      }
+    }
+
+    window.btf = {
+      saveToLocal,
+      getScript: (url, attr = {}) => new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = url
+        script.async = true
+        Object.entries(attr).forEach(([key, val]) => script.setAttribute(key, val))
+        script.onload = script.onreadystatechange = () => {
+          if (!script.readyState || /loaded|complete/.test(script.readyState)) resolve()
+        }
+        script.onerror = reject
+        document.head.appendChild(script)
+      }),
+      getCSS: (url, id) => new Promise((resolve, reject) => {
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = url
+        if (id) link.id = id
+        link.onload = link.onreadystatechange = () => {
+          if (!link.readyState || /loaded|complete/.test(link.readyState)) resolve()
+        }
+        link.onerror = reject
+        document.head.appendChild(link)
+      }),
+      addGlobalFn: (key, fn, name = false, parent = window) => {
+        if (!false && key.startsWith('pjax')) return
+        const globalFn = parent.globalFn || {}
+        globalFn[key] = globalFn[key] || {}
+        globalFn[key][name || Object.keys(globalFn[key]).length] = fn
+        parent.globalFn = globalFn
+      }
+    }
+  
+      
+      const activateDarkMode = () => {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#0d0d0d')
+        }
+      }
+      const activateLightMode = () => {
+        document.documentElement.setAttribute('data-theme', 'light')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#ffffff')
+        }
+      }
+
+      btf.activateDarkMode = activateDarkMode
+      btf.activateLightMode = activateLightMode
+
+      const theme = saveToLocal.get('theme')
+    
+          theme === 'dark' ? activateDarkMode() : theme === 'light' ? activateLightMode() : null
+        
+      
+      const asideStatus = saveToLocal.get('aside-status')
+      if (asideStatus !== undefined) {
+        document.documentElement.classList.toggle('hide-aside', asideStatus === 'hide')
+      }
+    
+      
+    const detectApple = () => {
+      if (/iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('apple')
+      }
+    }
+    detectApple()
+  
+    })()
+  </script><script>const GLOBAL_CONFIG = {
+  root: '/',
+  algolia: undefined,
+  localSearch: {"path":"/search.xml","preload":false,"top_n_per_article":1,"unescape":false,"languages":{"hits_empty":"未找到符合您查询的内容：${query}","hits_stats":"共找到 ${hits} 篇文章"}},
+  translate: undefined,
+  highlight: {"plugin":"highlight.js","highlightCopy":true,"highlightLang":true,"highlightHeightLimit":false,"highlightFullpage":false,"highlightMacStyle":false},
+  copy: {
+    success: '复制成功',
+    error: '复制失败',
+    noSupport: '浏览器不支持'
+  },
+  relativeDate: {
+    homepage: false,
+    post: false
+  },
+  runtime: '',
+  dateSuffix: {
+    just: '刚刚',
+    min: '分钟前',
+    hour: '小时前',
+    day: '天前',
+    month: '个月前'
+  },
+  copyright: undefined,
+  lightbox: 'null',
+  Snackbar: undefined,
+  infinitegrid: {
+    js: 'https://cdn.jsdelivr.net/npm/@egjs/infinitegrid/dist/infinitegrid.min.js',
+    buttonText: '加载更多'
+  },
+  isPhotoFigcaption: false,
+  islazyloadPlugin: false,
+  isAnchor: false,
+  percent: {
+    toc: true,
+    rightside: false,
+  },
+  autoDarkmode: false
+}</script><script id="config-diff">var GLOBAL_CONFIG_SITE = {
+  title: 'AlloyFramework的实现(七) - UI框架的需求与整体设计',
+  isHighlightShrink: false,
+  isToc: true,
+  pageType: 'post'
+}</script><link rel="stylesheet" href="/css/style.css"><meta name="generator" content="Hexo 7.3.0"></head><body><div id="sidebar"><div id="menu-mask"></div><div id="sidebar-menus"><div class="avatar-img text-center"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="site-data text-center"><a href="/archives/"><div class="headline">文章</div><div class="length-num">46</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">14</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">1</div></a></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div></div></div><div class="post" id="body-wrap"><header class="post-bg" id="page-header" style="background-image: url(/img/Title/AlloyFramework.jpeg);"><nav id="nav"><span id="blog-info"><a class="nav-site-title" href="/"><span class="site-name">穿越时空的思念</span></a><a class="nav-page-title" href="/"><span class="site-name">AlloyFramework的实现(七) - UI框架的需求与整体设计</span><span class="site-name"><i class="fa-solid fa-circle-arrow-left"></i><span>  返回首页</span></span></a></span><div id="menus"><div id="search-button"><span class="site-page social-icon search"><i class="fas fa-search fa-fw"></i><span> 搜索</span></span></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 主页</span></a></div></div><div id="toggle-menu"><span class="site-page"><i class="fas fa-bars fa-fw"></i></span></div></div></nav><div id="post-info"><h1 class="post-title">AlloyFramework的实现(七) - UI框架的需求与整体设计</h1><div id="post-meta"><div class="meta-firstline"><span class="post-meta-date"><i class="far fa-calendar-alt fa-fw post-meta-icon"></i><span class="post-meta-label">发表于</span><time class="post-meta-date-created" datetime="2026-11-18T11:46:48.361Z" title="发表于 2026-11-18 19:46:48">2026-11-18</time><span class="post-meta-separator">|</span><i class="fas fa-history fa-fw post-meta-icon"></i><span class="post-meta-label">更新于</span><time class="post-meta-date-updated" datetime="2026-11-18T13:11:19.228Z" title="更新于 2026-11-18 21:11:19">2026-11-18</time></span></div><div class="meta-secondline"><span class="post-meta-separator">|</span><span class="post-meta-wordcount"><i class="far fa-file-word fa-fw post-meta-icon"></i><span class="post-meta-label">总字数:</span><span class="word-count">2.6k</span><span class="post-meta-separator">|</span><i class="far fa-clock fa-fw post-meta-icon"></i><span class="post-meta-label">阅读时长:</span><span>7分钟</span></span></div></div></div></header><main class="layout" id="content-inner"><div id="post"><article class="container post-content" id="article-container"><p>上一篇介绍了 <a href="/posts/621cbae4.html">音频系统</a>，这一篇开始介绍 AlloyFramework 框架中基于 UGUI 实现的 UI 系统。</p>
+<p>UI 系统为什么需要分层、生命周期、动效和导航等模块？可以先从最简单的需求出发：打开一个界面。随着界面被加载、显示、操作和关闭，业务会遇到一系列重复的问题，框架的各项能力也由此产生。</p>
+<p>本文先沿着这个过程梳理 UI 系统的需求与整体设计，后续再按功能分篇介绍具体实现。</p>
+<span id="more"></span>
+
+<h2 id="一、UI-框架需要解决什么问题"><a href="#一、UI-框架需要解决什么问题" class="headerlink" title="一、UI 框架需要解决什么问题"></a>一、UI 框架需要解决什么问题</h2><h3 id="1-先把界面打开：统一-Open-接口"><a href="#1-先把界面打开：统一-Open-接口" class="headerlink" title="1. 先把界面打开：统一 Open 接口"></a>1. 先把界面打开：统一 Open 接口</h3><p>假设现在需要打开一个背包界面。如果资源采用 AssetBundle 交付，又没有统一封装，业务就需要找到并加载对应的 AB 包及其依赖，从包中加载 Prefab，再实例化对象、挂到 UI 节点下，最后初始化界面内容。</p>
+<p>用伪代码表示：</p>
+<figure class="highlight csharp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">await</span> LoadDependencies(bundlePath);               <span class="comment">// 加载依赖包</span></span><br><span class="line"><span class="keyword">var</span> bundle = <span class="keyword">await</span> LoadBundle(bundlePath);        <span class="comment">// 加载界面 AB 包</span></span><br><span class="line"><span class="keyword">var</span> prefab = <span class="keyword">await</span> LoadPrefab(bundle, prefabName); <span class="comment">// 加载 Prefab</span></span><br><span class="line"><span class="keyword">var</span> view = Instantiate(prefab, uiRoot);           <span class="comment">// 实例化并挂到 UI 节点</span></span><br><span class="line">view.Initialize(data);                           <span class="comment">// 初始化界面内容</span></span><br></pre></td></tr></table></figure>
+
+<p>背包需要写一遍，商城、任务和设置界面也要写一遍。除了资源路径和初始化数据不同，这些代码大部分相似；加载失败怎样处理、加载过程中退出怎么办，也很容易被各个业务处理成不同的行为。</p>
+<p>关闭界面时，各个业务还要再写一遍销毁对象、归还资源引用以及释放不再使用的 AB 包和依赖的逻辑。界面越多，这些重复代码就越多，也越容易遗漏释放。</p>
+<p>因此，首先需要统一的 <strong>Open 和 Close 接口</strong>。业务只提供界面定义和打开参数，由 UI 系统组织资源加载、实例化和初始化，并在关闭时按策略处理实例与资源。在 AlloyFramework 中，底层 AB 包及依赖的管理已经交给资源模块，UI 系统继续调用资源模块，不再重复实现一套 AB 加载逻辑。</p>
+<h3 id="2-统一显示顺序与交互规则：层级与输入管理"><a href="#2-统一显示顺序与交互规则：层级与输入管理" class="headerlink" title="2. 统一显示顺序与交互规则：层级与输入管理"></a>2. 统一显示顺序与交互规则：层级与输入管理</h3><p>界面创建出来后，还要决定它显示在哪一层。背包应当显示在主界面之上，物品详情又要显示在背包之上，Loading 和系统提示则可能需要覆盖它们。</p>
+<p>如果各个业务自己指定父节点、调整兄弟节点顺序或修改 Canvas 排序值，就很容易出现后打开的弹窗被遮住、普通窗口盖住引导等问题。因此，需要由框架统一划分逻辑层，并维护同层界面的显示顺序。</p>
+<p>显示顺序正确后，还会遇到输入问题：点击详情弹窗时，操作是否会穿透到背包？点击弹窗外部，是关闭弹窗还是继续操作下层界面？这些行为也需要明确规则，于是层级管理进一步引出了<strong>输入阻挡、穿透和外部点击处理</strong>。</p>
+<p>例如，可以按从低到高的顺序划分以下几个层级：</p>
+<table>
+<thead>
+<tr>
+<th>层级</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>HUD</td>
+<td>血条、小地图、操作按钮等常驻界面</td>
+</tr>
+<tr>
+<td>Window</td>
+<td>背包、商城、任务等普通窗口</td>
+</tr>
+<tr>
+<td>Popup</td>
+<td>确认框、物品详情等弹窗</td>
+</tr>
+<tr>
+<td>Loading</td>
+<td>加载进度与过渡遮罩，覆盖普通窗口和弹窗</td>
+</tr>
+</tbody></table>
+<p>业务只需要声明界面所属的层级，由框架统一维护显示顺序。</p>
+<h3 id="3-分离数据、表现与交互逻辑：MVC-分层与组件绑定"><a href="#3-分离数据、表现与交互逻辑：MVC-分层与组件绑定" class="headerlink" title="3. 分离数据、表现与交互逻辑：MVC 分层与组件绑定"></a>3. 分离数据、表现与交互逻辑：MVC 分层与组件绑定</h3><p>背包显示出来后，需要给图标赋值、刷新数量、绑定按钮事件，并在点击物品时打开详情。如果这些逻辑全部写在同一个 MonoBehaviour 中，组件引用、业务数据和交互流程很快就会混在一起。</p>
+<p>因此，需要把职责分开：View 持有组件并负责表现，Controller 组织交互和刷新流程，业务 Model 保存与处理数据，ModelManager 继续承担 Model 的管理职责。</p>
+<p>组件引用本身也存在重复劳动。每个界面都手动声明字段、拖拽引用，或者运行时按路径查找，既繁琐又容易遗漏。由此再引出编辑器绑定工具，让它按约定生成代码并写回组件引用。</p>
+<h3 id="4-规范创建、打开、刷新与释放：界面生命周期管理"><a href="#4-规范创建、打开、刷新与释放：界面生命周期管理" class="headerlink" title="4. 规范创建、打开、刷新与释放：界面生命周期管理"></a>4. 规范创建、打开、刷新与释放：界面生命周期管理</h3><p>背包可能要先准备数据才能显示，按钮事件只需绑定一次，而物品列表每次打开都要刷新。关闭之后，数据通知是否还要监听？下次打开时，是重新加载还是复用原来的对象？</p>
+<p>这些逻辑需要有固定的执行阶段，否则每个界面都会自己约定“初始化”“打开”“关闭”分别做什么。框架因此需要统一生命周期，区分首次创建、每次打开的数据准备、刷新、关闭和最终销毁。</p>
+<p>框架提供以下生命周期回调：</p>
+<table>
+<thead>
+<tr>
+<th>回调</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>OnCreate</code></td>
+<td>首次创建时执行，绑定按钮事件等一次性逻辑</td>
+</tr>
+<tr>
+<td><code>OnPrepareAsync</code></td>
+<td>每次打开时异步准备数据</td>
+</tr>
+<tr>
+<td><code>OnInitData</code></td>
+<td>准备完成后，初始化本次界面内容</td>
+</tr>
+<tr>
+<td><code>OnOpen</code></td>
+<td>开场动效结束后执行打开逻辑</td>
+</tr>
+<tr>
+<td><code>OnRefresh</code></td>
+<td>按刷新策略重复打开已有界面时，更新数据与显示</td>
+</tr>
+<tr>
+<td><code>OnPause</code> &#x2F; <code>OnResume</code></td>
+<td>处理导航中的暂停与恢复</td>
+</tr>
+<tr>
+<td><code>OnClose</code></td>
+<td>退场动效开始前执行关闭逻辑</td>
+</tr>
+<tr>
+<td><code>OnDispose</code></td>
+<td>实例最终释放时执行清理逻辑</td>
+</tr>
+</tbody></table>
+<p>这些回调为业务逻辑提供统一的执行时机。业务按需填入初始化、刷新和清理逻辑，由框架负责调度，并处理重复打开、缓存复用与最终释放。</p>
+<h3 id="5-统一动画播放、复用与调试：动效管理"><a href="#5-统一动画播放、复用与调试：动效管理" class="headerlink" title="5. 统一动画播放、复用与调试：动效管理"></a>5. 统一动画播放、复用与调试：动效管理</h3><p>界面通常会使用淡入、淡出或缩放动画表现打开与关闭过程。框架需要等待开场动画结束后再启用交互，也需要等待退场动画结束后再隐藏或释放对象，避免动画被提前打断。</p>
+<p>如果每个界面自己计时等待，再分别处理快速开关、动画中断和游戏暂停，就会重复编写大量状态控制。因此，需要统一的动效管理，把播放、完成等待、取消和帧事件接入界面生命周期。</p>
+<p>开发时还需要反复调整和检查动画效果，因此框架同时提供配置复用、预览和按帧播放调试：</p>
+<ul>
+<li><strong>配置与复用</strong>：通过配置关联动效 Key、AnimationClip 和播放参数，节点路径与动画属性兼容的界面可以复用同一份 Clip，减少重复制作。</li>
+<li><strong>预览</strong>：在编辑器中直接选择动效播放、暂停，快速检查效果，不必每次都从业务入口走完整个打开流程。</li>
+<li><strong>按帧调试</strong>：拖动时间轴定位，或前进、后退一帧，检查某一帧的位置、缩放与透明度，方便排查闪烁、跳变和衔接问题。</li>
+</ul>
+<p>运行时由框架管理播放流程，开发时通过预览与逐帧调试定位表现问题，减少反复进入业务流程验证动画的时间。</p>
+<h3 id="6-处理粒子排序、裁剪与回收：UI-特效管理"><a href="#6-处理粒子排序、裁剪与回收：UI-特效管理" class="headerlink" title="6. 处理粒子排序、裁剪与回收：UI 特效管理"></a>6. 处理粒子排序、裁剪与回收：UI 特效管理</h3><p>给高品质物品增加粒子光效后，又会遇到新的问题：粒子能否位于背景与图标之间？放进滚动列表后，能否被遮罩裁剪？界面关闭和缓存复开时，粒子应该怎样停止与重置？</p>
+<p>普通 ParticleSystem 挂到 UI 节点下，并不会自动遵守 UGUI 的渲染与裁剪规则。因此，需要考虑 UIParticle 这样的接入方案，并明确特效与界面的生命周期关系。</p>
+<h3 id="7-适应屏幕比例与异形屏：分辨率与安全区适配"><a href="#7-适应屏幕比例与异形屏：分辨率与安全区适配" class="headerlink" title="7. 适应屏幕比例与异形屏：分辨率与安全区适配"></a>7. 适应屏幕比例与异形屏：分辨率与安全区适配</h3><p>界面在开发分辨率下正常，不代表换成长屏或带刘海的手机后仍然正常。背景可能无法铺满，按钮可能靠近屏幕缺口，横竖屏切换后布局也可能失效。</p>
+<p>如果每个业务分别计算缩放和安全区，同样会产生重复逻辑和不一致的结果。因此，需要统一屏幕信息与适配规则，再根据内容特点区分背景铺满、固定比例区域和安全区内的交互内容。</p>
+<h3 id="8-管理界面跳转与返回关系：导航管理"><a href="#8-管理界面跳转与返回关系：导航管理" class="headerlink" title="8. 管理界面跳转与返回关系：导航管理"></a>8. 管理界面跳转与返回关系：导航管理</h3><p>最后，玩家从背包打开物品详情，再进入物品获取途径。这时只提供 Open 和 Close 已经不够：打开目标后，来源界面是否暂停？返回时恢复详情还是背包？不同入口进入同一个页面，返回目标是否相同？</p>
+<p>如果这些关系全部写在按钮回调中，界面之间会互相依赖，流程一变就要修改多处代码。因此，需要导航系统统一描述跳转目标、参数准备、来源处理和返回策略。</p>
+<p>沿着“打开一个界面”逐步展开，就能看到这些模块各自的必要性：Open 收拢加载与创建，层级管理显示顺序，MVC 组织业务代码，生命周期管理实例，动效与粒子负责表现，适配处理屏幕差异，导航维护界面之间的关系。业务通过统一 API 使用它们，UIManager 负责组织流程，各模块分别完成自己的职责。</p>
+<h2 id="二、总结"><a href="#二、总结" class="headerlink" title="二、总结"></a>二、总结</h2><p>从打开一个界面开始，UI 系统的需求逐步扩展到层级与输入、MVC 与组件绑定、生命周期、动效、粒子、屏幕适配，以及导航与返回。框架把这些重复的工作统一起来，让业务主要关注界面内容与交互逻辑。</p>
+<p>下一篇从一个具体界面出发，介绍 MVC 的依赖关系、View 的绑定方案与代码生成，以及 Controller 生命周期和 ModelManager 的配合。层级、动效、适配和导航再分别展开；UIParticle 作为待接入扩展另行介绍。</p>
+</article><div class="post-copyright"><div class="post-copyright__author"><span class="post-copyright-meta"><i class="fas fa-circle-user fa-fw"></i>文章作者: </span><span class="post-copyright-info"><a href="https://cyskdsn.top">穿越时空的思念</a></span></div><div class="post-copyright__type"><span class="post-copyright-meta"><i class="fas fa-square-arrow-up-right fa-fw"></i>文章链接: </span><span class="post-copyright-info"><a href="https://cyskdsn.top/posts/33cdadce.html">https://cyskdsn.top/posts/33cdadce.html</a></span></div><div class="post-copyright__notice"><span class="post-copyright-meta"><i class="fas fa-circle-exclamation fa-fw"></i>版权声明: </span><span class="post-copyright-info">本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a> 许可协议。转载请注明来源 <a href="https://cyskdsn.top" target="_blank">穿越时空的思念</a>！</span></div></div><div class="tag_share"><div class="post-meta__tag-list"><a class="post-meta__tags" href="/tags/UnityFramework/">UnityFramework</a></div><div class="post-share"><div class="social-share" data-image="/img/Title/AlloyFramework.jpeg" data-sites="facebook,twitter,wechat,weibo,qq"></div><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/css/share.min.css" media="print" onload="this.media='all'"><script src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/sharejs/dist/js/social-share.min.js" defer></script></div></div><nav class="pagination-post" id="pagination"><a class="pagination-related" href="/posts/9bdbc0d1.html" title="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定"><img class="cover" src="/img/Title/AlloyFramework.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of previous post"><div class="info"><div class="info-1"><div class="info-item-1">上一篇</div><div class="info-item-2">AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定</div></div><div class="info-2"><div class="info-item-1">上一篇梳理了 AlloyFramework UI 系统的总需求。这一篇介绍一个界面内部的代码应该如何组织，以及 View、Controller 和 Model 如何分工协作。 一个界面通常需要显示数据、响应点击并处理打开与关闭。把这些逻辑全部放在一个 MonoBehaviour 中也能运行，但随着功能增加，组件引用、交互流程与业务数据就容易相互牵连。 因此，先把它们的职责与依赖关系确定下来。   一、从一个界面看 MVC 的依赖关系AlloyFramework 按照 MVC 划分职责，由 Controller 获取 Model 数据并驱动 View 刷新：      graph TD     Controller[&quot;Controller&quot;] &lt;--&gt;|数据读写与变化通知| Model[&quot;Model&quot;]     Controller &lt;--&gt;|交互事件与界面刷新| View[&quot;View&quot;]     一个界面按照 MVC 划分为三个部分：    部分 对应职责 主要内容    View 持有 UI 组...</div></div></div></a><a class="pagination-related" href="/posts/621cbae4.html" title="AlloyFramework的实现(六) - 音频系统"><img class="cover" src="/img/Title/AlloyFramework.jpeg" onerror="onerror=null;src='/img/404.jpg'" alt="cover of next post"><div class="info text-right"><div class="info-1"><div class="info-item-1">下一篇</div><div class="info-item-2">AlloyFramework的实现(六) - 音频系统</div></div><div class="info-2"><div class="info-item-1">前两篇分别介绍了 资源管理系统，以及业务代码准备、配置与数据模型。资源和配置就绪、Model 管理入口建立后，启动流程继续进入音频模块。音频系统除了加载资源，还要管理播放实例、空间位置、音量、结束通知，以及应用切后台时的行为。 例如，角色释放技能时，业务希望表达的是“在角色身上播放这个音效”；离开关卡时，希望本关卡的声音和预加载资源能够一起退出。业务不应该为此调用 AkUnitySoundEngine，也不应该持有 FMOD 的事件实例或直接管理 Wwise 的 Bank。 AlloyFramework 因此继续使用三层结构：业务层 → 框架层 → 实现层。当前音频实现层使用 Wwise，业务通过 AudioManager、AudioPlayOptions、AudioScope 等框架类型表达需求。 Wwise 是音频中间件，负责根据事件和制作规则组织声音，完成媒体读取、混音和输出。关于它生成的 .bnk、.wem，以及从制作到运行时播放的过程，可以先阅读 《Unity音频中间件Wwise的生成物与流程浅析》。本文重点介绍这些能力如何接入框架。 本文以当前源码为准。设计目标包含统...</div></div></div></a></nav><div class="relatedPosts"><div class="headline"><i class="fas fa-thumbs-up fa-fw"></i><span>相关推荐</span></div><div class="relatedPosts-list"><a class="pagination-related" href="/posts/df7521a5.html" title="AlloyFramework(二)：框架启动流程"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-11</div><div class="info-item-2">AlloyFramework(二)：框架启动流程</div></div><div class="info-2"><div class="info-item-1">上一篇介绍了 AlloyFramework 需要提供哪些基础模块。这一篇介绍这些模块如何启动，以及框架完成准备后，如何把流程交给业务层。 整个启动结构主要分为三块：  框架入口：在启动场景挂载 FrameworkBootstrap，从它的 Awake 开始启动。 模块初始化流程：统一组织模块，按顺序初始化，完成热更代码准备，并通过反射获得业务入口。 业务入口：初始化业务、执行项目自身逻辑，完成从框架启动流程到业务流程的交接。       flowchart TD     subgraph Bootstrap[&quot;第一块：框架入口&quot;]         A[&quot;Boot 场景挂载 FrameworkBootstrap&quot;]         B[&quot;Awake：读取启动配置，准备日志和 Loading&quot;]         A --&gt; B     end     subgraph Initialization[&quot;第二块：模块初始化流程&quot;]         C[&quot;建立启动步骤 List，按顺序执行&qu...</div></div></div></a><a class="pagination-related" href="/posts/f7757111.html" title="AlloyFramework的实现(五) - 业务代码准备、配置与数据模型"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-17</div><div class="info-item-2">AlloyFramework的实现(五) - 业务代码准备、配置与数据模型</div></div><div class="info-2"><div class="info-item-1">上一篇介绍了 AlloyFramework 的资源管理系统。这一篇继续沿启动流程，介绍业务代码准备、配置预加载和 Model 管理，分别说明它们解决的问题与具体实现。 内容以当前框架与 game-template 源码为准；HybridCLR 重点介绍启动时的校验、加载和反射安装流程，完整构建发布另行讨论。 一、先看整体启动流程这三个处理过程也有先后依赖：资源服务先就绪，随后准备业务代码，由业务安装配置加载器，再执行配置加载和 Model 管理器初始化。当前 FrameworkStartupPipeline 中的顺序如下： 123456Add(new InitializeFrameworkSystemStep(new ResourceServiceManager()));Add(new PrepareGameCodeStep());// 业务代码必须先安装配置加载器，Config 随后才能加载业务配置。Add(new InitializeFrameworkSystemStep(new ConfigManager()));Add(new InitializeFrameworkSys...</div></div></div></a><a class="pagination-related" href="/posts/9bdbc0d1.html" title="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-18</div><div class="info-item-2">AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定</div></div><div class="info-2"><div class="info-item-1">上一篇梳理了 AlloyFramework UI 系统的总需求。这一篇介绍一个界面内部的代码应该如何组织，以及 View、Controller 和 Model 如何分工协作。 一个界面通常需要显示数据、响应点击并处理打开与关闭。把这些逻辑全部放在一个 MonoBehaviour 中也能运行，但随着功能增加，组件引用、交互流程与业务数据就容易相互牵连。 因此，先把它们的职责与依赖关系确定下来。   一、从一个界面看 MVC 的依赖关系AlloyFramework 按照 MVC 划分职责，由 Controller 获取 Model 数据并驱动 View 刷新：      graph TD     Controller[&quot;Controller&quot;] &lt;--&gt;|数据读写与变化通知| Model[&quot;Model&quot;]     Controller &lt;--&gt;|交互事件与界面刷新| View[&quot;View&quot;]     一个界面按照 MVC 划分为三个部分：    部分 对应职责 主要内容    View 持有 UI 组...</div></div></div></a><a class="pagination-related" href="/posts/621cbae4.html" title="AlloyFramework的实现(六) - 音频系统"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-17</div><div class="info-item-2">AlloyFramework的实现(六) - 音频系统</div></div><div class="info-2"><div class="info-item-1">前两篇分别介绍了 资源管理系统，以及业务代码准备、配置与数据模型。资源和配置就绪、Model 管理入口建立后，启动流程继续进入音频模块。音频系统除了加载资源，还要管理播放实例、空间位置、音量、结束通知，以及应用切后台时的行为。 例如，角色释放技能时，业务希望表达的是“在角色身上播放这个音效”；离开关卡时，希望本关卡的声音和预加载资源能够一起退出。业务不应该为此调用 AkUnitySoundEngine，也不应该持有 FMOD 的事件实例或直接管理 Wwise 的 Bank。 AlloyFramework 因此继续使用三层结构：业务层 → 框架层 → 实现层。当前音频实现层使用 Wwise，业务通过 AudioManager、AudioPlayOptions、AudioScope 等框架类型表达需求。 Wwise 是音频中间件，负责根据事件和制作规则组织声音，完成媒体读取、混音和输出。关于它生成的 .bnk、.wem，以及从制作到运行时播放的过程，可以先阅读 《Unity音频中间件Wwise的生成物与流程浅析》。本文重点介绍这些能力如何接入框架。 本文以当前源码为准。设计目标包含统...</div></div></div></a><a class="pagination-related" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-10</div><div class="info-item-2">AlloyFramework(一)：最小的游戏框架需要包含几个模块</div></div><div class="info-2"><div class="info-item-1">写一个 Unity Demo 时，我们通常希望尽快把核心玩法跑起来。但真正开始动手后就会发现：在玩法之外，总有一批基础逻辑需要先写。 程序从哪里启动？资源怎么加载？倒计时怎么管理？配置表怎么读取？怎样与服务器通信？资源和代码怎么更新？界面如何打开、关闭和切换？ 换一个 Demo，这些问题依然存在。项目规模扩大之后，它们还会带来初始化顺序、资源释放、异步取消、异常恢复等更具体的问题。 这就是我想搭建 AlloyFramework 的原因：把项目中反复出现的通用需求整理出来，形成可以复用的基础能力，让开发新项目时能够把更多精力放在玩法和业务上。 这一篇先不讨论具体代码，也不把需求描述当作已经完成的功能清单。我们先回答一个问题：一个最小的游戏框架，需要替项目承担哪些职责？ 一、统一的启动入口：让游戏按确定的顺序进入运行状态Unity 提供了 Awake、OnEnable、Start 等生命周期方法，但这些方法并不会自动形成一条清晰的业务启动流程。 项目很小时，把初始化代码写在几个组件里似乎就够了。随着模块增加，依赖关系会逐渐显现：读取配置之前可能需要准备资源包，打开登录界面之前需要初始...</div></div></div></a><a class="pagination-related" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块"><img class="cover" src="/img/Title/AlloyFramework.jpeg" alt="cover"><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-11-11</div><div class="info-item-2">AlloyFramework(三)：框架循环与时间模块</div></div><div class="info-2"><div class="info-item-1">游戏业务中，经常需要“等一会儿，再执行一段逻辑”：提示显示两秒后关闭，角色死亡后延迟复活，或者等下一帧再刷新界面布局。 因此，框架需要提供一种方便的延迟写法，让业务能够直接表达“多久之后做什么”。例如，让提示两秒后关闭： 12345// 两秒后关闭提示，使用不受游戏时间缩放影响的计时。long closeTimerID = AlloyTimer.DelaySeconds(    2.0,    CloseTip,    useTimeScale: false);  这里的 CloseTip 是业务自己的关闭方法，计时器负责等待并在到期后调用。返回的任务 ID 则用于提前取消：如果提示已经被玩家手动关闭，就可以取消原来的延迟任务。 12// 提示提前关闭时，取消尚未执行的延迟回调。AlloyTimer.Remove(closeTimerID);  从一次延迟继续往下看，还会遇到每秒刷新一次倒计时、每隔几帧检查一次状态、重复执行指定次数等需求。游戏暂停时，有的任务需要一起暂停，有的界面刷新则需要继续。这些都是同一类计时需求的不同用法。 Unity 的协程和 UniTask 都可以表达...</div></div></div></a></div></div></div><div class="aside-content" id="aside-content"><div class="card-widget card-info text-center"><div class="avatar-img"><img src="/img/headIcon.jpg" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="author-info-name">穿越时空的思念</div><div class="author-info-description">每天进步一点，做更好的自己!</div><div class="site-data"><a href="/archives/"><div class="headline">文章</div><div class="length-num">46</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">14</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">1</div></a></div><a id="card-info-btn" target="_blank" rel="noopener" href="https://github.com/Jin8868"><i class="fab fa-github"></i><span>Follow Me</span></a></div><div class="card-widget card-announcement"><div class="item-headline"><i class="fas fa-bullhorn fa-shake"></i><span>公告</span></div><div class="announcement_content"></div></div><div class="sticky_layout"><div class="card-widget" id="card-toc"><div class="item-headline"><i class="fas fa-stream"></i><span>目录</span><span class="toc-percentage"></span></div><div class="toc-content"><ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%B8%80%E3%80%81UI-%E6%A1%86%E6%9E%B6%E9%9C%80%E8%A6%81%E8%A7%A3%E5%86%B3%E4%BB%80%E4%B9%88%E9%97%AE%E9%A2%98"><span class="toc-number">1.</span> <span class="toc-text">一、UI 框架需要解决什么问题</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-%E5%85%88%E6%8A%8A%E7%95%8C%E9%9D%A2%E6%89%93%E5%BC%80%EF%BC%9A%E7%BB%9F%E4%B8%80-Open-%E6%8E%A5%E5%8F%A3"><span class="toc-number">1.1.</span> <span class="toc-text">1. 先把界面打开：统一 Open 接口</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#2-%E7%BB%9F%E4%B8%80%E6%98%BE%E7%A4%BA%E9%A1%BA%E5%BA%8F%E4%B8%8E%E4%BA%A4%E4%BA%92%E8%A7%84%E5%88%99%EF%BC%9A%E5%B1%82%E7%BA%A7%E4%B8%8E%E8%BE%93%E5%85%A5%E7%AE%A1%E7%90%86"><span class="toc-number">1.2.</span> <span class="toc-text">2. 统一显示顺序与交互规则：层级与输入管理</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-%E5%88%86%E7%A6%BB%E6%95%B0%E6%8D%AE%E3%80%81%E8%A1%A8%E7%8E%B0%E4%B8%8E%E4%BA%A4%E4%BA%92%E9%80%BB%E8%BE%91%EF%BC%9AMVC-%E5%88%86%E5%B1%82%E4%B8%8E%E7%BB%84%E4%BB%B6%E7%BB%91%E5%AE%9A"><span class="toc-number">1.3.</span> <span class="toc-text">3. 分离数据、表现与交互逻辑：MVC 分层与组件绑定</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#4-%E8%A7%84%E8%8C%83%E5%88%9B%E5%BB%BA%E3%80%81%E6%89%93%E5%BC%80%E3%80%81%E5%88%B7%E6%96%B0%E4%B8%8E%E9%87%8A%E6%94%BE%EF%BC%9A%E7%95%8C%E9%9D%A2%E7%94%9F%E5%91%BD%E5%91%A8%E6%9C%9F%E7%AE%A1%E7%90%86"><span class="toc-number">1.4.</span> <span class="toc-text">4. 规范创建、打开、刷新与释放：界面生命周期管理</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#5-%E7%BB%9F%E4%B8%80%E5%8A%A8%E7%94%BB%E6%92%AD%E6%94%BE%E3%80%81%E5%A4%8D%E7%94%A8%E4%B8%8E%E8%B0%83%E8%AF%95%EF%BC%9A%E5%8A%A8%E6%95%88%E7%AE%A1%E7%90%86"><span class="toc-number">1.5.</span> <span class="toc-text">5. 统一动画播放、复用与调试：动效管理</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#6-%E5%A4%84%E7%90%86%E7%B2%92%E5%AD%90%E6%8E%92%E5%BA%8F%E3%80%81%E8%A3%81%E5%89%AA%E4%B8%8E%E5%9B%9E%E6%94%B6%EF%BC%9AUI-%E7%89%B9%E6%95%88%E7%AE%A1%E7%90%86"><span class="toc-number">1.6.</span> <span class="toc-text">6. 处理粒子排序、裁剪与回收：UI 特效管理</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#7-%E9%80%82%E5%BA%94%E5%B1%8F%E5%B9%95%E6%AF%94%E4%BE%8B%E4%B8%8E%E5%BC%82%E5%BD%A2%E5%B1%8F%EF%BC%9A%E5%88%86%E8%BE%A8%E7%8E%87%E4%B8%8E%E5%AE%89%E5%85%A8%E5%8C%BA%E9%80%82%E9%85%8D"><span class="toc-number">1.7.</span> <span class="toc-text">7. 适应屏幕比例与异形屏：分辨率与安全区适配</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#8-%E7%AE%A1%E7%90%86%E7%95%8C%E9%9D%A2%E8%B7%B3%E8%BD%AC%E4%B8%8E%E8%BF%94%E5%9B%9E%E5%85%B3%E7%B3%BB%EF%BC%9A%E5%AF%BC%E8%88%AA%E7%AE%A1%E7%90%86"><span class="toc-number">1.8.</span> <span class="toc-text">8. 管理界面跳转与返回关系：导航管理</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E4%BA%8C%E3%80%81%E6%80%BB%E7%BB%93"><span class="toc-number">2.</span> <span class="toc-text">二、总结</span></a></li></ol></div></div><div class="card-widget card-post-series"><div class="item-headline"><i class="fa-solid fa-layer-group"></i><span>系列文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/9bdbc0d1.html" title="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定"></a><div class="content"><a class="title" href="/posts/9bdbc0d1.html" title="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定">AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定</a><time datetime="2026-11-18T12:16:51.138Z" title="发表于 2026-11-18 20:16:51">2026-11-18</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/33cdadce.html" title="AlloyFramework的实现(七) - UI框架的需求与整体设计"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(七) - UI框架的需求与整体设计"></a><div class="content"><a class="title" href="/posts/33cdadce.html" title="AlloyFramework的实现(七) - UI框架的需求与整体设计">AlloyFramework的实现(七) - UI框架的需求与整体设计</a><time datetime="2026-11-18T11:46:48.361Z" title="发表于 2026-11-18 19:46:48">2026-11-18</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/621cbae4.html" title="AlloyFramework的实现(六) - 音频系统"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(六) - 音频系统"></a><div class="content"><a class="title" href="/posts/621cbae4.html" title="AlloyFramework的实现(六) - 音频系统">AlloyFramework的实现(六) - 音频系统</a><time datetime="2026-11-17T11:59:25.507Z" title="发表于 2026-11-17 19:59:25">2026-11-17</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/f7757111.html" title="AlloyFramework的实现(五) - 业务代码准备、配置与数据模型"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(五) - 业务代码准备、配置与数据模型"></a><div class="content"><a class="title" href="/posts/f7757111.html" title="AlloyFramework的实现(五) - 业务代码准备、配置与数据模型">AlloyFramework的实现(五) - 业务代码准备、配置与数据模型</a><time datetime="2026-11-17T11:59:24.727Z" title="发表于 2026-11-17 19:59:24">2026-11-17</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/3b1ffc1a.html" title="AlloyFramework(四)：资源管理系统"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(四)：资源管理系统"></a><div class="content"><a class="title" href="/posts/3b1ffc1a.html" title="AlloyFramework(四)：资源管理系统">AlloyFramework(四)：资源管理系统</a><time datetime="2026-11-11T14:30:51.454Z" title="发表于 2026-11-11 22:30:51">2026-11-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(三)：框架循环与时间模块"></a><div class="content"><a class="title" href="/posts/d0ad57a2.html" title="AlloyFramework(三)：框架循环与时间模块">AlloyFramework(三)：框架循环与时间模块</a><time datetime="2026-11-11T14:14:05.125Z" title="发表于 2026-11-11 22:14:05">2026-11-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/df7521a5.html" title="AlloyFramework(二)：框架启动流程"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(二)：框架启动流程"></a><div class="content"><a class="title" href="/posts/df7521a5.html" title="AlloyFramework(二)：框架启动流程">AlloyFramework(二)：框架启动流程</a><time datetime="2026-11-11T14:14:05.046Z" title="发表于 2026-11-11 22:14:05">2026-11-11</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework(一)：最小的游戏框架需要包含几个模块"></a><div class="content"><a class="title" href="/posts/c2cb4e7b.html" title="AlloyFramework(一)：最小的游戏框架需要包含几个模块">AlloyFramework(一)：最小的游戏框架需要包含几个模块</a><time datetime="2026-11-10T11:47:13.765Z" title="发表于 2026-11-10 19:47:13">2026-11-10</time></div></div></div></div><div class="card-widget card-recent-post"><div class="item-headline"><i class="fas fa-history"></i><span>最新文章</span></div><div class="aside-list"><div class="aside-list-item"><a class="thumbnail" href="/posts/9bdbc0d1.html" title="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定"/></a><div class="content"><a class="title" href="/posts/9bdbc0d1.html" title="AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定">AlloyFramework的实现(八) - UI框架的MVC分层与界面绑定</a><time datetime="2026-11-18T12:16:51.138Z" title="发表于 2026-11-18 20:16:51">2026-11-18</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/33cdadce.html" title="AlloyFramework的实现(七) - UI框架的需求与整体设计"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(七) - UI框架的需求与整体设计"/></a><div class="content"><a class="title" href="/posts/33cdadce.html" title="AlloyFramework的实现(七) - UI框架的需求与整体设计">AlloyFramework的实现(七) - UI框架的需求与整体设计</a><time datetime="2026-11-18T11:46:48.361Z" title="发表于 2026-11-18 19:46:48">2026-11-18</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/621cbae4.html" title="AlloyFramework的实现(六) - 音频系统"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(六) - 音频系统"/></a><div class="content"><a class="title" href="/posts/621cbae4.html" title="AlloyFramework的实现(六) - 音频系统">AlloyFramework的实现(六) - 音频系统</a><time datetime="2026-11-17T11:59:25.507Z" title="发表于 2026-11-17 19:59:25">2026-11-17</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/f7757111.html" title="AlloyFramework的实现(五) - 业务代码准备、配置与数据模型"><img src="/img/Title/AlloyFramework.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="AlloyFramework的实现(五) - 业务代码准备、配置与数据模型"/></a><div class="content"><a class="title" href="/posts/f7757111.html" title="AlloyFramework的实现(五) - 业务代码准备、配置与数据模型">AlloyFramework的实现(五) - 业务代码准备、配置与数据模型</a><time datetime="2026-11-17T11:59:24.727Z" title="发表于 2026-11-17 19:59:24">2026-11-17</time></div></div><div class="aside-list-item"><a class="thumbnail" href="/posts/7975a1cd.html" title="Unity音频中间件Wwise的生成物与流程浅析"><img src="/img/Title/Unity-Wwise-Doc&amp;Processes.jpeg" onerror="this.onerror=null;this.src='/img/404.jpg'" alt="Unity音频中间件Wwise的生成物与流程浅析"/></a><div class="content"><a class="title" href="/posts/7975a1cd.html" title="Unity音频中间件Wwise的生成物与流程浅析">Unity音频中间件Wwise的生成物与流程浅析</a><time datetime="2026-11-16T12:25:10.000Z" title="发表于 2026-11-16 20:25:10">2026-11-16</time></div></div></div></div></div></div></main><footer id="footer"><div class="footer-other"><div class="footer-copyright"><span class="copyright">&copy;2025 - 2026 By 穿越时空的思念</span></div><div class="footer_custom_text">每天进步一点，做更好的自己!</div></div></footer></div><div id="rightside"><div id="rightside-config-hide"><button id="readmode" type="button" title="阅读模式"><i class="fas fa-book-open"></i></button><button id="darkmode" type="button" title="日间和夜间模式切换"><i class="fas fa-adjust"></i></button><button id="hide-aside-btn" type="button" title="单栏和双栏切换"><i class="fas fa-arrows-alt-h"></i></button></div><div id="rightside-config-show"><button id="rightside-config" type="button" title="设置"><i class="fas fa-cog fa-spin"></i></button><button class="close" id="mobile-toc-button" type="button" title="目录"><i class="fas fa-list-ul"></i></button><button id="go-up" type="button" title="回到顶部"><span class="scroll-percent"></span><i class="fas fa-arrow-up"></i></button></div></div><div><script src="/js/utils.js"></script><script src="/js/main.js"></script><div class="js-pjax"><script>(async () => {
+  const showKatex = () => {
+    document.querySelectorAll('#article-container .katex').forEach(el => el.classList.add('katex-show'))
+  }
+
+  if (!window.katex_js_css) {
+    window.katex_js_css = true
+    await btf.getCSS('https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css')
+    if (true) {
+      await btf.getScript('https://cdn.jsdelivr.net/npm/katex/dist/contrib/copy-tex.min.js')
+    }
+  }
+
+  showKatex()
+})()</script><script>(() => {
+  const runMermaid = ele => {
+    window.loadMermaid = true
+    const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default'
+
+    ele.forEach((item, index) => {
+      const mermaidSrc = item.firstElementChild
+      const mermaidThemeConfig = `%%{init:{ 'theme':'${theme}'}}%%\n`
+      const mermaidID = `mermaid-${index}`
+      const mermaidDefinition = mermaidThemeConfig + mermaidSrc.textContent
+
+      const renderFn = mermaid.render(mermaidID, mermaidDefinition)
+      const renderMermaid = svg => {
+        mermaidSrc.insertAdjacentHTML('afterend', svg)
+      }
+
+      // mermaid v9 and v10 compatibility
+      typeof renderFn === 'string' ? renderMermaid(renderFn) : renderFn.then(({ svg }) => renderMermaid(svg))
+    })
+  }
+
+  const codeToMermaid = () => {
+    const codeMermaidEle = document.querySelectorAll('pre > code.mermaid')
+    if (codeMermaidEle.length === 0) return
+
+    codeMermaidEle.forEach(ele => {
+      const preEle = document.createElement('pre')
+      preEle.className = 'mermaid-src'
+      preEle.hidden = true
+      preEle.textContent = ele.textContent
+      const newEle = document.createElement('div')
+      newEle.className = 'mermaid-wrap'
+      newEle.appendChild(preEle)
+      ele.parentNode.replaceWith(newEle)
+    })
+  }
+
+  const loadMermaid = () => {
+    if (true) codeToMermaid()
+    const $mermaid = document.querySelectorAll('#article-container .mermaid-wrap')
+    if ($mermaid.length === 0) return
+
+    const runMermaidFn = () => runMermaid($mermaid)
+    btf.addGlobalFn('themeChange', runMermaidFn, 'mermaid')
+    window.loadMermaid ? runMermaidFn() : btf.getScript('https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js').then(runMermaidFn)
+  }
+
+  btf.addGlobalFn('encrypt', loadMermaid, 'mermaid')
+  window.pjax ? loadMermaid() : document.addEventListener('DOMContentLoaded', loadMermaid)
+})()</script></div><script defer="defer" id="ribbon" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-ribbon.min.js" size="150" alpha="0.6" zIndex="-1" mobile="true" data-click="true"></script><script defer="defer" id="fluttering_ribbon" mobile="true" src="https://cdn.jsdelivr.net/npm/butterfly-extsrc/dist/canvas-fluttering-ribbon.min.js"></script><div id="local-search"><div class="search-dialog"><nav class="search-nav"><span class="search-dialog-title">搜索</span><span id="loading-status"></span><button class="search-close-button"><i class="fas fa-times"></i></button></nav><div class="text-center" id="loading-database"><i class="fas fa-spinner fa-pulse"></i><span>  数据加载中</span></div><div class="search-wrap"><div id="local-search-input"><div class="local-search-box"><input class="local-search-box--input" placeholder="搜索文章" type="text"/></div></div><hr/><div id="local-search-results"></div><div id="local-search-stats-wrap"></div></div></div><div id="search-mask"></div><script src="/js/search/local-search.js"></script></div></div></body></html>
