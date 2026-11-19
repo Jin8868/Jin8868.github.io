@@ -118,8 +118,9 @@ OnDispose
     <title>AlloyFramework的实现(九) - UIView的预制体结构、创建和加载</title>
     <url>/posts/aba0d673.html</url>
     <content><![CDATA[一、一个根节点，两种布局边界在不同比例的手机屏幕上，背景图既要铺到屏幕边缘，又要保持原始宽高比，避免拉伸变形。同时，交互组件要避开刘海和挖孔。为此，框架在 UIView 根节点下预留两个同级容器。背景图放在全屏容器 Background 下，等比缩放到铺满屏幕，允许边缘裁切。交互组件放在 SafeAreaContent 下，在安全区内布局。
-界面根节点（挂该界面的 UIView 派生组件）├── Background（全屏内容容器）└── SafeAreaContent（挂 UISafeAreaFitter）
+界面根节点（UIView 派生组件、独立 Canvas、CanvasScaler）├── Background（全屏内容容器）└── SafeAreaContent（挂 UISafeAreaFitter）
 
+横屏界面统一以 1920 × 1080 为参考分辨率，按宽度适配。 每个业务界面根节点的 CanvasScaler 都使用 Scale With Screen Size，匹配方式为 Match Width Or Height，横屏时 Match = 0（Width）。换设备时，设计稿的参考宽度仍是 1920，实际缩放倍率等于画布显示宽度除以 1920。例如在 2400 × 1080 的全屏画布上，倍率是 1.25，设计稿中宽 100 单位的组件会显示为 125 像素。此时画布可用高度是 1080 / 1.25 = 864 个设计单位，上下贴边的内容仍要通过锚点布局。当前项目的 UIRoot 配置为 AutoRotate，切到竖屏时会使用另一组参数：1080 × 1920，按高度适配。
 Background 用来存放需要覆盖全屏的节点。 背景图、全屏遮罩都放在这个容器下。遮罩通常随容器拉伸到屏幕四边，背景图还需要保持素材的宽高比。
 全屏背景图片的适配。 先比较屏幕和背景图的宽高比（宽 ÷ 高），再决定按哪条边铺满。缩放时，图片的宽和高始终使用同一倍率，画面就能保持原有比例。这个做法参考了《Unity UGUI 手机屏幕适配方案》中的“全屏背景图片的处理”一节。
 
@@ -7019,6 +7020,117 @@ TaskPanel ViewTaskPanel 位于 Examples/Task/View，负责：
 进入 Play Mode，TaskPanel 会在 TaskRuntimeNode 进入时显示。
 
 ]]></content>
+  </entry>
+  <entry>
+    <title>AlloyFramework的实现(十) - UI动效管理与逐帧预览</title>
+    <url>/posts/c9fab7d7.html</url>
+    <content><![CDATA[怎样为整个项目建立一套统一的 UI 动效工作流？美术用什么工具制作动效，以什么形式交付，研发又怎样接入？
+如果开场时画面闪了一下，美术怎么在预制体上停到那一帧检查？动效播到一半时，怎样通知业务？播完以后，UIManager 怎么知道可以继续？
+AlloyFramework 的做法是使用 Unity 的Animation，并把动画采样封装在 UIAnimationPlayer 中，由这个组件统一驱动 UI 动效。
+
+
+一、用 Unity 制作曲线，由播放器推进时间UIAnimationPlayer 播放的是用 Unity Animation 制作的动画，为了支持暂停、跳帧和帧事件，它自己控制播放时间，调用 AnimationClip.SampleAnimation 采样。
+var sampledTime = Mathf.Clamp(time, 0f, definition.Clip.length);definition.Clip.SampleAnimation(gameObject, sampledTime);
+
+gameObject 是播放器所在的界面根节点。Clip 中根节点的曲线可以直接作用于它，子节点的曲线则按相对于根节点的路径找到对应组件。这也是后面多个界面能共用一份淡入素材的依据。
+连续播放，就是在不同时间点反复采样。 播放器在 OnEnable 时注册到框架的 GameLoop。开始播放时先采样第 0 秒，随后每次更新都用“上次播放时间 + 本次时间增量”得到新时间，再采样一次。非循环动效到达末尾时先采样最后一帧，然后完成本次播放的 UniTask，等待动效的界面流程才会继续。
+这样，暂停只需要暂停推进时间，恢复时从原位置继续。每条动效还可以选择使用 deltaTime 或 unscaledDeltaTime，默认使用后者。例如游戏暂停并将 timeScale 设为 0 时，暂停界面仍能正常淡入。播放器禁用或销毁时会退出更新循环，并取消尚未结束的播放。
+Clip 配好后，研发在 Controller 中通过 View 按 Key 播放自定义动效，例如 View.Play(UIAnimationKeys.ANIMATION1)。配在 Open、Close 上的动效由框架在界面打开和关闭时自动播放。之后美术调整曲线或替换 Clip，只要沿用同一个 Key，业务调用就可以保持原样。
+二、帧事件怎样跟着动效触发假设开场动效在第 0.20 秒出现效果 A，同时需要播放音效 B。如果在业务代码里单独为音效设置延时，美术调整效果 A 的时间后，研发也要跟着改代码。框架把这个时机放进播放器的 帧事件 列表。每一项记录所属动效的 Key、事件 Key 和触发时间，时间单位是秒。这个例子给 Open 配置 Impact 事件，由业务在收到事件时播放音效 B。
+普通向前播放时，播放器用下面的条件判断哪些事件应在本次更新中派发：
+eventTime &gt; previousTime &amp;&amp; eventTime &lt;= currentTime
+
+条件中的 &lt;= currentTime 包含恰好到达事件时间的情况，&gt; previousTime 则避免下一次更新重复派发。第 0 秒的事件在开始播放时单独处理。循环动效跨过末尾时，播放器先处理本轮尾段，再处理新一轮的零秒事件和头段。
+播放器通过 AnimationEventReceived 派发事件，UIView 暴露同一个订阅入口。下面是业务 Controller 中的一段示例。事件配置留在各界面的播放器上，因此两个界面即使共用同一个 Clip，也可以只让其中一个界面播放音效 B。
+protected override void OnCreate()&#123;    View.AnimationEventReceived += HandleAnimationEvent;&#125;protected override void OnDispose()&#123;    View.AnimationEventReceived -= HandleAnimationEvent;&#125;private void HandleAnimationEvent(UIAnimationEventContext context)&#123;    if (context.AnimationKey == UIAnimationKeys.OPEN &amp;&amp;        context.EventKey == UIAnimationEventKeys.IMPACT)    &#123;        // 播放音效 B。    &#125;&#125;
+
+这就引出一个问题：如果卡顿跨过了事件时间，回调触发时，玩家看到的还是事件对应的画面吗？
+假设开场 Clip 长 0.30 秒，Impact 配在效果 A 出现的 0.20 秒。上次更新时，动画已经播到 0.18 秒。随后主线程卡顿，两次更新实际相隔 120 毫秒。
+普通 UI 动效怎么处理？ AlloyFramework 按经过的时间推进动画。默认的 Unscaled 模式取 Unity 的 unscaledDeltaTime 作为本次时间增量 frameDelta，所以这里是 0.12 秒；如果配置为受游戏时间缩放影响，则取 deltaTime。对于非循环的开场动效，播放器将时间增量加到上次的播放位置，再用 Clip 时长限制采样位置：
+var nextTime = previousTime + frameDelta;var sampledTime = Mathf.Min(nextTime, duration);
+
+代入上面的数值，sampledTime = min(0.18 + 0.12, 0.30) = 0.30 秒。即使两次更新相隔 0.20 秒，算出的播放位置为 0.38 秒，采样也只取 Clip 末尾的 0.30 秒。播放器先采样这个姿态，再检查 (0.18, 0.30] 内的事件。于是 Impact 会触发，回调中的 context.Time 仍是配置的 0.20 秒，此时界面属性却已经是末帧的值。Unity 手册：时间与帧管理
+怎样避免卡顿恢复后，效果 A 只闪现一帧？ 对普通开关场，当前框架按时间向前采样，跨过事件点就派发通知，跳过的画面无需补画。这样可以避免为了配合音效 B 而突然插入一帧效果 A。代价是卡顿较长时，画面仍可能从 0.18 秒直接跳到 0.30 秒。
+如果某段动效更看重过渡平滑，可以为它单独限制每次更新推进的播放时间。例如将单次推进上限设为 20 毫秒，卡顿 120 毫秒后只从 0.18 秒走到 0.20 秒，超出的 100 毫秒直接舍弃。若下一帧间隔为 16 毫秒，就从 0.20 秒走到 0.216 秒，音效 B 仍按实际走过的动画区间触发。这样恢复后能沿原曲线继续过渡，代价是动效比原计划晚结束，持续低帧率时也会播得更慢。这是按需可选的设计，当前播放器采用前一种策略。
+三、在 Inspector 中预览、逐帧播放和跳转如果某个界面打开时闪了一下，先在 Prefab Mode 打开预制体，选中根节点上的 UIAnimationPlayer，展开 Debug，选择要检查的 Animation Key。场景实例也可以直接预览。例如检查开场时，可以先跳到首帧观察透明度，再往后走一帧看它从什么值开始变化。
+
+
+
+想检查什么
+Inspector 操作
+实际行为
+
+
+
+整段动效的节奏
+播放、暂停
+连续推进时间，暂停后保留当前姿态
+
+
+相邻两帧的变化
+上一帧、下一帧
+按 Clip 的帧率后退或前进 1 / frameRate 秒
+
+
+首尾是否衔接
+跳到首帧、末帧
+直接采样第 0 秒或 clip.length
+
+
+跳过中间一段
+拖动 Time 滑条
+直接采样目标时间，可以继续单步检查
+
+
+编辑模式下，Inspector 用 EditorApplication.update 推进预览时间，通过 AnimationMode.SampleAnimationClip 更新画面。运行模式下则让播放器进入 Debug 状态。两种预览都只查看画面，拖动时间轴跨过 Impact 不会触发业务音效。要检查事件订阅和派发，应当正常打开界面播放一次。
+运行时调试可以保留原来的播放进度。BeginInspectorDebug 先保存当前动效、播放状态和时间，再从所选 Clip 的第 0 秒开始预览。退出时，如果进入 Debug 前已有采样记录，EndInspectorDebug 会按保存的时间重新采样，回到原来的姿态。
+业务里要跳过一段动效时，需要区分定位和结束。Seek(Duration) 只采样末帧。Stop(EUIAnimationStopMode.SampleEnd) 则在采样末帧后完成播放器自己的等待任务，跳过的帧事件也不会补发。如果 Controller 另有开场任务，UIManager 仍会等那项任务结束。
+四、用配置复用 Open 和 CloseOpen 和 Close 是框架约定的两个动效 Key。每个预制体在自己的播放器上保存 Key、Clip、时间模式和循环设置，UIManager 统一负责在开关场时调用。多个界面需要相同的淡入淡出效果时，可以让各自的配置引用同一份开场 Clip 和同一份退场 Clip。以界面根节点的 CanvasGroup 为目标，配置过程如下。
+
+制作公共 Clip。 开场把 Alpha 从 0 变为 1，退场从 1 变为 0。当前播放器要求 Clip 启用 Legacy，且时长和帧率均大于 0。
+配置界面根节点的播放器。 在 Inspector 的 动效配置 中添加两项，Key 分别选 Open 和 Close，引用对应 Clip。两项都使用非循环播放，这样打开和关闭流程都有明确的结束时刻。可以点击 校验配置 检查重复 Key、Clip 引用和循环设置。
+沿用界面原有的打开、关闭接口。 UIManager 会通过 UIView 在对应阶段播放配置好的动效。打开时先采样开场首帧，再等待 View 和 Controller 的开场任务完成；关闭时等待退场任务，再按策略缓存或释放实例。没有配置某个开关场 Key 时，对应的 View 动效任务直接完成。
+
+UIManager 等待开场的源码如下。第一项由 UIView 在根节点上取得播放器，再按 Open 查找配置。第二项留给 Controller 实现该界面特有的开场逻辑。两项可以同时进行，都完成后界面才进入可交互阶段。
+await UniTask.WhenAll(    entry.View.PlayOpenAnimationAsync(token),    entry.Controller.PlayOpenAnimationAsync(token));
+
+复用 Clip 时要对齐相对路径、组件类型和属性。淡入曲线录在根节点的 CanvasGroup 上，只要其他界面根上也有这个组件，就可以直接共用。若曲线录在某个子节点上，其他界面也要提供兼容的路径和组件。某个界面需要独特的入场动作时，只替换它在 Open 项引用的 Clip，业务的打开代码仍然适用。
+五、UI 粒子特效界面中的粒子光效可以用 UIParticle 接入 UGUI 的排序和遮罩裁剪。制作时还要考虑 Draw Call（DC）：Image、Text 和粒子通常使用不同的纹理或材质。如果它们相互重叠，又必须按“图片 → 粒子 → 文字”的顺序反复穿插，UGUI 就要保留这层遮挡关系，原本有机会合批的元素可能被拆成多个绘制批次。
+因此，美术和研发应在制作时约定好分层，例如把底光放在图标下方，把文字留在上方，并限制粒子跨层覆盖的范围。在保持视觉效果的前提下，让渲染状态兼容的元素尽量连续绘制，再用 Frame Debugger 确认实际批次。具体的分层与裁剪方案见《Unity UI的粒子特效的层级处理》。
+六、总结这套动效管理围绕一个播放时间工作：正常播放时用它采样曲线、检查跨过的事件，调试时直接把它定位到需要观察的一帧。把开场和退场约定为 Open、Close 两个配置项以后，做一个普通界面只需选好 Clip；需要特殊表现的界面，再单独配置曲线和帧事件。
+源码阅读入口以下路径以 AlloyFramework 仓库为根目录。
+
+
+
+源码
+阅读重点
+
+
+
+Runtime/Framework/UI/Animation/UIAnimationPlayer.cs
+时间推进、曲线采样、事件派发及播放完成
+
+
+Runtime/Framework/UI/Animation/UIAnimationDefinition.cs
+Key、Clip、时间来源与循环配置
+
+
+Runtime/Framework/UI/Base/UIView.cs
+开关场动效入口和帧事件订阅
+
+
+Runtime/Framework/UI/UIManager.cs
+开关场任务与界面生命周期的衔接
+
+
+Editor/UIAnimation/UIAnimationPlayerInspector.cs
+编辑与运行模式预览、逐帧与跳转操作
+
+
+]]></content>
+      <tags>
+        <tag>UnityFramework</tag>
+      </tags>
   </entry>
   <entry>
     <title></title>
