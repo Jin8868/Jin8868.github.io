@@ -7044,14 +7044,6 @@ eventTime &gt; previousTime &amp;&amp; eventTime &lt;= currentTime
 播放器通过 AnimationEventReceived 派发事件，UIView 暴露同一个订阅入口。下面是业务 Controller 中的一段示例。事件配置留在各界面的播放器上，因此两个界面即使共用同一个 Clip，也可以只让其中一个界面播放音效 B。
 protected override void OnCreate()&#123;    View.AnimationEventReceived += HandleAnimationEvent;&#125;protected override void OnDispose()&#123;    View.AnimationEventReceived -= HandleAnimationEvent;&#125;private void HandleAnimationEvent(UIAnimationEventContext context)&#123;    if (context.AnimationKey == UIAnimationKeys.OPEN &amp;&amp;        context.EventKey == UIAnimationEventKeys.IMPACT)    &#123;        // 播放音效 B。    &#125;&#125;
 
-这就引出一个问题：如果卡顿跨过了事件时间，回调触发时，玩家看到的还是事件对应的画面吗？
-假设开场 Clip 长 0.30 秒，Impact 配在效果 A 出现的 0.20 秒。上次更新时，动画已经播到 0.18 秒。随后主线程卡顿，两次更新实际相隔 120 毫秒。
-普通 UI 动效怎么处理？ AlloyFramework 按经过的时间推进动画。默认的 Unscaled 模式取 Unity 的 unscaledDeltaTime 作为本次时间增量 frameDelta，所以这里是 0.12 秒；如果配置为受游戏时间缩放影响，则取 deltaTime。对于非循环的开场动效，播放器将时间增量加到上次的播放位置，再用 Clip 时长限制采样位置：
-var nextTime = previousTime + frameDelta;var sampledTime = Mathf.Min(nextTime, duration);
-
-代入上面的数值，sampledTime = min(0.18 + 0.12, 0.30) = 0.30 秒。即使两次更新相隔 0.20 秒，算出的播放位置为 0.38 秒，采样也只取 Clip 末尾的 0.30 秒。播放器先采样这个姿态，再检查 (0.18, 0.30] 内的事件。于是 Impact 会触发，回调中的 context.Time 仍是配置的 0.20 秒，此时界面属性却已经是末帧的值。Unity 手册：时间与帧管理
-怎样避免卡顿恢复后，效果 A 只闪现一帧？ 对普通开关场，当前框架按时间向前采样，跨过事件点就派发通知，跳过的画面无需补画。这样可以避免为了配合音效 B 而突然插入一帧效果 A。代价是卡顿较长时，画面仍可能从 0.18 秒直接跳到 0.30 秒。
-如果某段动效更看重过渡平滑，可以为它单独限制每次更新推进的播放时间。例如将单次推进上限设为 20 毫秒，卡顿 120 毫秒后只从 0.18 秒走到 0.20 秒，超出的 100 毫秒直接舍弃。若下一帧间隔为 16 毫秒，就从 0.20 秒走到 0.216 秒，音效 B 仍按实际走过的动画区间触发。这样恢复后能沿原曲线继续过渡，代价是动效比原计划晚结束，持续低帧率时也会播得更慢。这是按需可选的设计，当前播放器采用前一种策略。
 三、在 Inspector 中预览、逐帧播放和跳转如果某个界面打开时闪了一下，先在 Prefab Mode 打开预制体，选中根节点上的 UIAnimationPlayer，展开 Debug，选择要检查的 Animation Key。场景实例也可以直接预览。例如检查开场时，可以先跳到首帧观察透明度，再往后走一帧看它从什么值开始变化。
 
 
